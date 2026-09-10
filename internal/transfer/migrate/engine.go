@@ -770,7 +770,9 @@ func downloadToCounted(ctx context.Context, dl *model.DownloadURL, w io.Writer, 
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	// This path requests the entire file, without a Range or cache validator.
+	// Partial, pending, and bodyless responses must never become target files.
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("migrate: http %d", resp.StatusCode)
 	}
 	var counter io.Writer = w

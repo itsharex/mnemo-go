@@ -79,6 +79,26 @@ func TestStreamMigrationTransfersCompleteBody(t *testing.T) {
 	}
 }
 
+func TestMigrationDownloadRejectsNonFileResponses(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusNotModified, http.StatusAccepted, http.StatusPartialContent} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if status == http.StatusPartialContent {
+					w.Header().Set("Content-Range", "bytes 5-9/10")
+				}
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, "wrong")
+			}))
+			defer server.Close()
+			var body strings.Builder
+			err := downloadTo(context.Background(), &model.DownloadURL{URL: server.URL}, &body)
+			if err == nil || body.Len() != 0 {
+				t.Fatalf("invalid response accepted: status=%d err=%v body=%q", status, err, body.String())
+			}
+		})
+	}
+}
+
 func TestCommonHashMethod(t *testing.T) {
 	cases := []struct {
 		name string

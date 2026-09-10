@@ -97,6 +97,22 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('视频切换账号时保存旧账号进度并重新获取播放地址', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+    api.pinFileSnapshot.mockResolvedValue(undefined)
+    api.getSettings.mockResolvedValue({ playbackResume: false })
+    api.savePlayCursor.mockResolvedValue(undefined)
+    api.playVideo.mockImplementation(async user => ({ url: `https://example.test/${user}.mp4`, stream_type: 'mp4', qualities: [] }))
+    const wrapper = mountAttached(PlayerPanel, { props: { account: { user_id: 'first', drive_id: 'drive' }, file: { file_id: 'video', name: 'video.mp4' } } })
+    await flushPromises()
+    document.querySelector('video').currentTime = 42
+    await wrapper.setProps({ account: { user_id: 'second', drive_id: 'drive' } })
+    await flushPromises()
+    expect(api.savePlayCursor).toHaveBeenCalledWith('first', 'drive', 'video', 42)
+    expect(api.playVideo).toHaveBeenLastCalledWith('second', 'drive', 'video')
+    expect(wrapper.vm.src).toBe('https://example.test/second.mp4')
+  })
   it('连续切换视频清晰度时只采用最后一次选择', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
     vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})

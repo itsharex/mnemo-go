@@ -123,9 +123,9 @@ onMounted(() => {
   window.addEventListener('resize', onWindowResize)
   startPlayback()
 })
-watch(() => props.file?.file_id, (nextId, previousId) => {
-  if (!nextId || nextId === previousId || unmounted) return
-  saveCursor(previousId)
+watch(() => [props.account.user_id, props.account.drive_id, props.file?.file_id], ([userID, driveID, nextId], [previousUser, previousDrive, previousId]) => {
+  if (!nextId || unmounted || (userID === previousUser && driveID === previousDrive && nextId === previousId)) return
+  saveCursor(previousId, previousUser, previousDrive)
   if (saveTimer) {
     clearInterval(saveTimer)
     saveTimer = null
@@ -161,6 +161,8 @@ function isVideoFile(file) {
 
 async function startPlayback() {
   const seq = ++playbackSeq
+  const { user_id: userID, drive_id: driveID } = props.account
+  const file = props.file
   sourceSeq++
   if (saveTimer) {
     clearInterval(saveTimer)
@@ -190,15 +192,16 @@ async function startPlayback() {
   pendingResume = 0
   clearVideoSource()
   try {
-    await pinFileSnapshot(props.account.user_id, props.account.drive_id, props.file)
+    await pinFileSnapshot(userID, driveID, file)
     if (unmounted || seq !== playbackSeq) return
     const settings = await getSettings().catch(() => null)
+    if (unmounted || seq !== playbackSeq) return
     let resumeAt = 0
     if (!settings || settings.playbackResume !== false) {
-      resumeAt = await getPlayCursor(props.account.user_id, props.account.drive_id, props.file.file_id).catch(() => 0)
+      resumeAt = await getPlayCursor(userID, driveID, file.file_id).catch(() => 0)
     }
     if (unmounted || seq !== playbackSeq) return
-    const preview = await playVideo(props.account.user_id, props.account.drive_id, props.file.file_id)
+    const preview = await playVideo(userID, driveID, file.file_id)
     if (unmounted || seq !== playbackSeq) return
     setQualityOptions(preview)
     if (preview && Number.isFinite(preview.duration) && preview.duration > 0) duration.value = preview.duration
@@ -1131,20 +1134,20 @@ function closeMenu() {
 }
 
 // ---- save cursor ----
-function saveCursor(fileId = props.file?.file_id) {
+function saveCursor(fileId = props.file?.file_id, userID = props.account.user_id, driveID = props.account.drive_id) {
   if (playbackEnded) {
-    clearPlayCursor(fileId)
+    clearPlayCursor(fileId, userID, driveID)
     return
   }
   const v = videoEl.value
   if (!v || !v.currentTime || v.currentTime < 1) return
   if (!fileId) return
-  savePlayCursor(props.account.user_id, props.account.drive_id, fileId, v.currentTime + tsTimeBase).catch(() => {})
+  savePlayCursor(userID, driveID, fileId, v.currentTime + tsTimeBase).catch(() => {})
 }
 
-function clearPlayCursor(fileId = props.file?.file_id) {
+function clearPlayCursor(fileId = props.file?.file_id, userID = props.account.user_id, driveID = props.account.drive_id) {
   if (!fileId) return
-  savePlayCursor(props.account.user_id, props.account.drive_id, fileId, 0).catch(() => {})
+  savePlayCursor(userID, driveID, fileId, 0).catch(() => {})
 }
 
 let qualitySeq = 0

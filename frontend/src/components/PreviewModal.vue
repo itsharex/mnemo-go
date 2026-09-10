@@ -183,11 +183,13 @@ function loadImageBitmap(url) {
 async function loadImage() {
   const seq = ++imgSeq
   const file = activeFile.value
+  const { user_id: userID, drive_id: driveID } = props.account
   imgSwitching.value = true
   error.value = ''
   try {
-    await PinFileSnapshot(props.account.user_id, props.account.drive_id, file)
-    const previewUrl = await PreviewURL(props.account.user_id, props.account.drive_id, file.file_id)
+    await PinFileSnapshot(userID, driveID, file)
+    if (seq !== imgSeq) return
+    const previewUrl = await PreviewURL(userID, driveID, file.file_id)
     const im = await loadImageBitmap(previewUrl) // 等像素就绪再换层，避免白屏
     if (seq !== imgSeq) return
     const frozen = liveTransform.value
@@ -740,6 +742,8 @@ async function loadPreview() {
   textController = null
   if (kind.value === 'image') return loadImage()
   ++imgSeq
+  const file = activeFile.value
+  const { user_id: userID, drive_id: driveID } = props.account
   // 切曲/换图时保留已渲染舞台，避免整屏闪烁；仅首次或空态才展示全屏 loading
   if (!url.value) loading.value = true
   error.value = ''
@@ -749,19 +753,21 @@ async function loadPreview() {
       throw new Error(kind.value === 'pdf' ? 'PDF 暂不支持在线预览，请下载后查看' : '此文件格式不支持在线预览，请下载后查看')
     }
     await PinFileSnapshot(
-      props.account.user_id,
-      props.account.drive_id,
-      activeFile.value
+      userID,
+      driveID,
+      file
     )
+    if (seq !== loadSeq) return
     const previewUrl = await PreviewURL(
-      props.account.user_id,
-      props.account.drive_id,
-      activeFile.value.file_id
+      userID,
+      driveID,
+      file.file_id
     )
     if (seq !== loadSeq) return
     if (kind.value === 'audio') {
-      pendingAudioResume = await getPlayCursor(props.account.user_id, props.account.drive_id, activeFile.value.file_id).catch(() => 0)
+      const resume = await getPlayCursor(userID, driveID, file.file_id).catch(() => 0)
       if (seq !== loadSeq) return
+      pendingAudioResume = resume
       audioPos.value = 0
       audioDur.value = 0
       audioBuffered.value = 0
@@ -789,7 +795,7 @@ async function loadPreview() {
 }
 
 watch(() => props.file, (f) => { if (f) activeFile.value = f })
-watch(() => activeFile.value.file_id, loadPreview)
+watch(() => [props.account.user_id, props.account.drive_id, activeFile.value.file_id], loadPreview)
 
 function onKey(e) {
   if (isImmersive.value && (e.ctrlKey || e.metaKey || e.altKey || e.target?.closest?.('input, textarea, select, button, [contenteditable="true"]'))) return

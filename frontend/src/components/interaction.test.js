@@ -97,6 +97,19 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('不同账号使用相同文件 ID 时重新加载预览', async () => {
+    api.PinFileSnapshot.mockResolvedValue(undefined)
+    api.getPlayCursor.mockResolvedValue(0)
+    api.savePlayCursor.mockResolvedValue(undefined)
+    api.PreviewURL.mockImplementation(async (user) => `https://example.test/${user}.wav`)
+    const wrapper = mountAttached(PreviewModal, { props: { account: { user_id: 'first', drive_id: 'drive' }, file: { file_id: '/song.wav', name: 'song.wav' } } })
+    await flushPromises()
+    expect(wrapper.vm.url).toBe('https://example.test/first.wav')
+    await wrapper.setProps({ account: { user_id: 'second', drive_id: 'drive' } })
+    await flushPromises()
+    expect(api.PreviewURL).toHaveBeenLastCalledWith('second', 'drive', '/song.wav')
+    expect(wrapper.vm.url).toBe('https://example.test/second.wav')
+  })
   it('切换文本文件后旧响应不得覆盖新内容，关闭时取消读取', async () => {
     vi.spyOn(api, 'openKindOf').mockReturnValue('text')
     api.PreviewURL.mockImplementation(async (_user, _drive, id) => `https://example.test/${id}`)

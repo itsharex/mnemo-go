@@ -5,7 +5,7 @@ import {
   move, copy, favorite, createShare, uploadFiles, validateUploadFiles, migrateFiles, download,
   AddFavorite, RemoveFavorite, ListFavorites, OfflineDownload, PickDirectory, PickFiles,
   formatBytes, formatTime, formatTimeParts, iconOf, extOf, openKindOf, copyText,
-  capsOf, providerMetaOf, providerOf, GetDirectoryCache, SaveDirectoryCache, DeleteDirectoryCache, onEvent,
+  capsOf, providerMetaOf, providerOf, accountName, providerIconUrl, GetDirectoryCache, SaveDirectoryCache, DeleteDirectoryCache, onEvent,
 } from '../api'
 import ContextMenu from '../components/ContextMenu.vue'
 import DropdownBtn from '../components/DropdownBtn.vue'
@@ -19,9 +19,12 @@ import TreeNode from '../components/TreeNode.vue'
 import DragDropZone from '../components/DragDropZone.vue'
 import { getPrefs, setPref } from '../appearance'
 import { createNavigationHistory } from '../navigation'
+import { recordAccountHealth } from '../workspace'
 
 const props = defineProps({
   account: Object,
+  keyboardActive: { type: Boolean, default: true },
+  locationKey: { type: String, default: '' },
   accounts: { type: Array, default: () => [] },
   providers: { type: Array, default: () => [] },
 })
@@ -126,6 +129,18 @@ const migrateTarget = ref('') // 目标账号 user_id
 const migrateDir = ref('root')
 const migrateDirName = ref('根目录')
 const migrateDirPick = ref(false)
+const migrationPreview = ref(null), migrationChecking = ref(false)
+async function checkMigration() {
+  if (!migrateTargetAcc.value || migrationChecking.value) return
+  const target = migrateTargetAcc.value, source = props.account, parent = migrateDir.value
+  migrationChecking.value = true
+  try {
+    const result = await window.go.app.App.PreviewMigration(source.user_id, source.drive_id, target.user_id, target.drive_id, parent, (Array.isArray(modalFile.value) ? modalFile.value : [modalFile.value]).map(f => f.file_id))
+    if (props.account?.user_id === source.user_id && migrateTarget.value === target.user_id && migrateDir.value === parent) migrationPreview.value = result
+  } catch(e) { emit('toast', String(e), 'error') }
+  finally { migrationChecking.value = false }
+}
+watch([migrateTarget, migrateDir, modalFile], () => { migrationPreview.value = null })
 
 const uid = computed(() => (props.account ? props.account.user_id : ''))
 const did = computed(() => (props.account ? props.account.drive_id : ''))
@@ -301,6 +316,7 @@ async function load(id) {
     else if (snapMode === 'search') list = snapKw ? (await search(snapUid, snapDid, snapKw.trim())) || [] : []
     else list = (await listDir(snapUid, snapDid, id)) || []
     networkDone = true
+    recordAccountHealth(snapUid)
     // 时序保护：过期响应（账号/目录已切换或有更新请求）直接丢弃
     if (seq !== loadSeq || epoch !== cacheEpoch) return
     files.value = list
@@ -314,6 +330,7 @@ async function load(id) {
     if (snapMode === 'list') updateTreeSnapshot(id, list, snapUid, snapDid)
   } catch (e) {
     networkDone = true
+    recordAccountHealth(snapUid, e)
     if (seq !== loadSeq) return
     if (!displayedCache) {
       error.value = String(e)
@@ -531,7 +548,7 @@ function enterSearch() {
   selected.value = []
   treeSelected.value = ''
   files.value = []
-  nextTick(() => document.getElementById('pan-search')?.focus())
+  nextTick(() => document.getElementById('pan-search-' + props.locationKey)?.focus())
 }
 function goSearch() {
   if (!keyword.value.trim()) return
@@ -555,7 +572,7 @@ function persistLocation() {
   clearTimeout(locSaveTimer)
   locSaveTimer = setTimeout(() => {
     const all = { ...(getPrefs().panLocations || {}) }
-    all[a.user_id] = {
+    all[a.user_id + props.locationKey] = {
       dirId: dirId.value,
       pathStack: pathStack.value,
       treeSelected: treeSelected.value,
@@ -751,7 +768,7 @@ async function openFile(file) {
       await window.go.app.App.OpenPreviewWindow({
         account: { user_id: uid.value, drive_id: did.value },
         file, files: listShown.value, capabilities: caps.value, kind,
-        preferences: Object.fromEntries(['defaultVolume', 'defaultSpeed', 'seekStep', 'autoCloseOnEnd', 'autoLoadSubtitles'].map(key => [key, prefs[key]])),
+        preferences: Object.fromEntries(['defaultVolume', 'defaultSpeed', 'seekStep', 'autoCloseOnEnd', 'autoLoadSubtitles', 'oledBackground'].map(key => [key, prefs[key]])),
       })
     } catch (error) { emit('toast', `打开预览窗口失败：${String(error)}`, 'error') }
   }
@@ -1039,6 +1056,13 @@ async function onDirPicked(target) {
 }
 
 const migrateTargetAcc = computed(() => props.accounts.find((a) => a.user_id === migrateTarget.value) || null)
+watch(migrateTargetAcc, (account, previous) => {
+  if (account?.user_id === previous?.user_id && account?.drive_id === previous?.drive_id) return
+  const meta = providerMetaOf(account, props.providers)
+  migrateDir.value = meta.rootKey || 'root'
+  migrateDirName.value = meta.rootTitle || '根目录'
+  migrateDirPick.value = false
+})
 
 async function doMigrate() {
   const targetAcc = props.accounts.find((a) => a.user_id === migrateTarget.value)
@@ -1164,7 +1188,7 @@ function openPreviewItem(f) {
 
 // ---------- 快捷键 ----------
 function onKey(e) {
-  if (!pageActive || e.defaultPrevented || document.querySelector('[role="dialog"], .ctx-menu, .player-panel')) return
+  if (!props.keyboardActive || !pageActive || e.defaultPrevented || document.querySelector('[role="dialog"], .ctx-menu, .player-panel')) return
   const tag = (e.target.tagName || '').toLowerCase()
   if (tag === 'input' || tag === 'textarea' || tag === 'select') return
   if (!props.account || modal.value) return
@@ -1172,7 +1196,7 @@ function onKey(e) {
   else if (e.code === 'F5') { refresh(); e.preventDefault() }
   else if (e.code === 'Backspace' && mode.value === 'list' && pathStack.value.length) { goUp(); e.preventDefault() }
   else if (e.ctrlKey && e.shiftKey && e.code === 'KeyF') { enterSearch(); e.preventDefault() }
-  else if (e.ctrlKey && e.code === 'KeyF') { document.getElementById('pan-filter')?.focus(); e.preventDefault() }
+  else if (e.ctrlKey && e.code === 'KeyF') { document.getElementById('pan-filter-' + props.locationKey)?.focus(); e.preventDefault() }
   else if (e.ctrlKey && e.shiftKey && e.code === 'KeyN' && caps.value.createFolder) { inputText.value = ''; modal.value = 'mkdir'; e.preventDefault() }
   else if (e.ctrlKey && e.code === 'KeyU' && caps.value.upload && mode.value === 'list') { pickUploadFiles(); e.preventDefault() }
   else if (e.ctrlKey && e.code === 'KeyH') { goHome(); e.preventDefault() }
@@ -1220,7 +1244,7 @@ watch(() => [props.account?.user_id || '', props.account?.drive_id || '', rootKe
   favorites.value = []
   favoriteError.value = ''
   // 恢复该账号上次浏览位置；没有记录时回根目录
-  const saved = (getPrefs().panLocations || {})[a.user_id]
+  const saved = (getPrefs().panLocations || {})[a.user_id + props.locationKey]
   if (saved && saved.dirId && saved.dirId !== rootKey.value) {
     mode.value = 'list'
     keyword.value = ''
@@ -1259,6 +1283,14 @@ function openUploadModal() {
 }
 
 defineExpose({
+  snapshot: () => ({ account: props.account, dirId: dirId.value, path: crumbs.value, files: [...selected.value], mode: mode.value }),
+  navigate: async location => {
+    mode.value = 'list'; selected.value = []; keyword.value = ''
+    dirId.value = location.dirId || rootKey.value
+    pathStack.value = dirId.value === rootKey.value ? [] : [{ id: dirId.value, name: location.name || '目录' }]
+    await load(dirId.value)
+    if (location.file && !location.file.isDir) selected.value = files.value.filter(f => f.file_id === location.file.file_id)
+  },
   navigateHistory,
   refresh,
   openMkdirModal,
@@ -1464,7 +1496,7 @@ onBeforeUnmount(() => {
               <span v-if="mode === 'search' && caps.search" class="search-quick-wrap">
                 <span class="sq-icon"><UiIcon name="search" :size="13" /></span>
                 <input
-                  id="pan-search"
+                  :id="'pan-search-' + locationKey"
                   class="search-quick"
                   style="width:220px"
                   v-model="keyword"
@@ -1476,7 +1508,7 @@ onBeforeUnmount(() => {
               </span>
               <span class="search-quick-wrap">
                 <span class="sq-icon"><UiIcon name="search" :size="13" /></span>
-                <input id="pan-filter" class="search-quick" v-model="filterRaw" placeholder="快速筛选 (Ctrl+F)" />
+                <input :id="'pan-filter-' + locationKey" class="search-quick" v-model="filterRaw" placeholder="快速筛选 (Ctrl+F)" />
                 <button v-if="filterRaw" class="sq-clear" title="清空筛选" @click="filterRaw = ''"><UiIcon name="close" :size="11" /></button>
               </span>
             </div>
@@ -1701,6 +1733,12 @@ onBeforeUnmount(() => {
 
     <!-- 跨盘迁移 -->
     <Modal v-if="modal === 'migrate'" title="迁移到其他网盘" @close="modal = null">
+      <p v-if="migrationPreview" class="hint">{{ migrationPreview.files }} 个文件 · {{ formatBytes(migrationPreview.bytes) }}<template v-if="migrationPreview.conflicts.length"> · {{ migrationPreview.conflicts.length }} 个同名项目：{{ migrationPreview.conflicts.slice(0,5).join('、') }}，按网盘冲突策略处理</template></p>
+      <p v-for="warning in migrationPreview?.warnings || []" :key="warning" role="alert">{{ warning }}</p>
+      <div class="field">
+        <label>来源账号</label>
+        <div class="account-inline"><img :src="providerIconUrl(providerMetaOf(account, providers))" alt="" />{{ providerMetaOf(account, providers).label }} · {{ accountName(account) }}</div>
+      </div>
       <div class="field">
         <label>目标账号</label>
         <UiSelect
@@ -1708,7 +1746,7 @@ onBeforeUnmount(() => {
           block
           :disabled="modalBusy"
           placeholder="选择目标账号"
-          :options="migrateAccounts.map((a) => ({ value: a.user_id, label: (a.token && (a.token.nick_name || a.token.user_name)) || a.user_id }))"
+          :options="migrateAccounts.map((a) => ({ value: a.user_id, label: `${providerMetaOf(a, providers).label} · ${accountName(a)}`, img: providerIconUrl(providerMetaOf(a, providers)) }))"
         />
         <div class="hint" v-if="!migrateAccounts.length">没有其他可用账号，请先在左侧添加网盘账号</div>
       </div>
@@ -1721,7 +1759,8 @@ onBeforeUnmount(() => {
       </div>
       <template #actions>
         <button class="btn" :disabled="modalBusy" @click="modal = null">取消</button>
-        <button class="btn primary" :disabled="!migrateTarget || modalBusy" @click="doMigrate">
+        <button class="btn" :disabled="!migrateTarget || modalBusy || migrationChecking" @click="checkMigration">{{ migrationChecking ? '检查中…' : '检查' }}</button>
+        <button class="btn primary" :disabled="!migrateTarget || modalBusy || migrationChecking" @click="doMigrate">
           <span v-if="modalBusy" class="spin spin-on-primary"></span>
           {{ modalBusy ? '创建任务中…' : '开始迁移' }}
         </button>

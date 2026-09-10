@@ -17,6 +17,7 @@ async function start() {
     window.__mnemoPreviewDrain = () => Promise.allSettled([...pending])
     window.__mnemoPreviewPrefs = seed.preferences || {}
     document.documentElement.classList.add('dark', 'preview-window')
+    document.documentElement.classList.toggle('oled', seed.preferences?.oledBackground === true)
     const { default: PreviewWindow } = await import('./PreviewWindow.vue')
     createApp(PreviewWindow, { seed }).mount('#app')
   } else {

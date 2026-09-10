@@ -77,11 +77,11 @@
 
 /* ---------- 深色：表面与紫色强调协调适配 ---------- */
 html.dark {
-  --bg-base: #131020;
-  --bg-surface: #1d1830;
-  --bg-hover: #2a2342;
+  --bg-base: #121212;
+  --bg-surface: #1b1b1b;
+  --bg-hover: #2a2a2a;
   --bg-active: #3b2d63;
-  --bg-subtle: #241e3a;
+  --bg-subtle: #222222;
 
   --text-primary: #f1eefb;
   --text-secondary: #a29ec0;
@@ -94,7 +94,7 @@ html.dark {
   --border-lighter: #241e3a;
   --border-focus: #a78bfa;
 
-  --control-bg: #1d1830;
+  --control-bg: #1b1b1b;
   --control-border: #453a6b;
   --control-border-hover: #6e6890;
   --control-placeholder: #a29ec0;
@@ -118,7 +118,7 @@ html.dark {
   --listselectbg: color-mix(in srgb, var(--color-primary) 18%, transparent);
 
   /* 暗色抬升面：弹层/卡片与底面拉开层次 */
-  --bg-elevated: #282040;
+  --bg-elevated: #262626;
 
   --ring-focus: 0 0 0 2px color-mix(in srgb, var(--color-primary) 45%, transparent);
 
@@ -129,4 +129,13 @@ html.dark {
   --ft-archive: #fbbf24;
   --ft-doc: #a78bfa;
   --ft-file: #6e6890;
+}
+
+/* OLED 仅替换静态背景，强调色、文字、边框及交互反馈保持原样。 */
+html.dark.oled {
+  --bg-base: #000000;
+  --bg-surface: #000000;
+  --bg-subtle: #000000;
+  --bg-elevated: #000000;
+  --control-bg: #000000;
 }

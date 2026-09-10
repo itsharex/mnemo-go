@@ -1,16 +1,16 @@
 export namespace app {
-	
+
 	export class CheckUpdateResult {
 	    available: boolean;
 	    version: string;
 	    url: string;
 	    size: number;
 	    notes: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new CheckUpdateResult(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.available = source["available"];
@@ -18,6 +18,40 @@ export namespace app {
 	        this.url = source["url"];
 	        this.size = source["size"];
 	        this.notes = source["notes"];
+	    }
+	}
+	export class MigrationPreview {
+	    files: number;
+	    bytes: number;
+	    conflicts: string[];
+	    warnings: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new MigrationPreview(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.files = source["files"];
+	        this.bytes = source["bytes"];
+	        this.conflicts = source["conflicts"];
+	        this.warnings = source["warnings"];
+	    }
+	}
+	export class MigrationVerification {
+	    id: string;
+	    status: string;
+	    detail: string;
+
+	    static createFrom(source: any = {}) {
+	        return new MigrationVerification(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.status = source["status"];
+	        this.detail = source["detail"];
 	    }
 	}
 	export class PreviewWindowAccount {
@@ -79,11 +113,11 @@ export namespace app {
 	    Meta: drive.Meta;
 	    Capabilities: drive.Capabilities;
 	    Login: drive.LoginConfig;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ProviderInfo(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.ID = source["ID"];
@@ -91,7 +125,7 @@ export namespace app {
 	        this.Capabilities = this.convertValues(source["Capabilities"], drive.Capabilities);
 	        this.Login = this.convertValues(source["Login"], drive.LoginConfig);
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -114,7 +148,7 @@ export namespace app {
 }
 
 export namespace drive {
-	
+
 	export class Capabilities {
 	    provider: string;
 	    mountedStorage: boolean;
@@ -156,11 +190,11 @@ export namespace drive {
 	    provideHashes: string[];
 	    rapidUploadHashes: string[];
 	    uploadConflictPolicies: string[];
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Capabilities(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.provider = source["provider"];
@@ -209,18 +243,18 @@ export namespace drive {
 	    items: model.File[];
 	    nextMarker?: string;
 	    total?: number;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new DirPage(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.items = this.convertValues(source["items"], model.File);
 	        this.nextMarker = source["nextMarker"];
 	        this.total = source["total"];
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -242,11 +276,11 @@ export namespace drive {
 	export class FileRef {
 	    id: string;
 	    isDir?: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new FileRef(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -256,11 +290,11 @@ export namespace drive {
 	export class LoginOption {
 	    value: string;
 	    label: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new LoginOption(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.value = source["value"];
@@ -275,11 +309,11 @@ export namespace drive {
 	    hint?: string;
 	    placeholder?: string;
 	    options?: LoginOption[];
-	
+
 	    static createFrom(source: any = {}) {
 	        return new LoginField(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.key = source["key"];
@@ -290,7 +324,7 @@ export namespace drive {
 	        this.placeholder = source["placeholder"];
 	        this.options = this.convertValues(source["options"], LoginOption);
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -311,16 +345,16 @@ export namespace drive {
 	}
 	export class LoginConfig {
 	    fields: LoginField[];
-	
+
 	    static createFrom(source: any = {}) {
 	        return new LoginConfig(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.fields = this.convertValues(source["fields"], LoginField);
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -339,19 +373,19 @@ export namespace drive {
 		    return a;
 		}
 	}
-	
-	
+
+
 	export class Meta {
 	    key: string;
 	    label: string;
 	    icon: string;
 	    rootKey?: string;
 	    rootTitle?: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Meta(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.key = source["key"];
@@ -364,11 +398,11 @@ export namespace drive {
 	export class MkdirResult {
 	    file_id: string;
 	    error: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new MkdirResult(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.file_id = source["file_id"];
@@ -380,11 +414,11 @@ export namespace drive {
 	    parent_file_id: string;
 	    name: string;
 	    isDir: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new RenameResult(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.file_id = source["file_id"];
@@ -398,11 +432,11 @@ export namespace drive {
 	    name: string;
 	    size: number;
 	    isDir: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ShareImportFile(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.fileId = source["fileId"];
@@ -422,11 +456,11 @@ export namespace drive {
 	    rootFileId?: string;
 	    files: ShareImportFile[];
 	    extra?: Record<string, string>;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ShareImportSession(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.provider = source["provider"];
@@ -440,7 +474,7 @@ export namespace drive {
 	        this.files = this.convertValues(source["files"], ShareImportFile);
 	        this.extra = source["extra"];
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -465,11 +499,11 @@ export namespace drive {
 	    shareName: string;
 	    expiration?: string;
 	    password?: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ShareParams(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.fileIds = source["fileIds"];
@@ -478,7 +512,7 @@ export namespace drive {
 	        this.expiration = source["expiration"];
 	        this.password = source["password"];
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -501,7 +535,7 @@ export namespace drive {
 }
 
 export namespace model {
-	
+
 	export class Quota {
 	    type: string;
 	    size: number;
@@ -512,11 +546,11 @@ export namespace model {
 	    updated_at?: number;
 	    expired?: string;
 	    description?: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Quota(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.type = source["type"];
@@ -543,11 +577,11 @@ export namespace model {
 	    forcePathStyle?: boolean;
 	    sessionToken?: string;
 	    allowPrivateNetwork?: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ConnConfig(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
@@ -601,11 +635,11 @@ export namespace model {
 	    vipIcon?: string;
 	    vipexpire?: string;
 	    conn?: ConnConfig;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new TokenInfo(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.tokenfrom = source["tokenfrom"];
@@ -645,7 +679,7 @@ export namespace model {
 	        this.vipexpire = source["vipexpire"];
 	        this.conn = this.convertValues(source["conn"], ConnConfig);
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -673,11 +707,11 @@ export namespace model {
 	    custom_name?: string;
 	    custom_icon?: string;
 	    usage?: Quota;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Account(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.user_id = source["user_id"];
@@ -689,7 +723,7 @@ export namespace model {
 	        this.custom_icon = source["custom_icon"];
 	        this.usage = this.convertValues(source["usage"], Quota);
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -708,7 +742,7 @@ export namespace model {
 		    return a;
 		}
 	}
-	
+
 	export class DownloadTask {
 	    id: string;
 	    user_id: string;
@@ -728,11 +762,11 @@ export namespace model {
 	    created: number;
 	    updated: number;
 	    concurrency?: number;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new DownloadTask(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -767,11 +801,11 @@ export namespace model {
 	    concurrency?: number;
 	    chunkSize?: number;
 	    allow_private_network?: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new DownloadURL(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.drive_id = source["drive_id"];
@@ -822,11 +856,11 @@ export namespace model {
 	    media_play_cursor?: string;
 	    media_time?: string;
 	    user_meta?: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new File(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.drive_id = source["drive_id"];
@@ -865,7 +899,36 @@ export namespace model {
 	        this.user_meta = source["user_meta"];
 	    }
 	}
+	export class MigrateItem {
+	    targetId?: string;
+	    isDir: boolean;
+	    id: string;
+	    name: string;
+	    parentId: string;
+	    status: string;
+	    error?: string;
+	    verification: string;
+	    size: number;
+
+	    static createFrom(source: any = {}) {
+	        return new MigrateItem(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.targetId = source["targetId"];
+	        this.isDir = source["isDir"];
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.parentId = source["parentId"];
+	        this.status = source["status"];
+	        this.error = source["error"];
+	        this.verification = source["verification"];
+	        this.size = source["size"];
+	    }
+	}
 	export class MigrateJob {
+	    items?: Record<string, MigrateItem>;
 	    id: string;
 	    srcUser: string;
 	    srcDrive: string;
@@ -886,13 +949,14 @@ export namespace model {
 	    targetDirectoryIDs?: Record<string, string>;
 	    createdAt?: number;
 	    updatedAt?: number;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new MigrateJob(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.items = this.convertValues(source["items"], MigrateItem, true);
 	        this.id = source["id"];
 	        this.srcUser = source["srcUser"];
 	        this.srcDrive = source["srcDrive"];
@@ -914,6 +978,24 @@ export namespace model {
 	        this.createdAt = source["createdAt"];
 	        this.updatedAt = source["updatedAt"];
 	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class OfflineTask {
 	    id: string;
@@ -930,11 +1012,11 @@ export namespace model {
 	    created_time?: string;
 	    updated_time?: string;
 	    created: number;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new OfflineTask(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -953,7 +1035,7 @@ export namespace model {
 	        this.created = source["created"];
 	    }
 	}
-	
+
 	export class ShareHistoryEntry {
 	    share_id: string;
 	    account_id: string;
@@ -964,11 +1046,11 @@ export namespace model {
 	    share_name: string;
 	    created_at: number;
 	    provider: string;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ShareHistoryEntry(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.share_id = source["share_id"];
@@ -1011,11 +1093,11 @@ export namespace model {
 	    status?: string;
 	    updated_at?: string;
 	    is_share_saved?: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ShareItem(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.account_id = source["account_id"];
@@ -1052,11 +1134,11 @@ export namespace model {
 	    language: string;
 	    url: string;
 	    headers?: Record<string, string>;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Subtitle(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.language = source["language"];
@@ -1064,7 +1146,7 @@ export namespace model {
 	        this.headers = source["headers"];
 	    }
 	}
-	
+
 	export class UploadInfo {
 	    localFilePath: string;
 	    parent_file_id: string;
@@ -1080,11 +1162,11 @@ export namespace model {
 	    crc64: string;
 	    conflictPolicy?: string;
 	    cleanupLocalFile?: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new UploadInfo(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.localFilePath = source["localFilePath"];
@@ -1120,11 +1202,11 @@ export namespace model {
 	    upload_id: string;
 	    file_id: string;
 	    IsBreakExist: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new UploadState(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.DownState = source["DownState"];
@@ -1150,11 +1232,11 @@ export namespace model {
 	    user_id: string;
 	    Info: UploadInfo;
 	    Upload: UploadState;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new UploadingUI(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.UploadID = source["UploadID"];
@@ -1162,7 +1244,7 @@ export namespace model {
 	        this.Info = this.convertValues(source["Info"], UploadInfo);
 	        this.Upload = this.convertValues(source["Upload"], UploadState);
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -1193,11 +1275,11 @@ export namespace model {
 	    expire_time?: number;
 	    headers?: Record<string, string>;
 	    forceProxy?: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new VideoQuality(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.html = source["html"];
@@ -1229,11 +1311,11 @@ export namespace model {
 	    current_quality?: string;
 	    stream_type?: string;
 	    allow_private_network?: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new VideoPreview(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.drive_id = source["drive_id"];
@@ -1252,7 +1334,7 @@ export namespace model {
 	        this.stream_type = source["stream_type"];
 	        this.allow_private_network = source["allow_private_network"];
 	    }
-	
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -1275,7 +1357,45 @@ export namespace model {
 }
 
 export namespace store {
-	
+
+	export class CachedSearchResult {
+	    userId: string;
+	    driveId: string;
+	    parentId: string;
+	    updatedAt: number;
+	    file: model.File;
+
+	    static createFrom(source: any = {}) {
+	        return new CachedSearchResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.userId = source["userId"];
+	        this.driveId = source["driveId"];
+	        this.parentId = source["parentId"];
+	        this.updatedAt = source["updatedAt"];
+	        this.file = this.convertValues(source["file"], model.File);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class Favorite {
 	    user_id: string;
 	    drive_id: string;
@@ -1283,11 +1403,11 @@ export namespace store {
 	    name: string;
 	    isDir: boolean;
 	    added: number;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Favorite(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.user_id = source["user_id"];
@@ -1306,11 +1426,11 @@ export namespace store {
 	    color: string;
 	    tag_id: string;
 	    created: number;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new LocalTag(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.user_id = source["user_id"];
@@ -1336,11 +1456,11 @@ export namespace store {
 	    keepTasks: boolean;
 	    logLevel?: string;
 	    closeToTray?: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.theme = source["theme"];
@@ -1362,8 +1482,85 @@ export namespace store {
 }
 
 export namespace sync {
-	
+
+	export class Entry {
+	    scope?: string;
+	    modTimeNano?: number;
+	    localTimeNano?: number;
+	    paired?: boolean;
+	    localSize?: number;
+	    localTime?: number;
+	    remoteSize?: number;
+	    remoteTime?: number;
+	    localPath: string;
+	    remoteId: string;
+	    remoteName: string;
+	    size: number;
+	    modTime: number;
+	    hash?: string;
+	    isDir: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new Entry(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.scope = source["scope"];
+	        this.modTimeNano = source["modTimeNano"];
+	        this.localTimeNano = source["localTimeNano"];
+	        this.paired = source["paired"];
+	        this.localSize = source["localSize"];
+	        this.localTime = source["localTime"];
+	        this.remoteSize = source["remoteSize"];
+	        this.remoteTime = source["remoteTime"];
+	        this.localPath = source["localPath"];
+	        this.remoteId = source["remoteId"];
+	        this.remoteName = source["remoteName"];
+	        this.size = source["size"];
+	        this.modTime = source["modTime"];
+	        this.hash = source["hash"];
+	        this.isDir = source["isDir"];
+	    }
+	}
+	export class Change {
+	    path: string;
+	    action: string;
+	    local?: Entry;
+	    remote?: Entry;
+
+	    static createFrom(source: any = {}) {
+	        return new Change(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.action = source["action"];
+	        this.local = this.convertValues(source["local"], Entry);
+	        this.remote = this.convertValues(source["remote"], Entry);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class Config {
+	    conflictPolicy?: string;
 	    id: string;
 	    name: string;
 	    user_id: string;
@@ -1375,13 +1572,14 @@ export namespace sync {
 	    enabled: boolean;
 	    intervalMin: number;
 	    deletePropagation: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.conflictPolicy = source["conflictPolicy"];
 	        this.id = source["id"];
 	        this.name = source["name"];
 	        this.user_id = source["user_id"];
@@ -1394,6 +1592,43 @@ export namespace sync {
 	        this.intervalMin = source["intervalMin"];
 	        this.deletePropagation = source["deletePropagation"];
 	    }
+	}
+
+	export class Plan {
+	    snapshotTotal: number;
+	    token: string;
+	    changes: Change[];
+	    blocked?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new Plan(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.snapshotTotal = source["snapshotTotal"];
+	        this.token = source["token"];
+	        this.changes = this.convertValues(source["changes"], Change);
+	        this.blocked = source["blocked"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

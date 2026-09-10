@@ -2,9 +2,10 @@
 // 账号快切栏（复刻旧版 AccountRail）：默认 60px 窄图标栏，悬停展开为 220px 显示名称与用量。
 import { computed, ref, onBeforeUnmount, watch } from 'vue'
 import { providerOf, accountName, providerIconUrl, providerMetaOf } from '../api'
-import { getPrefs, setPref } from '../appearance'
+import { useOrderedAccounts, setPref } from '../appearance'
 import ContextMenu from './ContextMenu.vue'
 import UiIcon from './UiIcon.vue'
+import { accountHealth, healthLabels } from '../workspace'
 
 const props = defineProps({
   accounts: { type: Array, default: () => [] },
@@ -17,6 +18,7 @@ const expanded = ref(false)
 const railEl = ref(null)
 const menu = ref(null)
 let hovering = false
+let keyboardFocus = false
 let cancelDrag = null
 let clickTimer = null
 let enterTimer = null
@@ -34,18 +36,15 @@ const liveList = ref(null) // 拖拽中的实时顺序
 const bumpMap = ref({})    // 被挤动项的碰撞果冻：user_id -> { dir, delay }
 let suppressClick = false
 
-const orderedAccounts = computed(() => {
-  if (liveList.value) return liveList.value
-  const order = Array.isArray(getPrefs().accountOrder) ? getPrefs().accountOrder : []
-  if (!order.length) return props.accounts
-  const known = [...new Set(order)]
-    .map((id) => props.accounts.find((a) => a.user_id === id))
-    .filter(Boolean)
-  const unknown = props.accounts.filter((a) => !order.includes(a.user_id))
-  return [...known, ...unknown]
-})
+const savedAccounts = useOrderedAccounts(() => props.accounts)
+const orderedAccounts = computed(() => liveList.value || savedAccounts.value)
+const displayAccounts = computed(() => new Map(props.accounts.map(acc => [acc.user_id, {
+  name: accountName(acc),
+  icon: providerIconUrl(providerMetaOf(acc, props.providers)),
+}])))
 
 function onItemPointerDown(e, acc) {
+  keyboardFocus = false
   if (e.button !== 0) return
   cancelDrag?.()
   clearTimeout(clickTimer)
@@ -222,6 +221,7 @@ function onItemPointerDown(e, acc) {
     }
     dragging = false
     bumpMap.value = {}
+    if (!hovering) scheduleCollapse()
   }
   const onDragKey = (ev) => {
     if (ev.key !== 'Escape') return
@@ -262,7 +262,7 @@ function scheduleCollapse() {
   clearTimeout(enterTimer)
   clearTimeout(leaveTimer)
   leaveTimer = setTimeout(() => {
-    if (!hovering && !menu.value && !railEl.value?.contains(document.activeElement)) expanded.value = false
+    if (!hovering && !menu.value && !(keyboardFocus && railEl.value?.contains(document.activeElement))) expanded.value = false
   }, 200)
 }
 
@@ -275,6 +275,7 @@ watch(() => props.accounts.map(a => a.user_id).join('\n'), () => {
 })
 
 function onRailKey(e, acc) {
+  keyboardFocus = true
   if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
     e.preventDefault()
     onCtx(e, acc)
@@ -319,8 +320,7 @@ function quotaPct(acc) {
 function hasQuota(acc) { return acc.usage && acc.usage.size > 0 }
 
 function iconOfAcc(acc) {
-  const meta = providerMetaOf(acc, props.providers)
-  return providerIconUrl(meta)
+  return displayAccounts.value.get(acc.user_id)?.icon
 }
 
 function labelOfAcc(acc) {
@@ -344,7 +344,7 @@ const menuItems = computed(() => {
   if (!acc) return []
   return [
     { icon: 'info', label: '账号信息', action: 'info' },
-    { icon: 'camera', label: '自定义截图', action: 'rename' },
+    { icon: 'pencil', label: '自定义', action: 'rename' },
     { icon: 'trash', label: '移除账号', danger: true, action: 'remove' },
   ]
 })
@@ -390,6 +390,7 @@ function onMenu(action) {
           </span>
           <span class="rail-meta">
             <span class="rail-name">{{ accountName(acc) }}</span>
+            <span v-if="accountHealth[acc.user_id] && accountHealth[acc.user_id].status !== 'ok'" class="rail-sub" style="color:var(--color-warning)">{{ healthLabels[accountHealth[acc.user_id].status] }}</span>
             <span class="rail-sub" v-if="hasQuota(acc)">{{ acc.usage.usedStr }} / {{ acc.usage.sizeStr }}</span>
             <span class="rail-sub" v-else>{{ labelOfAcc(acc) }}</span>
             <span v-if="hasQuota(acc)" class="rail-quota"><i :style="{ width: quotaPct(acc) + '%' }"></i></span>

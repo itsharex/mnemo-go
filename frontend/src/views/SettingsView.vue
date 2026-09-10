@@ -7,8 +7,60 @@ import { getPrefs, setPref } from '../appearance'
 import SegTabs from '../components/SegTabs.vue'
 import UiIcon from '../components/UiIcon.vue'
 import UiSelect from '../components/UiSelect.vue'
+import ConfirmModal from '../components/ConfirmModal.vue'
+import { cleanBackupPrefs } from '../workspace'
+import { ListFavorites, AddFavorite, listAccounts, setAccountCustomMeta as saveAccountMeta } from '../api'
 
 const emit = defineEmits(['toast', 'theme', 'update', 'clear-cache'])
+const backupBusy = ref(false), pendingBackup = ref(null)
+async function exportPrefs() {
+  if (backupBusy.value) return
+  backupBusy.value = true
+  try {
+    const preferences = cleanBackupPrefs(getPrefs())
+    for (const account of await listAccounts()) {
+      if (account.custom_name) preferences.accountAliases[account.user_id] = account.custom_name
+      if (account.custom_icon) preferences.accountIcons[account.user_id] = account.custom_icon
+    }
+    const payload = { format: 'mnemo-preferences', version: 1, preferences: cleanBackupPrefs(preferences), theme: settings.value.theme, favorites: await ListFavorites('', '') }
+    const path = await window.go.app.App.ExportPreferences(JSON.stringify(payload, null, 2))
+    if (path) emit('toast', '偏好已导出', 'success')
+  } catch(e) { emit('toast', String(e), 'error') }
+  finally { backupBusy.value = false }
+}
+async function readBackup() {
+  if (backupBusy.value) return
+  backupBusy.value = true
+  try {
+    const raw = await window.go.app.App.ImportPreferences()
+    if (!raw) return
+    const data = JSON.parse(raw)
+    if (data.format !== 'mnemo-preferences' || data.version !== 1 || !data.preferences || typeof data.preferences !== 'object') throw new Error('不支持的备份格式')
+    const favorites = Array.isArray(data.favorites) ? data.favorites : []
+    if (favorites.length > 10000 || favorites.some(f => !f || ['user_id','drive_id','file_id','name'].some(k => typeof f[k] !== 'string'))) throw new Error('收藏数据无效')
+    pendingBackup.value = { preferences: cleanBackupPrefs(data.preferences), theme: ['light','dark','system'].includes(data.theme) ? data.theme : 'system', favorites }
+  } catch(e) { emit('toast', String(e), 'error') }
+  finally { backupBusy.value = false }
+}
+async function restorePrefs() {
+  const data = pendingBackup.value
+  if (!data || backupBusy.value) return
+  pendingBackup.value = null; backupBusy.value = true
+  try {
+    const accounts = await listAccounts()
+    for (const acc of accounts) {
+      const aliases = data.preferences.accountAliases || {}, icons = data.preferences.accountIcons || {}
+      if (Object.hasOwn(aliases, acc.user_id) || Object.hasOwn(icons, acc.user_id)) await saveAccountMeta(acc.user_id, aliases[acc.user_id] ?? acc.custom_name ?? '', icons[acc.user_id] ?? acc.custom_icon ?? '')
+    }
+    for (const favorite of data.favorites) await AddFavorite(favorite.user_id, favorite.drive_id, favorite)
+    for (const [key, value] of Object.entries(data.preferences)) setPref(key, value)
+    const current = await GetSettings()
+    await SaveSettings({ ...current, theme: data.theme })
+    prefs.value = getPrefs(); settings.value.theme = data.theme; emit('theme', data.theme)
+    emit('toast', '偏好已恢复，账号凭据不受影响', 'success')
+  } catch(e) { emit('toast', '恢复未完成，已恢复的项目会保留，可重试：' + String(e), 'error') }
+  finally { backupBusy.value = false }
+}
 
 const defaults = {
   theme: 'system',
@@ -258,6 +310,7 @@ async function exportLogs() {
 
 <template>
   <div class="settings-layout">
+    <ConfirmModal v-if="pendingBackup" title="恢复偏好" message="将覆盖备份中的偏好并合并收藏，是否继续？账号凭据不会更改。" @cancel="pendingBackup = null" @ok="restorePrefs" />
     <aside class="settings-nav">
       <button
         v-for="g in groups"
@@ -283,6 +336,7 @@ async function exportLogs() {
         <section class="settings-group" id="sg-general">
           <header class="sg-heading"><h2>基础</h2></header>
           <div class="sg-card">
+            <div class="sg-row"><div class="sg-text"><span class="sg-label">偏好备份</span><span class="sg-desc">备份外观、账号名称与图标、排序和收藏，不含登录凭据</span></div><div class="sg-control"><button class="btn" :disabled="backupBusy" @click="exportPrefs">导出</button><button class="btn" :disabled="backupBusy" @click="readBackup">恢复</button></div></div>
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">外观主题</span></div>
               <div class="sg-control">
@@ -309,6 +363,18 @@ async function exportLogs() {
                     <UiIcon name="moon" :size="14" /><span>深色</span>
                   </button>
                 </div>
+              </div>
+            </div>
+
+            <div class="sg-row">
+              <div class="sg-text">
+                <span class="sg-label" id="oled-background-label">OLED 纯黑背景</span>
+                <span class="sg-desc">适用于 OLED 屏幕，仅在深色模式下将背景改为纯黑，主题色保持不变</span>
+              </div>
+              <div class="sg-control">
+                <button type="button" class="switch" role="switch" aria-labelledby="oled-background-label"
+                  :aria-checked="prefs.oledBackground" :class="{ on: prefs.oledBackground }"
+                  @click="onPref('oledBackground', !prefs.oledBackground)"></button>
               </div>
             </div>
 

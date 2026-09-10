@@ -246,3 +246,38 @@ func (a *App) handleSyncLog(jobID, event, detail string) {
 }
 
 var _ = store.Settings{}
+
+func (a *App) PreviewSync(id string) (*sync.Plan, error) {
+	st, err := a.storeOrError()
+	if err != nil {
+		return nil, err
+	}
+	if a.isSyncRunning(id) {
+		return nil, fmt.Errorf("同步正在运行，请先停止")
+	}
+	cfg, err := st.GetSyncConfig(id)
+	if err != nil {
+		return nil, err
+	}
+	return a.newSyncEngine(st, false).Preview(a.appContext(), cfg)
+}
+
+func (a *App) RunSyncPlan(id, token string, choices map[string]string) (runErr error) {
+	if token == "" {
+		return fmt.Errorf("请先预览同步计划")
+	}
+	st, err := a.storeOrError()
+	if err != nil {
+		return err
+	}
+	cfg, err := st.GetSyncConfig(id)
+	if err != nil {
+		return err
+	}
+	ctx, finish, err := a.beginSyncRun(a.appContext(), id, "preview")
+	if err != nil {
+		return err
+	}
+	defer func() { finish(runErr) }()
+	return a.newSyncEngine(st, true).ExecutePlan(ctx, cfg, token, choices)
+}

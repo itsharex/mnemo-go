@@ -18,6 +18,7 @@ import (
 
 // Config describes one sync job.
 type Config struct {
+	ConflictPolicy    string `json:"conflictPolicy,omitempty"`
 	ID                string `json:"id"`
 	Name              string `json:"name"`
 	UserID            string `json:"user_id"`
@@ -33,13 +34,21 @@ type Config struct {
 
 // Entry is one synced file record.
 type Entry struct {
-	LocalPath  string `json:"localPath"`
-	RemoteID   string `json:"remoteId"`
-	RemoteName string `json:"remoteName"`
-	Size       int64  `json:"size"`
-	ModTime    int64  `json:"modTime"`
-	Hash       string `json:"hash,omitempty"`
-	IsDir      bool   `json:"isDir"`
+	Scope         string `json:"scope,omitempty"`
+	ModTimeNano   int64  `json:"modTimeNano,omitempty"`
+	LocalTimeNano int64  `json:"localTimeNano,omitempty"`
+	Paired        bool   `json:"paired,omitempty"`
+	LocalSize     int64  `json:"localSize,omitempty"`
+	LocalTime     int64  `json:"localTime,omitempty"`
+	RemoteSize    int64  `json:"remoteSize,omitempty"`
+	RemoteTime    int64  `json:"remoteTime,omitempty"`
+	LocalPath     string `json:"localPath"`
+	RemoteID      string `json:"remoteId"`
+	RemoteName    string `json:"remoteName"`
+	Size          int64  `json:"size"`
+	ModTime       int64  `json:"modTime"`
+	Hash          string `json:"hash,omitempty"`
+	IsDir         bool   `json:"isDir"`
 }
 
 // SnapshotStore persists sync snapshots (last-sync file lists) so the engine
@@ -95,11 +104,11 @@ func (e *Engine) Run(ctx context.Context, cfg Config) error {
 	var err error
 	switch cfg.Direction {
 	case "push":
-		err = e.push(ctx, cfg)
+		err = e.ExecutePlan(ctx, cfg, "", nil)
 	case "pull":
-		err = e.pull(ctx, cfg)
+		err = e.ExecutePlan(ctx, cfg, "", nil)
 	case "", "two-way":
-		err = e.twoWay(ctx, cfg)
+		err = e.ExecutePlan(ctx, cfg, "", nil)
 	default:
 		err = fmt.Errorf("sync: invalid direction %q", cfg.Direction)
 	}
@@ -116,9 +125,20 @@ func (e *Engine) Run(ctx context.Context, cfg Config) error {
 // returned by drive.ListDir so that nested subdirectories are not skipped.
 func remoteTree(ctx context.Context, cfg Config) ([]Entry, error) {
 	var out []Entry
+	visited := map[string]bool{}
 	var walk func(parentID, relPrefix string) error
 	walk = func(parentID, relPrefix string) error {
-		files, err := drive.ListDirContext(ctx, cfg.UserID, cfg.DriveID, parentID, nil)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if visited[parentID] {
+			return fmt.Errorf("sync: repeated remote directory %s", parentID)
+		}
+		visited[parentID] = true
+		if len(visited) > 100000 || strings.Count(relPrefix, "/") > 128 {
+			return fmt.Errorf("sync: remote tree exceeds scan limit")
+		}
+		files, err := drive.ListDirAllContext(ctx, cfg.UserID, cfg.DriveID, parentID, nil)
 		if err != nil {
 			return err
 		}
@@ -139,6 +159,7 @@ func remoteTree(ctx context.Context, cfg Config) ([]Entry, error) {
 				RemoteName: rel,
 				Size:       f.Size,
 				ModTime:    f.Time,
+				Hash:       f.ContentHashName + ":" + f.ContentHash,
 				IsDir:      false,
 			})
 		}
@@ -165,16 +186,20 @@ func scanLocalFiles(root string) ([]Entry, error) {
 		if info.IsDir() {
 			return nil
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("sync directory contains symbolic link: %s", path)
+		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return fmt.Errorf("resolve local relative path %s: %w", path, err)
 		}
 		local = append(local, Entry{
-			LocalPath:  path,
-			RemoteName: filepath.ToSlash(rel),
-			Size:       info.Size(),
-			ModTime:    info.ModTime().Unix(),
-			IsDir:      false,
+			LocalPath:   path,
+			RemoteName:  filepath.ToSlash(rel),
+			Size:        info.Size(),
+			ModTime:     info.ModTime().Unix(),
+			ModTimeNano: info.ModTime().UnixNano(),
+			IsDir:       false,
 		})
 		return nil
 	})
@@ -491,7 +516,11 @@ func (e *Engine) twoWay(ctx context.Context, cfg Config) error {
 // downloadTo streams a download url to a local file via the segmented engine.
 // It accepts the caller's context so downloads can be cancelled reliably.
 func downloadTo(ctx context.Context, u *model.DownloadURL, path string) error {
+	if u == nil || u.URL == "" {
+		return fmt.Errorf("sync: download URL is empty")
+	}
 	opts := dlengine.Options{}
+	opts.RequestAuth = u.RequestAuth
 	if u.ForceLocalProxy || u.DownloadMode == "proxy" {
 		opts.Concurrency = 1
 	}
@@ -532,10 +561,34 @@ func (e *Engine) propagateRemoteDeletes(ctx context.Context, cfg Config, toDelet
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err := drive.TrashBatchContext(ctx, cfg.UserID, cfg.DriveID, ids)
+	var removed []string
+	var err error
+	caps := drive.RegistryCaps(drive.ProviderOf(cfg.UserID, cfg.DriveID, ""))
+	if caps.RecycleBin {
+		removed, err = drive.TrashBatchContext(ctx, cfg.UserID, cfg.DriveID, ids)
+	} else {
+		refs := make([]drive.FileRef, 0, len(ids))
+		isDir := false
+		for _, id := range ids {
+			refs = append(refs, drive.FileRef{ID: id, IsDir: &isDir})
+		}
+		removed, err = drive.DeleteBatchContext(ctx, cfg.UserID, cfg.DriveID, refs)
+	}
 	if err != nil {
 		e.log(cfg.ID, "delete_error", fmt.Sprintf("remote trash failed: %v", err))
 		return fmt.Errorf("delete remote files: %w", err)
+	}
+	for _, id := range ids {
+		found := false
+		for _, result := range removed {
+			if result == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("remote deletion was not confirmed: %s", id)
+		}
 	}
 	e.log(cfg.ID, "delete", fmt.Sprintf("removed remote files: %v", names))
 	return nil

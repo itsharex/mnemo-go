@@ -1,7 +1,7 @@
 <script setup>
 // 文件夹同步页：本地文件夹与网盘目录的双向/单向同步任务管理。
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { ListSyncConfigs, SaveSyncConfig, DeleteSyncConfig, RunSync, CancelSync, ListRunningSyncIDs, onEvent, accountName, PickDirectory } from '../api'
+import { ListSyncConfigs, SaveSyncConfig, DeleteSyncConfig, RunSync, CancelSync, ListRunningSyncIDs, onEvent, accountName, providerMetaOf, providerIconUrl, PickDirectory } from '../api'
 import Modal from '../components/Modal.vue'
 import SegTabs from '../components/SegTabs.vue'
 import SelectDirModal from '../components/SelectDirModal.vue'
@@ -17,6 +17,25 @@ const props = defineProps({
 const emit = defineEmits(['toast'])
 
 const confirmDialog = ref(null)
+const preview = ref(null), previewJob = ref(null), previewBusy = ref(false), conflictChoices = ref({})
+const actionLabels = { upload: '上传', download: '下载', 'delete-local': '删除本地', 'delete-remote': '删除网盘', conflict: '冲突' }
+async function showPreview(job) {
+  if (previewBusy.value || running.value.has(job.id)) return
+  previewBusy.value = true; previewJob.value = job; preview.value = null; conflictChoices.value = {}
+  try { preview.value = await window.go.app.App.PreviewSync(job.id) }
+  catch(e) { emit('toast', String(e), 'error'); previewJob.value = null }
+  finally { previewBusy.value = false }
+}
+async function executePreview() {
+  if (!preview.value || previewBusy.value || preview.value.blocked) return
+  const job = previewJob.value, plan = preview.value
+  previewBusy.value = true
+  try {
+    await window.go.app.App.RunSyncPlan(job.id, plan.token, { ...conflictChoices.value })
+    previewJob.value = null; preview.value = null; emit('toast', '同步完成', 'success')
+  } catch(e) { preview.value = null; emit('toast', String(e), 'error') }
+  finally { previewBusy.value = false }
+}
 
 const jobs = ref([])
 const progress = ref({}) // id -> { done, total }
@@ -39,7 +58,7 @@ const dirLabel = { 'two-way': '双向', push: '仅上传', pull: '仅下载' }
 const dirArrow = { 'two-way': '⇄', push: '→', pull: '←' }
 
 function emptyForm() {
-  return { name: '', local_dir: '', user_id: '', drive_id: '', remote_dir: 'root', remote_name: '根目录', direction: 'two-way', intervalMin: 0, deletePropagation: false }
+  return { name: '', local_dir: '', user_id: '', drive_id: '', remote_dir: 'root', remote_name: '根目录', direction: 'two-way', intervalMin: 0, deletePropagation: false, conflictPolicy: 'keep-both' }
 }
 
 let refreshSeq = 0
@@ -86,6 +105,7 @@ function openEdit(job) {
     direction: job.direction || 'two-way',
     intervalMin: Number(job.intervalMin) || 0,
     deletePropagation: !!job.deletePropagation,
+    conflictPolicy: job.conflictPolicy || 'keep-both',
   }
   showEdit.value = true
 }
@@ -128,6 +148,7 @@ async function save() {
        enabled: editingId.value ? (jobs.value.find((j) => j.id === editingId.value) || {}).enabled !== false : true,
        intervalMin: Math.max(0, Math.floor(Number(form.value.intervalMin) || 0)),
        deletePropagation: !!form.value.deletePropagation,
+       conflictPolicy: form.value.conflictPolicy,
     })
     if (version === editVersion) showEdit.value = false
     refresh()
@@ -239,6 +260,13 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="syncpage">
+    <Modal v-if="previewJob" title="同步预览" width="760px" @close="!previewBusy && (previewJob = null)">
+      <p>{{ previewJob.name }} · {{ preview?.changes?.length || 0 }} 项变化</p>
+      <p v-if="previewBusy" role="status">正在处理…</p><p v-if="preview?.blocked" role="alert">{{ preview.blocked }}</p>
+      <div class="workspace-results"><div v-for="change in preview?.changes || []" :key="change.path" class="workspace-result"><span><strong>{{ change.path }}</strong><small>{{ actionLabels[change.action] }} · 本地 {{ change.local?.size ?? '不存在' }} / 网盘 {{ change.remote?.size ?? '不存在' }}</small></span><UiSelect v-if="change.action === 'conflict'" v-model="conflictChoices[change.path]" :disabled="previewBusy" :placeholder="'默认：' + ({local:'本地',remote:'网盘','keep-both':'保留两份'}[previewJob.conflictPolicy || 'keep-both'])" :options="[{value:'keep-both',label:'保留两份'},{value:'local',label:'使用本地'},{value:'remote',label:'使用网盘'}]" /></div></div>
+      <p class="hint">执行前会重新检查文件状态；预览过期时需要重新预览。删除超过快照一半时停止执行。</p>
+      <template #actions><button class="btn" :disabled="previewBusy" @click="showPreview(previewJob)">刷新</button><button class="btn primary" :disabled="previewBusy || !preview || !!preview.blocked" @click="executePreview">执行</button></template>
+    </Modal>
     <header class="syncpage-head">
       <div class="syncpage-title">
         <UiIcon name="refresh" :size="18" />
@@ -267,7 +295,7 @@ onBeforeUnmount(() => {
           <div class="sync-task-paths">
             <span class="sync-path" :title="job.local_dir">本地：{{ job.local_dir }}</span>
             <span style="color:var(--text-tertiary);flex-shrink:0">{{ dirArrow[job.direction] || '⇄' }}</span>
-            <span class="sync-path" :title="job.remote_name || job.remote_dir">网盘：{{ accountOf(job) ? accountName(accountOf(job)) + ' / ' : '' }}{{ job.remote_name || (job.remote_dir === 'root' ? '根目录' : job.remote_dir) }}</span>
+            <span class="sync-path account-inline" :title="job.remote_name || job.remote_dir"><img v-if="accountOf(job)" :src="providerIconUrl(providerMetaOf(accountOf(job), providers))" alt="" />{{ accountOf(job) ? accountName(accountOf(job)) + ' / ' : '' }}{{ job.remote_name || (job.remote_dir === 'root' ? '根目录' : job.remote_dir) }}</span>
           </div>
           <div v-if="running.has(job.id) && progress[job.id]" class="sync-task-progress">
             <div class="progress-total">
@@ -280,7 +308,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="sync-task-actions">
           <div class="switch" :class="{ on: job.enabled }" :title="job.enabled ? '点击停用' : '点击启用'" @click="toggle(job)"></div>
-          <button class="btn-circle" :disabled="!running.has(job.id) && !accountOf(job)" :title="running.has(job.id) ? '停止同步' : '立即同步'" @click="running.has(job.id) ? cancel(job) : run(job)">
+          <button class="btn-circle" :disabled="!running.has(job.id) && !accountOf(job)" :title="running.has(job.id) ? '停止同步' : '预览同步'" @click="running.has(job.id) ? cancel(job) : showPreview(job)">
             <UiIcon :name="running.has(job.id) ? 'close' : 'play'" :size="14" />
           </button>
           <button class="btn-circle" title="编辑" @click="openEdit(job)"><UiIcon name="pencil" :size="14" /></button>
@@ -307,7 +335,7 @@ onBeforeUnmount(() => {
           v-model="form.user_id"
           block
           placeholder="请选择账号"
-          :options="accounts.map((a) => ({ value: a.user_id, label: accountName(a) }))"
+          :options="accounts.map((a) => ({ value: a.user_id, label: `${providerMetaOf(a, providers).label} · ${accountName(a)}`, img: providerIconUrl(providerMetaOf(a, providers)) }))"
           @change="onFormAccount"
         />
       </div>
@@ -326,6 +354,7 @@ onBeforeUnmount(() => {
         <label>自动同步周期（分钟，0 为关闭）</label>
         <input class="input" type="number" min="0" step="1" v-model.number="form.intervalMin" placeholder="0" />
       </div>
+      <div class="field"><label>冲突处理</label><UiSelect v-model="form.conflictPolicy" :options="[{value:'keep-both',label:'保留两份'},{value:'local',label:'使用本地'},{value:'remote',label:'使用网盘'}]" /><span class="hint">自动同步使用此策略，手动预览可逐项调整</span></div>
       <div class="field switch-row">
         <label>删除传播</label>
         <div class="switch" :class="{ on: form.deletePropagation }" role="switch" :aria-checked="form.deletePropagation" @click="form.deletePropagation = !form.deletePropagation"></div>

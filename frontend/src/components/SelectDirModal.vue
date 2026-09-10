@@ -1,7 +1,7 @@
 <script setup>
 // 选择网盘目录：在指定账号内浏览文件夹树并选中目标目录。
 import { ref, onMounted } from 'vue'
-import { listDir, providerMetaOf, mkdir } from '../api'
+import { listDir, providerMetaOf, providerIconUrl, accountName, mkdir } from '../api'
 import Modal from './Modal.vue'
 import UiIcon from './UiIcon.vue'
 
@@ -74,6 +74,7 @@ onMounted(() => load(rootKey))
 
 <template>
   <Modal :title="title" width="480px" @close="emit('close')">
+    <div class="account-inline" style="margin-bottom:12px"><img :src="providerIconUrl(providerMetaOf(account, providers))" alt="" />{{ accountName(account) }}</div>
     <div class="pathbar" style="border:none;padding:0 0 8px">
       <template v-for="(c, i) in crumbs" :key="c.id + i">
         <span v-if="i" class="crumb-sep">/</span>

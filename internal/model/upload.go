@@ -150,14 +150,15 @@ type OfflineTask struct {
 
 // MigrateJob is one cross-drive migration request.
 type MigrateJob struct {
-	ID        string   `json:"id"`
-	SrcUser   string   `json:"srcUser"`
-	SrcDrive  string   `json:"srcDrive"`
-	FileIDs   []string `json:"fileIDs"`
-	DstUser   string   `json:"dstUser"`
-	DstDrive  string   `json:"dstDrive"`
-	DstParent string   `json:"dstParent"`
-	Move      bool     `json:"move"`
+	Items     map[string]MigrateItem `json:"items,omitempty"`
+	ID        string                 `json:"id"`
+	SrcUser   string                 `json:"srcUser"`
+	SrcDrive  string                 `json:"srcDrive"`
+	FileIDs   []string               `json:"fileIDs"`
+	DstUser   string                 `json:"dstUser"`
+	DstDrive  string                 `json:"dstDrive"`
+	DstParent string                 `json:"dstParent"`
+	Move      bool                   `json:"move"`
 	// Live progress
 	Total     int64 `json:"total"`
 	Processed int64 `json:"processed"`
@@ -179,4 +180,16 @@ type MigrateJob struct {
 	// Timestamps for persistence.
 	CreatedAt int64 `json:"createdAt,omitempty"`
 	UpdatedAt int64 `json:"updatedAt,omitempty"`
+}
+
+type MigrateItem struct {
+	TargetID     string `json:"targetId,omitempty"`
+	IsDir        bool   `json:"isDir"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	ParentID     string `json:"parentId"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
+	Verification string `json:"verification"`
+	Size         int64  `json:"size"`
 }

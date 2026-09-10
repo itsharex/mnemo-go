@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +46,7 @@ func (s *Store) SetAccountsDir(d string) {
 func (s *Store) Dir() string { return s.dir }
 
 type directoryCacheDoc struct {
+	Key       string       `json:"key,omitempty"`
 	UpdatedAt int64        `json:"updatedAt"`
 	Files     []model.File `json:"files"`
 }
@@ -82,7 +85,61 @@ func (s *Store) SaveDirectoryCache(key string, files []model.File) error {
 	if err := os.MkdirAll(filepath.Dir(s.path(name)), 0o755); err != nil {
 		return err
 	}
-	return s.writeJSONUnlocked(name, directoryCacheDoc{UpdatedAt: time.Now().Unix(), Files: files})
+	return s.writeJSONUnlocked(name, directoryCacheDoc{Key: key, UpdatedAt: time.Now().Unix(), Files: files})
+}
+
+type CachedSearchResult struct {
+	UserID    string     `json:"userId"`
+	DriveID   string     `json:"driveId"`
+	ParentID  string     `json:"parentId"`
+	UpdatedAt int64      `json:"updatedAt"`
+	File      model.File `json:"file"`
+}
+
+func (s *Store) SearchDirectoryCache(keyword string) ([]CachedSearchResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CachedSearchResult{}
+	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	if keyword == "" {
+		return out, nil
+	}
+	entries, err := os.ReadDir(s.path(filepath.Join("cache", "directories")))
+	if os.IsNotExist(err) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		var doc directoryCacheDoc
+		if s.readJSON(filepath.Join("cache", "directories", entry.Name()), &doc) != nil {
+			continue
+		}
+		parts := strings.Split(doc.Key, "|")
+		if len(parts) != 6 || parts[3] != "list" {
+			continue
+		}
+		for i := range parts {
+			parts[i], _ = url.PathUnescape(parts[i])
+		}
+		for _, file := range doc.Files {
+			key := parts[1] + "|" + parts[2] + "|" + file.FileID
+			if seen[key] || !strings.Contains(strings.ToLower(file.Name), keyword) {
+				continue
+			}
+			seen[key] = true
+			out = append(out, CachedSearchResult{parts[1], parts[2], parts[4], doc.UpdatedAt, file})
+			if len(out) >= 1000 {
+				return out, nil
+			}
+		}
+	}
+	return out, nil
 }
 
 // DeleteDirectoryCache removes one directory snapshot after a file mutation.

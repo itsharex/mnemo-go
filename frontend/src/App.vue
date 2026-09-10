@@ -1,8 +1,12 @@
 <script setup>
 import { ref, onMounted, computed, watch, nextTick, onBeforeUnmount, defineAsyncComponent } from 'vue'
-import { listAccounts, listProviders, removeAccount, renameMountedAccount, onEvent, GetSettings, SaveSettings, providerOf, accountName, providerIconUrl, setAccountCustomMeta as setAccountCustomMetaBackend } from './api'
-import { applyAppearance, getLastDriveSelection, setLastDriveSelection, clearLastDriveSelection, getAccountAlias, getAccountCustomIcon, setAccountCustomMeta } from './appearance'
+import { listAccounts, listProviders, removeAccount, renameMountedAccount, onEvent, GetSettings, SaveSettings, providerOf, providerMetaOf, accountName, providerIconUrl, setAccountCustomMeta as setAccountCustomMetaBackend } from './api'
+import { applyAppearance, getLastDriveSelection, setLastDriveSelection, clearLastDriveSelection, getAccountAlias, getAccountCustomIcon, setAccountCustomMeta, useOrderedAccounts } from './appearance'
 import PanView from './views/PanView.vue'
+import WorkspaceView from './views/WorkspaceView.vue'
+import GlobalSearch from './components/GlobalSearch.vue'
+import { accountHealth, healthLabels, recordAccountHealth } from './workspace'
+import { refreshAccountNow } from './api'
 import AccountRail from './components/AccountRail.vue'
 import AccountAvatar from './components/AccountAvatar.vue'
 import UiIcon from './components/UiIcon.vue'
@@ -42,16 +46,16 @@ const SyncView = defineAsyncComponent(() => import('./views/SyncView.vue'))
 const SettingsView = defineAsyncComponent(() => import('./views/SettingsView.vue'))
 const prevTabIdx = ref(0)
 const pageTrans = ref('page-slide-left')
-const pageComponents = { pan: PanView, transfer: TransferView, sync: SyncView, share: ShareView, settings: SettingsView }
+const pageComponents = { pan: WorkspaceView, transfer: TransferView, sync: SyncView, share: ShareView, settings: SettingsView }
 const pageComponent = computed(() => pageComponents[tab.value] || PanView)
 const pageProps = computed(() => {
-  if (tab.value === 'pan') return { account: current.value, accounts: accounts.value, providers: providers.value }
-  if (tab.value === 'sync') return { account: current.value, accounts: accounts.value, providers: providers.value }
-  if (tab.value === 'transfer' || tab.value === 'share') return { accounts: accounts.value, providers: providers.value }
+  if (tab.value === 'pan') return { account: current.value, accounts: orderedAccounts.value, providers: providers.value }
+  if (tab.value === 'sync') return { account: current.value, accounts: orderedAccounts.value, providers: providers.value }
+  if (tab.value === 'transfer' || tab.value === 'share') return { accounts: orderedAccounts.value, providers: providers.value }
   return {}
 })
 const pageListeners = computed(() => {
-  const listeners = { toast }
+  const listeners = { toast, navigate: navigateTo }
   if (tab.value === 'pan') listeners.go = onPanGo
   if (tab.value === 'settings') {
     listeners.theme = applyTheme
@@ -69,10 +73,30 @@ function switchTab(key) {
   tab.value = key
 }
 const accounts = ref([])
+const orderedAccounts = useOrderedAccounts(() => accounts.value)
 const providers = ref([])
 const current = ref(null)
 const showLogin = ref(false)
 const showQuickOpen = ref(false)
+const showSearch = ref(false)
+const checkingAccount = ref(false)
+async function checkAccount() {
+  if (!infoAcc.value || checkingAccount.value) return
+  const acc = infoAcc.value
+  checkingAccount.value = true
+  try { await refreshAccountNow(acc.user_id); recordAccountHealth(acc.user_id); refresh() }
+  catch (error) { recordAccountHealth(acc.user_id, error) }
+  finally { checkingAccount.value = false }
+}
+async function navigateTo(location) {
+  const acc = accounts.value.find(a => a.user_id === location.userId)
+  if (!acc) { toast('账号已移除，请重新添加', 'warn'); return }
+  select(acc); switchTab('pan')
+  await nextTick()
+  // The page transition can defer mounting until its previous page leaves.
+  for (let attempt = 0; attempt < 20 && !panView.value; attempt++) await new Promise(resolve => setTimeout(resolve, 30))
+  await panView.value?.navigate(location)
+}
 const showUpdate = ref(false)
 const pendingUpdateInfo = ref(null)
 const infoAcc = ref(null)
@@ -195,7 +219,7 @@ function refresh() {
   listAccounts().then((list) => {
     if (my !== refreshEpoch) return
     accounts.value = list || []
-    const available = accounts.value
+    const available = orderedAccounts.value
     if (current.value) {
       const found = available.find((a) => a.user_id === current.value.user_id)
       current.value = found || available[0] || null
@@ -234,7 +258,7 @@ function providerLabel(acc) {
 }
 
 function remove(acc) {
-  askConfirm(`移除账号「${(acc.token && (acc.token.nick_name || acc.token.user_name)) || acc.user_id}」？只删除账号凭据，下载任务、收藏和同步配置等本地记录会保留。`, async () => {
+  askConfirm(`移除账号「${accountName(acc)}」？只删除账号凭据，下载任务、收藏和同步配置等本地记录会保留。`, async () => {
     try {
       await removeAccount(acc.user_id)
       if (current.value && current.value.user_id === acc.user_id) current.value = null
@@ -249,9 +273,9 @@ function remove(acc) {
 function openRename(acc) {
   if (!acc) return
   renameAcc.value = acc
-  renameName.value = getAccountAlias(acc.user_id) || ''
-  renameIcon.value = getAccountCustomIcon(acc.user_id) || ''
-  showPresetIcons.value = false
+  renameName.value = acc.custom_name || getAccountAlias(acc.user_id) || ''
+  renameIcon.value = acc.custom_icon || getAccountCustomIcon(acc.user_id) || ''
+  showPresetIcons.value = true
 }
 
 function onIconFileSelected(e) {
@@ -273,20 +297,15 @@ function onCropConfirm(croppedDataUrl) {
 }
 
 async function saveRename() {
-  if (!renameAcc.value) return
+  if (!renameAcc.value || renameBusy.value) return
   renameBusy.value = true
   try {
     const uid = renameAcc.value.user_id
     const alias = renameName.value.trim()
     const icon = renameIcon.value
-    // 1. 本地 LocalStorage 快速持久化 + 事件分发
+    // 后端保存成功后再更新界面，避免失败时误报成功。
+    await setAccountCustomMetaBackend(uid, alias, icon)
     setAccountCustomMeta(uid, alias, icon)
-    // 2. 后端持久化到 accounts.json（双向保证持久）
-    try {
-      await setAccountCustomMetaBackend(uid, alias, icon)
-    } catch (err) {
-      console.warn('Backend custom meta update ignored/failed:', err)
-    }
     // 强制触发一次账号列表浅拷贝以便全局响应式刷新
     accounts.value = accounts.value.map((a) => (a.user_id === uid ? { ...a, custom_name: alias, custom_icon: icon } : a))
     if (current.value?.user_id === uid) current.value = { ...current.value, custom_name: alias, custom_icon: icon }
@@ -426,6 +445,7 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
       </div>
       <div class="spacer"></div>
       <button class="icon-btn" title="快捷命令面板 (Ctrl+P)" @click="showQuickOpen = true"><UiIcon name="search" :size="16" /></button>
+      <button class="tbtn" @click="showSearch = true">搜索</button>
       <button class="icon-btn" :title="isDark ? '切换到浅色' : '切换到深色'" @click="quickToggleTheme"><UiIcon :name="isDark ? 'sun' : 'moon'" :size="17" /></button>
       <button class="icon-btn" :class="{ active: tab === 'settings' }" title="设置 (Alt+5)" @click="switchTab('settings')"><UiIcon name="settings" :size="17" /></button>
       <AccountAvatar v-if="current" class="topbar-account" :account="current" :providers="providers" />
@@ -439,7 +459,7 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
     <div class="app-body">
       <AccountRail
         v-if="tab === 'pan'"
-        :accounts="accounts"
+        :accounts="orderedAccounts"
         :providers="providers"
         :current="current"
         @select="select"
@@ -465,10 +485,11 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
     </div>
 
     <LoginModal v-if="showLogin" :providers="providers" @close="showLogin = false" @toast="toast" />
+    <GlobalSearch v-if="showSearch" :accounts="orderedAccounts" :providers="providers" @close="showSearch = false" @navigate="navigateTo" />
 
     <QuickOpen
       :show="showQuickOpen"
-      :accounts="accounts"
+      :accounts="orderedAccounts"
       :providers="providers"
       :current-account="current"
       @close="showQuickOpen = false"
@@ -478,6 +499,10 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
     />
 
     <Modal v-if="infoAcc" title="账号信息" width="420px" @close="infoAcc = null">
+      <div class="kv-row"><span class="kv-label">状态</span><span>{{ healthLabels[accountHealth[infoAcc.user_id]?.status] || '未检查' }}</span></div>
+      <p v-if="accountHealth[infoAcc.user_id]?.checkedAt" class="hint">最近检查：{{ new Date(accountHealth[infoAcc.user_id].checkedAt).toLocaleString() }}</p>
+      <p v-if="accountHealth[infoAcc.user_id]?.message" role="alert">{{ accountHealth[infoAcc.user_id].message }}</p>
+      <div class="workspace-controls"><button class="btn" :disabled="checkingAccount" @click="checkAccount">{{ checkingAccount ? '检查中…' : '检查' }}</button><button v-if="accountHealth[infoAcc.user_id]?.status === 'auth'" class="btn" @click="infoAcc = null; showLogin = true">重新登录</button><button v-if="accountHealth[infoAcc.user_id]?.status === 'network'" class="btn" @click="infoAcc = null; switchTab('settings')">网络设置</button></div>
       <div class="kv-row"><span class="kv-label">账号</span><span style="user-select:text">{{ accountName(infoAcc) }}</span></div>
       <div class="kv-row"><span class="kv-label">网盘</span><span>{{ providerLabel(infoAcc) }}</span></div>
       <div class="kv-row" v-if="infoAcc.usage && infoAcc.usage.size">
@@ -492,11 +517,11 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
       </template>
     </Modal>
 
-    <!-- 账号自定义截图与名称弹窗 -->
-    <Modal v-if="renameAcc" title="自定义截图与名称" width="420px" @close="renameAcc = null">
+    <!-- 账号外观编辑二级弹窗 -->
+    <Modal v-if="renameAcc" title="自定义" width="480px" @close="!renameBusy && (renameAcc = null)">
       <div class="custom-acc-form">
         <div class="field">
-          <label>自定义显示昵称</label>
+          <label>显示名称</label>
           <input
             v-model="renameName"
             class="input"
@@ -508,7 +533,7 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
         </div>
 
         <div class="field">
-          <label>自定义图标与截图</label>
+          <label>网盘图标</label>
           <div class="acc-icon-selector">
             <!-- 当前选中的预览图 -->
             <div class="acc-icon-preview">
@@ -527,7 +552,7 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
               />
               <button class="btn sm" type="button" @click="fileInputRef?.click()">
                 <UiIcon name="camera" :size="13" />
-                <span>选择截图/图片/SVG</span>
+                <span>上传图标</span>
               </button>
               <button class="btn sm" type="button" @click="showPresetIcons = !showPresetIcons">
                 <UiIcon name="grid" :size="13" />
@@ -567,7 +592,7 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
         <button class="btn" type="button" :disabled="renameBusy" @click="renameAcc = null">取消</button>
         <button class="btn primary" type="button" :disabled="renameBusy" @click="saveRename">
           <span v-if="renameBusy" class="spin spin-on-primary"></span>
-          {{ renameBusy ? '保存中…' : '保存设置' }}
+          {{ renameBusy ? '保存中…' : '保存' }}
         </button>
       </template>
     </Modal>

@@ -7,15 +7,18 @@ import UiSelect from '../components/UiSelect.vue'
 import Modal from '../components/Modal.vue'
 import SelectDirModal from '../components/SelectDirModal.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
+import { parseShareText } from '../workspace'
 
 const props = defineProps({
   accounts: { type: Array, default: () => [] },
   providers: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['toast'])
+const emit = defineEmits(['toast', 'navigate'])
+const importedLocation = ref(null)
 
 const history = ref([])
 const loading = ref(false)
+const loadError = ref('')
 const kw = ref('')
 const kwRaw = ref('')   // 输入原值，kw 为防抖后值
 let kwTimer = null
@@ -40,7 +43,9 @@ const importSelected = ref([])
 const importDirPick = ref(false)
 const importDir = ref({ id: 'root', name: '根目录' })
 
-const importAccounts = computed(() => (props.accounts || []).filter((account) => capsOf(account, props.providers).importShare))
+const detectedShare = computed(() => parseShareText(importForm.value.url))
+const importAccounts = computed(() => (props.accounts || []).filter((account) => capsOf(account, props.providers).importShare && (!detectedShare.value.provider || providerOf(account.user_id) === detectedShare.value.provider)))
+watch(() => detectedShare.value.password, password => { if (password) importForm.value.password = password })
 const importTarget = computed(() => importAccounts.value.find((account) => account.user_id === importTargetId.value) || null)
 let importSeq = 0
 watch(() => [importTarget.value?.user_id, importTarget.value?.drive_id], ([user, drive], [oldUser, oldDrive]) => {
@@ -59,6 +64,7 @@ const importDirRoot = computed(() => {
 })
 const importAccountOptions = computed(() => importAccounts.value.map((account) => ({
   value: account.user_id,
+  img: providerIconUrl(providerMetaOf(account, props.providers)),
   label: `${providerMetaOf(account, props.providers).label || providerOf(account.user_id)} · ${accountName(account)}`,
 })))
 
@@ -78,10 +84,6 @@ watch(importAccounts, (list) => {
 }, { immediate: true })
 
 function openImport() {
-  if (!importAccounts.value.length) {
-    emit('toast', '当前没有支持导入分享的网盘账号', 'warn')
-    return
-  }
   importOpen.value = true
   importStep.value = 'form'
   importSession.value = null
@@ -98,7 +100,7 @@ function closeImport() {
 }
 
 async function parseImport() {
-  const url = importForm.value.url.trim()
+  const url = detectedShare.value.url
   if (!url || !importTarget.value || importBusy.value) return
   const seq = ++importSeq
   importBusy.value = true
@@ -156,6 +158,7 @@ async function saveImport() {
     if (seq !== importSeq) return
     const count = Array.isArray(saved) ? saved.length : importSelected.value.length
     emit('toast', `已导入 ${count} 个项目`, 'success')
+    importedLocation.value = { userId: importTarget.value.user_id, dirId: importDir.value.id, name: importDir.value.name }
     importOpen.value = false
     importDirPick.value = false
     importSession.value = null
@@ -172,11 +175,15 @@ let refreshSeq = 0
 async function refresh() {
   const seq = ++refreshSeq
   loading.value = true
+  loadError.value = ''
   try {
     const list = (await ListShareHistory('')) || []
     if (seq === refreshSeq) history.value = list
   } catch (e) {
-    if (seq === refreshSeq) emit('toast', String(e), 'error')
+    if (seq === refreshSeq) {
+      loadError.value = '分享记录加载失败，请重试'
+      emit('toast', String(e), 'error')
+    }
   } finally {
     if (seq === refreshSeq) loading.value = false
   }
@@ -215,7 +222,7 @@ const providerOptions = computed(() => {
     const pid = h.provider || providerOf(h.account_id)
     if (pid) seen.add(pid)
   }
-  return [...seen]
+  return [...new Set([...props.accounts.map(a => providerOf(a.user_id)).filter(pid => seen.has(pid)), ...seen])]
 })
 
 // 账号筛选只列出有分享记录的账号
@@ -226,7 +233,8 @@ const accountOptions = computed(() => {
     const acc = accountOf(h.account_id)
     seen.set(h.account_id, acc ? accountName(acc) : h.account_id)
   }
-  return [...seen.entries()].map(([id, name]) => ({ id, name }))
+  const ids = [...new Set([...props.accounts.map(a => a.user_id).filter(id => seen.has(id)), ...seen.keys()])]
+  return ids.map(id => ({ id, name: seen.get(id), img: providerIconUrl(providerMetaOf(accountOf(id) || { user_id: id }, props.providers)) }))
 })
 
 const filtered = computed(() => {
@@ -254,8 +262,9 @@ const groups = computed(() => {
       const acc = accountOf(h.account_id)
       map.set(key, {
         key,
+        accountId: h.account_id,
         pid,
-        icon: providerIconUrl(metaOf(pid)),
+        icon: providerIconUrl(acc ? providerMetaOf(acc, props.providers) : metaOf(pid)),
         label: labelOf(pid),
         accName: acc ? accountName(acc) : h.account_id,
         items: [],
@@ -263,7 +272,8 @@ const groups = computed(() => {
     }
     map.get(key).items.push(h)
   }
-  return [...map.values()]
+  const ranks = new Map(props.accounts.map((a, index) => [a.user_id, index]))
+  return [...map.values()].sort((a, b) => (ranks.get(a.accountId) ?? Infinity) - (ranks.get(b.accountId) ?? Infinity))
 })
 
 function openLink(h) {
@@ -364,16 +374,17 @@ onBeforeUnmount(() => offs.forEach((off) => off && off()))
           <UiSelect
             v-model="filterProvider"
             class="share-filter"
-            :options="[{ value: '', label: '全部网盘' }, ...providerOptions.map((pid) => ({ value: pid, label: labelOf(pid) }))]"
+            :options="[{ value: '', label: '全部网盘' }, ...providerOptions.map((pid) => ({ value: pid, label: labelOf(pid), img: providerIconUrl(metaOf(pid)) }))]"
           />
           <UiSelect
             v-model="filterAccount"
             class="share-filter"
-            :options="[{ value: '', label: '全部账号' }, ...accountOptions.map((a) => ({ value: a.id, label: a.name }))]"
+            :options="[{ value: '', label: '全部账号' }, ...accountOptions.map((a) => ({ value: a.id, label: a.name, img: a.img }))]"
           />
         </div>
         <div class="share-toolbar-actions">
-          <button v-if="importAccounts.length" class="tbtn" @click="openImport">
+          <button v-if="importedLocation" class="tbtn" @click="emit('navigate', importedLocation)">打开目录</button>
+          <button class="btn primary" @click="openImport">
             <UiIcon name="download" :size="14" />导入分享
           </button>
           <button class="tbtn" :disabled="loading" @click="refresh">
@@ -383,8 +394,12 @@ onBeforeUnmount(() => offs.forEach((off) => off && off()))
       </header>
 
       <section class="share-content">
+        <div v-if="loadError" role="alert" class="share-empty">
+          <span class="wes-title">{{ loadError }}</span>
+          <button class="btn" :disabled="loading" @click="refresh">重新加载</button>
+        </div>
         <!-- 骨架屏加载状态 -->
-        <div v-if="loading && !history.length" class="skeleton-list share-skeleton">
+        <div v-else-if="loading && !history.length" class="skeleton-list share-skeleton">
           <div v-for="i in 4" :key="i" class="skeleton-row share-skeleton-row">
             <div class="skeleton skeleton-icon share-skeleton-icon"></div>
             <div class="share-skeleton-copy">
@@ -396,8 +411,16 @@ onBeforeUnmount(() => offs.forEach((off) => off && off()))
         </div>
         <div v-else-if="!groups.length" class="share-empty">
           <div class="share-empty-icon"><UiIcon name="link" :size="28" /></div>
-          <span class="wes-title">{{ history.length ? '没有匹配的分享记录' : '还没有创建过分享记录' }}</span>
-          <span v-if="!history.length" class="wes-desc">在「网盘」页选中文件后点击「分享」创建链接</span>
+          <span class="wes-title">{{ history.length ? '没有匹配的分享记录' : '还没有分享记录' }}</span>
+          <template v-if="!history.length">
+            <span class="wes-desc">在「网盘」页选中文件并创建分享后，可在这里查看链接、复制提取码和管理分享。</span>
+            <span class="wes-desc">收到别人的分享链接？可以直接导入到支持的网盘账号。</span>
+            <button class="btn" @click="openImport"><UiIcon name="download" :size="14" />导入分享</button>
+          </template>
+          <template v-else>
+            <span class="wes-desc">试试其他关键词，或清除筛选查看全部记录。</span>
+            <button class="btn" @click="kwRaw = ''; kw = ''; filterProvider = ''; filterAccount = ''">清除筛选</button>
+          </template>
         </div>
 
         <!-- 分组记录 -->
@@ -450,14 +473,21 @@ onBeforeUnmount(() => offs.forEach((off) => off && off()))
     </div>
 
     <Modal v-if="importOpen" title="导入分享" width="620px" @close="closeImport">
-    <template v-if="importStep === 'form'">
+    <div v-if="!accounts.some(a => capsOf(a, providers).importShare)" class="workspace-empty-state">
+      <UiIcon name="cloud" :size="32" />
+      <strong>请先添加支持分享导入的网盘账号</strong>
+      <p>通过左侧「添加网盘」登录账号后，再来粘贴分享链接。导入能力取决于网盘支持情况。</p>
+    </div>
+    <template v-else-if="importStep === 'form'">
       <div class="field">
         <label>目标网盘账号</label>
         <UiSelect v-model="importTargetId" block :disabled="importBusy" :options="importAccountOptions" placeholder="选择账号" />
       </div>
       <div class="field">
         <label>分享链接</label>
-        <input v-model="importForm.url" class="input" placeholder="粘贴分享链接" :disabled="importBusy" @keydown.enter="parseImport" autofocus />
+        <textarea v-model="importForm.url" class="input" placeholder="粘贴链接或分享文案" :disabled="importBusy" rows="3" autofocus></textarea>
+        <span class="hint" v-if="detectedShare.provider">已识别 {{ providers.find(p => p.ID === detectedShare.provider)?.Meta?.label || detectedShare.provider }}，仅显示兼容账号</span>
+        <span v-if="!importAccounts.length" class="hint">没有兼容账号，请添加对应网盘，或更换分享链接</span>
       </div>
       <div class="field">
         <label>提取码（可选）</label>

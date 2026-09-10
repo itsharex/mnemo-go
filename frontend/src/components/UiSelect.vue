@@ -67,6 +67,7 @@ function focusOption() {
 }
 
 function onKey(e) {
+  if (props.disabled || (!open.value && !root.value?.contains(e.target))) return
   const available = props.options.filter((o) => !o.disabled)
   if (e.key === 'Escape') {
     if (open.value) {

@@ -11,11 +11,23 @@ export function onEvent(name, cb) {
   try { return EventsOn(name, cb) } catch { return () => {} } // 浏览器预览无 Wails bridge
 }
 
+const fileDropListeners = new Set()
+let stopNativeDrop
 export function onFileDrop(cb) {
-  if (typeof window !== 'undefined' && window.runtime && window.runtime.OnFileDrop) {
-    return window.runtime.OnFileDrop(cb)
+  fileDropListeners.add(cb)
+  if (fileDropListeners.size === 1 && typeof window !== 'undefined' && window.runtime?.OnFileDrop) {
+    stopNativeDrop = window.runtime.OnFileDrop((...args) => {
+      for (const listener of fileDropListeners) listener(...args)
+    })
   }
-  return () => {}
+  return () => {
+    fileDropListeners.delete(cb)
+    if (!fileDropListeners.size) {
+      if (typeof stopNativeDrop === 'function') stopNativeDrop()
+      else window.runtime?.OnFileDropOff?.()
+      stopNativeDrop = null
+    }
+  }
 }
 
 export { EventsOn }

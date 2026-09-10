@@ -243,10 +243,30 @@ func (e *Engine) migrateOne(ctx context.Context, job *Job, fileID string) error 
 	return e.migrateOneTo(ctx, job, fileID, job.DstParent)
 }
 
-func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParent string) error {
+func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParent string) (resultErr error) {
 	if jobHasID(job.CompletedFileIDs, fileID) {
 		return nil
 	}
+	if job.Items == nil {
+		job.Items = map[string]model.MigrateItem{}
+	}
+	item := model.MigrateItem{ID: fileID, Name: fileID, ParentID: targetParent, Status: "running", Verification: "unverified"}
+	job.Items[fileID] = item
+	defer func() {
+		item.TargetID = job.Items[fileID].TargetID
+		if resultErr != nil {
+			item.Status = "failed"
+			item.Error = resultErr.Error()
+			if errors.Is(resultErr, context.Canceled) {
+				item.Status = "canceled"
+			}
+		} else {
+			item.Status = "completed"
+		}
+		job.Items[fileID] = item
+		e.saveJob(job)
+		e.emit(job)
+	}()
 	// resolve source file
 	srcFile, err := drive.GetFileContext(ctx, job.SrcUser, job.SrcDrive, fileID)
 	if err != nil {
@@ -255,6 +275,11 @@ func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParen
 	if srcFile == nil {
 		return errors.New("migrate: source file is empty")
 	}
+	item.Name = srcFile.Name
+	item.Size = srcFile.Size
+	item.IsDir = srcFile.IsDir
+	job.Items[fileID] = item
+	e.emit(job)
 	if job.Move && jobHasID(job.CopiedFileIDs, srcFile.FileID) {
 		if err := e.finalizeMove(ctx, job, srcFile); err != nil {
 			return err
@@ -276,6 +301,7 @@ func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParen
 	// 1) Try rapid upload (秒传).
 	if migrated, err := e.tryRapidMigrate(ctx, job, srcFile, targetParent); migrated {
 		if err == nil {
+			item.Verification = "provider-hash"
 			completeBytes(job, progressStart, srcFile.Size)
 			return e.completeResource(ctx, job, srcFile)
 		}
@@ -296,6 +322,7 @@ func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParen
 			return e.completeResource(ctx, job, srcFile)
 		}
 		// streaming succeeded; handle move cleanup.
+		item.Verification = "size"
 		completeBytes(job, progressStart, srcFile.Size)
 		return e.completeResource(ctx, job, srcFile)
 	}
@@ -305,6 +332,7 @@ func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParen
 		return err
 	}
 	completeBytes(job, progressStart, srcFile.Size)
+	item.Verification = "size"
 	return e.completeResource(ctx, job, srcFile)
 }
 
@@ -371,9 +399,19 @@ func (e *Engine) tryRapidMigrate(ctx context.Context, job *Job, srcFile *model.F
 		return true, fmt.Errorf("rapid: %w", err)
 	}
 	if result != nil && result.Reuse {
+		if job.Items != nil {
+			item := job.Items[srcFile.FileID]
+			item.TargetID = result.FileID
+			job.Items[srcFile.FileID] = item
+		}
 		return true, nil
 	}
 	if result != nil && result.FileID != "" {
+		if job.Items != nil {
+			item := job.Items[srcFile.FileID]
+			item.TargetID = result.FileID
+			job.Items[srcFile.FileID] = item
+		}
 		// some providers return a file id without setting Reuse=true.
 		return true, nil
 	}
@@ -425,9 +463,14 @@ func (e *Engine) tryStreamMigrate(ctx context.Context, job *Job, srcFile *model.
 		return true, fmt.Errorf("stream: resolve download url: %w", err)
 	}
 
-	return true, streamMigration(ctx, dl, job, func(reader io.Reader) error {
+	start := job.ProcessedBytes
+	err = streamMigration(ctx, dl, job, func(reader io.Reader) error {
 		return streamUploader(ctx, targetParent, srcFile.Name, srcFile.Size, reader)
 	})
+	if err == nil && srcFile.Size >= 0 && job.ProcessedBytes-start != srcFile.Size {
+		err = fmt.Errorf("stream: size mismatch: expected %d, received %d", srcFile.Size, job.ProcessedBytes-start)
+	}
+	return true, err
 }
 
 func streamMigration(ctx context.Context, dl *model.DownloadURL, job *Job, upload func(io.Reader) error) error {
@@ -485,6 +528,11 @@ func (e *Engine) spoolMigrate(ctx context.Context, job *Job, srcFile *model.File
 	if err := downloadToCounted(ctx, dl, tmp, job); err != nil {
 		return err
 	}
+	if stat, err := tmp.Stat(); err != nil {
+		return err
+	} else if srcFile.Size >= 0 && stat.Size() != srcFile.Size {
+		return fmt.Errorf("migrate: size mismatch: expected %d, received %d", srcFile.Size, stat.Size())
+	}
 	_ = tmp.Sync()
 	// upload to target
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
@@ -504,6 +552,11 @@ func (e *Engine) spoolMigrate(ctx context.Context, job *Job, srcFile *model.File
 	}
 	if err := handler(ctx, ui); err != nil {
 		return err
+	}
+	if job.Items != nil {
+		item := job.Items[srcFile.FileID]
+		item.TargetID = ui.Upload.FileID
+		job.Items[srcFile.FileID] = item
 	}
 	return nil
 }

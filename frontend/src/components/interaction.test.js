@@ -12,8 +12,12 @@ import ShareView from '../views/ShareView.vue'
 import SyncView from '../views/SyncView.vue'
 import SettingsView from '../views/SettingsView.vue'
 import * as appearance from '../appearance'
+import App from '../App.vue'
 
 const api = vi.hoisted(() => ({
+  listAccounts: vi.fn(),
+  listProviders: vi.fn(),
+  setAccountCustomMeta: vi.fn(),
   login: vi.fn(),
   ListShareHistory: vi.fn(),
   ListSyncConfigs: vi.fn(),
@@ -78,6 +82,7 @@ vi.mock('../logger', () => ({
   error: vi.fn(),
   errorText: vi.fn((value) => String(value)),
   configKeys: vi.fn(() => []),
+  installGlobalErrorLogging: vi.fn(() => () => {}),
 }))
 
 import LoginModal from './LoginModal.vue'
@@ -123,6 +128,103 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('账号右键可打开图标名称编辑页，保存后更新所有页面使用的账号', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
+    api.listAccounts.mockResolvedValue([{ user_id: 'webdav:one', drive_id: 'drive' }])
+    api.listProviders.mockResolvedValue([{ ID: 'webdav', Meta: { label: 'WebDAV' } }])
+    api.GetSettings.mockResolvedValue({ theme: 'light', autoUpdate: false })
+    api.setAccountCustomMeta.mockResolvedValue(undefined)
+    const wrapper = mountAttached(App, { global: { stubs: { PanView: true, AccountAvatar: true } } })
+    await flushPromises()
+    await wrapper.get('.rail-item').trigger('contextmenu', { clientX: 50, clientY: 60 })
+    await flushPromises()
+    const action = [...document.querySelectorAll('.ctx-item')].find(button => button.textContent.includes('自定义'))
+    expect(action).toBeTruthy()
+    action.click()
+    await flushPromises()
+    expect(document.body.textContent).toContain('自定义')
+    expect(document.querySelector('.preset-icons-grid')).not.toBeNull()
+    await setDomInput(document.querySelector('input[placeholder="留空则使用默认账号名称"]'), '我的资料库')
+    document.querySelector('.preset-icon-chip[title="坚果云"]').click()
+    await nextTick()
+    const save = [...document.querySelectorAll('.modal button')].find(button => button.textContent.trim() === '保存')
+    save.click()
+    await flushPromises()
+    expect(api.setAccountCustomMeta).toHaveBeenCalledWith('webdav:one', '我的资料库', 'jianguoyun.svg')
+    expect(wrapper.findComponent({ name: 'PanView' }).props('accounts')[0]).toMatchObject({ custom_name: '我的资料库', custom_icon: 'jianguoyun.svg' })
+    expect(document.querySelector('.custom-acc-form')).toBeNull()
+    vi.unstubAllGlobals()
+  })
+
+  it('账号排序偏好改变后侧栏即时更新，新账号保留在末尾', async () => {
+    const accounts = [{ user_id: 'webdav:one' }, { user_id: 'webdav:two' }, { user_id: 'webdav:new' }]
+    const wrapper = mountAttached(AccountRail, { props: { accounts } })
+    appearance.setPref('accountOrder', ['webdav:two', 'deleted', 'webdav:two', 'webdav:one'])
+    await nextTick()
+    const items = wrapper.findAll('.rail-item')
+    expect(items.map(item => item.attributes('aria-label'))).toEqual(['webdav · webdav:two', 'webdav · webdav:one', 'webdav · webdav:new'])
+  })
+
+  it('焦点在其他输入框时方向键不会展开下拉框', async () => {
+    mountAttached(UiSelect, { props: { options: [{ value: 'a', label: 'A' }] } })
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    await nextTick()
+    expect(document.querySelector('.uiselect-drop')).toBeNull()
+  })
+  it('鼠标切换账号后移出侧栏，即使按钮仍有焦点也能收起', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountAttached(AccountRail, { props: { accounts: [{ user_id: 'pikpak:one' }] } })
+    await wrapper.get('.account-rail').trigger('mouseenter')
+    await vi.advanceTimersByTimeAsync(250)
+    const item = wrapper.get('.rail-item')
+    await item.trigger('pointerdown', { button: 0 })
+    item.element.focus()
+    window.dispatchEvent(new MouseEvent('pointerup'))
+    await item.trigger('click')
+    await wrapper.get('.account-rail').trigger('mouseleave')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(wrapper.get('.account-rail').classes()).not.toContain('expanded')
+    expect(wrapper.emitted('select')).toHaveLength(1)
+  })
+
+  it('没有兼容账号时分享页仍展示导入入口和说明', async () => {
+    api.ListShareHistory.mockResolvedValue([])
+    const wrapper = mountAttached(ShareView)
+    await flushPromises()
+    expect(wrapper.text()).toContain('还没有分享记录')
+    const entry = wrapper.findAll('button').find(button => button.text().includes('导入分享'))
+    expect(entry).toBeTruthy()
+    await entry.trigger('click')
+    await flushPromises()
+    expect(document.body.textContent).toContain('请先添加支持分享导入的网盘账号')
+  })
+  it('OLED 背景默认关闭，可即时切换并在重新打开设置后保留', async () => {
+    api.GetSettings.mockResolvedValue({ theme: 'dark' })
+    api.GetLogPath.mockResolvedValue('')
+    appearance.applyAppearance('dark')
+    const wrapper = mountAttached(SettingsView)
+    await flushPromises()
+    const toggle = wrapper.get('[role="switch"][aria-labelledby="oled-background-label"]')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    await toggle.trigger('click')
+    expect(appearance.getPrefs().oledBackground).toBe(true)
+    expect(document.documentElement.matches('html.dark.oled')).toBe(true)
+    appearance.applyAppearance('light')
+    expect(document.documentElement.matches('html.dark.oled')).toBe(false)
+    appearance.applyAppearance('dark')
+    expect(document.documentElement.matches('html.dark.oled')).toBe(true)
+    const reopened = mountAttached(SettingsView)
+    await flushPromises()
+    const restored = reopened.get('[role="switch"][aria-labelledby="oled-background-label"]')
+    expect(restored.attributes('aria-checked')).toBe('true')
+    await restored.trigger('click')
+    expect(appearance.getPrefs().oledBackground).toBe(false)
+    expect(document.documentElement.classList.contains('oled')).toBe(false)
+    document.documentElement.classList.remove('dark')
+  })
   it('设置读取失败时禁止保存默认值，重试成功后恢复保存', async () => {
     api.GetSettings.mockRejectedValueOnce(new Error('读取失败')).mockResolvedValue({ proxy: 'http://localhost:7890' })
     api.GetLogPath.mockResolvedValue('')
@@ -847,18 +949,20 @@ describe('关键交互组件', () => {
 
   it('账号容量在启动同步，并支持右上角手动同步', async () => {
     vi.useFakeTimers()
+    api.refreshAccount.mockResolvedValue({ user_id: 'quota-dedupe', token: {}, usage: { size: 100, used: 20 } })
     api.refreshAccountNow.mockResolvedValue({ user_id: 'quota-dedupe', token: {}, usage: { size: 100, used: 20 } })
     const account = { user_id: 'quota-dedupe', token: {}, usage: null }
     const wrapper = mountAttached(AccountAvatar, { props: { account, providers: [] }, global: { stubs: { UiIcon: true } } })
 
     await vi.runAllTicks()
-    expect(api.refreshAccountNow).toHaveBeenCalledTimes(1)
+    expect(api.refreshAccount).toHaveBeenCalledTimes(1)
+    expect(api.refreshAccountNow).not.toHaveBeenCalled()
     await wrapper.get('.acc-ava').trigger('mouseenter')
     await vi.advanceTimersByTimeAsync(120)
     const refreshButton = document.querySelector('.ap-refresh')
     expect(refreshButton).not.toBeNull()
     refreshButton.click()
     await vi.runAllTicks()
-    expect(api.refreshAccountNow).toHaveBeenCalledTimes(2)
+    expect(api.refreshAccountNow).toHaveBeenCalledTimes(1)
   })
 })

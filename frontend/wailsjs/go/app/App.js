@@ -106,6 +106,10 @@ export function ExportLogs() {
   return window['go']['app']['App']['ExportLogs']();
 }
 
+export function ExportPreferences(arg1) {
+  return window['go']['app']['App']['ExportPreferences'](arg1);
+}
+
 export function FavoriteFiles(arg1, arg2, arg3, arg4) {
   return window['go']['app']['App']['FavoriteFiles'](arg1, arg2, arg3, arg4);
 }
@@ -144,6 +148,10 @@ export function GetSettings() {
 
 export function GetVideoPreview(arg1, arg2, arg3) {
   return window['go']['app']['App']['GetVideoPreview'](arg1, arg2, arg3);
+}
+
+export function ImportPreferences() {
+  return window['go']['app']['App']['ImportPreferences']();
 }
 
 export function ImportShare(arg1, arg2, arg3, arg4) {
@@ -274,6 +282,14 @@ export function PlayVideoQuality(arg1, arg2, arg3, arg4) {
   return window['go']['app']['App']['PlayVideoQuality'](arg1, arg2, arg3, arg4);
 }
 
+export function PreviewMigration(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['app']['App']['PreviewMigration'](arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
+export function PreviewSync(arg1) {
+  return window['go']['app']['App']['PreviewSync'](arg1);
+}
+
 export function PreviewURL(arg1, arg2, arg3) {
   return window['go']['app']['App']['PreviewURL'](arg1, arg2, arg3);
 }
@@ -346,6 +362,10 @@ export function RunSync(arg1) {
   return window['go']['app']['App']['RunSync'](arg1);
 }
 
+export function RunSyncPlan(arg1, arg2, arg3) {
+  return window['go']['app']['App']['RunSyncPlan'](arg1, arg2, arg3);
+}
+
 export function SaveCloudTextFile(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['app']['App']['SaveCloudTextFile'](arg1, arg2, arg3, arg4, arg5);
 }
@@ -376,6 +396,10 @@ export function SaveSettings(arg1) {
 
 export function SaveSyncConfig(arg1) {
   return window['go']['app']['App']['SaveSyncConfig'](arg1);
+}
+
+export function SearchCachedFiles(arg1) {
+  return window['go']['app']['App']['SearchCachedFiles'](arg1);
 }
 
 export function SearchFiles(arg1, arg2, arg3) {
@@ -432,6 +456,10 @@ export function ValidateMountedWrite(arg1, arg2) {
 
 export function ValidateUploadFiles(arg1, arg2, arg3) {
   return window['go']['app']['App']['ValidateUploadFiles'](arg1, arg2, arg3);
+}
+
+export function VerifyMigration(arg1) {
+  return window['go']['app']['App']['VerifyMigration'](arg1);
 }
 
 export function WatchShowRequests() {

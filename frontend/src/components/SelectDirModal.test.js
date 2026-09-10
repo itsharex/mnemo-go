@@ -6,6 +6,8 @@ const api = vi.hoisted(() => ({
   listDir: vi.fn(),
   mkdir: vi.fn(),
   providerMetaOf: vi.fn(),
+  providerIconUrl: vi.fn(() => ''),
+  accountName: vi.fn(account => account.user_id),
 }))
 
 vi.mock('../api', () => api)

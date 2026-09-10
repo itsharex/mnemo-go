@@ -7,6 +7,7 @@ import UiIcon from './UiIcon.vue'
 const emit = defineEmits(['drop-files'])
 
 const isDragging = ref(false)
+const zone = ref(null)
 let dragCounter = 0
 let unbindDrop = null
 
@@ -55,6 +56,8 @@ function onDrop(e) {
 onMounted(() => {
   // Wails v2 原生文件拖入监听
   unbindDrop = onFileDrop((x, y, paths) => {
+    const rect = zone.value?.getBoundingClientRect()
+    if (!rect || !rect.width || !rect.height || x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return
     isDragging.value = false
     dragCounter = 0
     if (paths && paths.length) {
@@ -70,6 +73,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div
+    ref="zone"
     class="drag-drop-zone"
     :class="{ 'drag-active': isDragging }"
     style="--wails-drop-target: drop"

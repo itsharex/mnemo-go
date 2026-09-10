@@ -22,7 +22,21 @@ const props = defineProps({
   accounts: { type: Array, default: () => [] },
   providers: { type: Array, default: () => [] }
 })
-const emit = defineEmits(['toast'])
+const emit = defineEmits(['toast', 'navigate'])
+const detailID = ref('')
+const verifying = ref(false), verification = ref({})
+async function verifyMigration() {
+  if (!detailID.value || verifying.value) return
+  const id = detailID.value; verifying.value = true
+  try {
+    const result = await window.go.app.App.VerifyMigration(id)
+    if (detailID.value === id) verification.value = Object.fromEntries((result || []).map(item => [item.id,item]))
+  } catch(e) { emit('toast',String(e),'error') }
+  finally { verifying.value = false }
+}
+watch(detailID, () => { verification.value = {} })
+const detailJob = computed(() => migrateJobs.value.find(j => j.id === detailID.value))
+const verificationLabels = { unverified: '未校验', size: '传输大小已核对', 'provider-hash': '服务商已接受哈希' }
 
 // ---------- 菜单 / 账号筛选 ----------
 const menu = ref('downloading')
@@ -710,6 +724,7 @@ const migName = (uid) => {
   const acc = props.accounts.find((a) => a.user_id === uid)
   return acc ? accountName(acc) : uid
 }
+const migIcon = (uid) => providerIconUrl(providerMetaOf(props.accounts.find(a => a.user_id === uid) || { user_id: uid }, props.providers))
 const migBadge = (s) => ({ completed: 'success', failed: 'error', running: 'primary' }[s] || 'warn')
 const migStatusText = (s) => ({ pending: '等待中', running: '迁移中', completed: '已完成', partial: '部分完成', failed: '失败', canceled: '已取消' }[s] || s)
 const migCompletedTopLevel = (j) => (j.fileIDs || []).filter((id) => (j.completedFileIDs || []).includes(id)).length
@@ -796,6 +811,15 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page">
+    <Modal v-if="detailJob" title="迁移详情" width="760px" @close="detailID = ''">
+      <p class="account-inline"><img :src="migIcon(detailJob.srcUser)" alt="" />{{ migName(detailJob.srcUser) }} → <img :src="migIcon(detailJob.dstUser)" alt="" />{{ migName(detailJob.dstUser) }}</p>
+      <p>目标目录：{{ detailJob.dstParent }} · {{ migStatusText(detailJob.status) }}</p>
+      <div class="workspace-results"><div v-for="item in Object.values(detailJob.items || {})" :key="item.id" class="workspace-result"><span><strong>{{ item.name }}</strong><small>{{ migStatusText(item.status) }} · {{ verificationLabels[item.verification] || '未校验' }}</small><small v-if="item.error">{{ item.error }}</small></span></div><p v-if="!Object.keys(detailJob.items || {}).length">旧任务没有逐项记录，恢复任务后会记录详情。</p></div>
+      <p class="hint">大小核对只验证传输字节数；服务商接受哈希不等于重新读取目标文件校验。</p>
+      <button class="btn" :disabled="verifying || ['running','pending'].includes(detailJob.status)" @click="verifyMigration">{{ verifying ? '校验中…' : '校验目标' }}</button>
+      <p v-for="item in Object.values(verification)" :key="item.id" :style="item.status === 'mismatch' ? {color:'var(--color-error)'} : {}">{{ detailJob.items?.[item.id]?.name || item.id }}：{{ item.detail }}</p>
+      <template #actions><button class="btn" @click="emit('navigate', {userId:detailJob.dstUser,dirId:detailJob.dstParent,name:'迁移目标'})">打开目标</button><button v-if="['failed','partial','canceled'].includes(detailJob.status)" class="btn primary" @click="resumeMigrateJob(detailJob)">重试未完成</button></template>
+    </Modal>
     <div class="down-layout">
       <!-- 左侧边栏 -->
       <aside class="down-side">
@@ -1138,7 +1162,7 @@ onBeforeUnmount(() => {
                 <div class="rangselect"></div>
                 <div class="fileicon"><UiIcon name="migrate" :size="20" style="color:var(--color-primary)" /></div>
                 <div class="filename">
-                  <div>{{ migName(j.srcUser) }} → {{ migName(j.dstUser) }}</div>
+                  <button class="tbtn account-inline" @click="detailID = j.id"><img :src="migIcon(j.srcUser)" alt="" />{{ migName(j.srcUser) }}<span>→</span><img :src="migIcon(j.dstUser)" alt="" />{{ migName(j.dstUser) }} · 详情</button>
                   <div class="fsub">{{ (j.fileIDs || []).length }} 个文件<template v-if="j.failed"> · 失败 {{ j.failed }}</template><template v-if="['partial', 'failed', 'canceled'].includes(j.status) && migRemaining(j)"> · 可恢复 {{ migRemaining(j) }} 个</template></div>
                 </div>
                 <div class="filesize"></div>

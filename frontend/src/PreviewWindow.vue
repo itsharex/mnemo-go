@@ -69,4 +69,10 @@ html.dark.preview-window {
 .preview-window .preview-modal .pv-image-stage { background: #000; }
 .preview-window .preview-modal .pv-ctl-btn.active, .preview-window .preview-modal .pv-abtn.active { background: #ffffff20; }
 .preview-window-toast { position: fixed; z-index: 9999; bottom: 120px; left: 50%; transform: translateX(-50%); max-width: 80vw; background: #222e; border: 1px solid #ffffff28; color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 13px; pointer-events: none; }
+html.dark.preview-window.oled {
+  --bg-surface: #000; --bg-elevated: #000; --bg-subtle: #000; --control-bg: #000;
+}
+.preview-window.oled .preview-modal .pv-toolbar,
+.preview-window.oled .preview-modal .pv-audio-cover,
+.preview-window.oled .preview-window-toast { background: #000; }
 </style>

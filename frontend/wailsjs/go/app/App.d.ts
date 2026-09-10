@@ -58,6 +58,8 @@ export function DownloadUpdate(arg1:string):Promise<string>;
 
 export function ExportLogs():Promise<string>;
 
+export function ExportPreferences(arg1:string):Promise<string>;
+
 export function FavoriteFiles(arg1:string,arg2:string,arg3:boolean,arg4:Array<string>):Promise<Array<string>>;
 
 export function ForceQuit():Promise<void>;
@@ -77,6 +79,8 @@ export function GetPlayCursor(arg1:string,arg2:string,arg3:string):Promise<numbe
 export function GetSettings():Promise<store.Settings>;
 
 export function GetVideoPreview(arg1:string,arg2:string,arg3:string):Promise<model.VideoPreview>;
+
+export function ImportPreferences():Promise<string>;
 
 export function ImportShare(arg1:string,arg2:string,arg3:string,arg4:string):Promise<drive.ShareImportSession>;
 
@@ -142,6 +146,10 @@ export function PlayVideo(arg1:string,arg2:string,arg3:string):Promise<model.Vid
 
 export function PlayVideoQuality(arg1:string,arg2:string,arg3:string,arg4:string):Promise<model.VideoPreview>;
 
+export function PreviewMigration(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:Array<string>):Promise<app.MigrationPreview>;
+
+export function PreviewSync(arg1:string):Promise<sync.Plan>;
+
 export function PreviewURL(arg1:string,arg2:string,arg3:string):Promise<string>;
 
 export function PrioritizeDownload(arg1:string):Promise<void>;
@@ -178,6 +186,8 @@ export function RevealInFolder(arg1:string):Promise<void>;
 
 export function RunSync(arg1:string):Promise<void>;
 
+export function RunSyncPlan(arg1:string,arg2:string,arg3:Record<string, string>):Promise<void>;
+
 export function SaveCloudTextFile(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<void>;
 
 export function SaveDirectoryCache(arg1:string,arg2:Array<model.File>):Promise<void>;
@@ -193,6 +203,8 @@ export function SavePlayCursor(arg1:string,arg2:string,arg3:string,arg4:number):
 export function SaveSettings(arg1:store.Settings):Promise<void>;
 
 export function SaveSyncConfig(arg1:sync.Config):Promise<void>;
+
+export function SearchCachedFiles(arg1:string):Promise<Array<store.CachedSearchResult>>;
 
 export function SearchFiles(arg1:string,arg2:string,arg3:string):Promise<Array<model.File>>;
 
@@ -221,5 +233,7 @@ export function UploadFiles(arg1:string,arg2:string,arg3:string,arg4:string,arg5
 export function ValidateMountedWrite(arg1:string,arg2:model.ConnConfig):Promise<void>;
 
 export function ValidateUploadFiles(arg1:string,arg2:string,arg3:Array<string>):Promise<void>;
+
+export function VerifyMigration(arg1:string):Promise<Array<app.MigrationVerification>>;
 
 export function WatchShowRequests():Promise<void>;

@@ -396,6 +396,7 @@ func (m *Manager) runDownload(t *model.DownloadTask) {
 		return
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
+	defer cancel()
 	m.cancels[t.ID] = cancel
 	t.Status = "downloading"
 	t.Updated = time.Now().Unix()

@@ -9,9 +9,60 @@ import (
 	"testing"
 	"time"
 
+	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
 	"mnemo-go/internal/store"
 )
+
+type blockingURLDriver struct {
+	drive.Driver
+	entered chan context.Context
+	release chan struct{}
+}
+
+var downloadTestDriver *blockingURLDriver
+
+func init() {
+	drive.Register(drive.Registration{ID: "webdav", Factory: func() drive.Driver { return downloadTestDriver }})
+}
+func (d *blockingURLDriver) GetDownloadURL(ctx context.Context, c drive.Context, id string, expires int) (*model.DownloadURL, error) {
+	d.entered <- ctx
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-d.release:
+		return nil, context.Canceled
+	}
+}
+func TestPauseCancelsDownloadURLResolution(t *testing.T) {
+	d := &blockingURLDriver{entered: make(chan context.Context, 1), release: make(chan struct{})}
+	downloadTestDriver = d
+	dir := t.TempDir()
+	st, _ := store.Open(dir)
+	m, err := NewManager(st, dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	task := &model.DownloadTask{ID: "cancel-url", UserID: "webdav:test", DriveID: "webdav:test", FileID: "file", Name: "file", Status: "queued"}
+	if err := m.addDownloadTask(task, task.Name); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); m.runDownload(task) }()
+	defer func() { close(d.release); <-done }()
+	select {
+	case <-d.entered:
+	case <-time.After(time.Second):
+		t.Fatal("resolver not entered")
+	}
+	m.Pause(task.ID)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("paused resolver still occupies worker")
+	}
+}
 
 func TestManagerConcurrency(t *testing.T) {
 	dir := t.TempDir()
@@ -133,8 +184,72 @@ func TestManagerSetDir(t *testing.T) {
 	m.mu.Lock()
 	got := m.dir
 	m.mu.Unlock()
-	if got != newDir {
+	if got != filepath.Clean(newDir) {
 		t.Errorf("expected dir %s, got %s", newDir, got)
+	}
+}
+
+func TestManagerClearingDirectoryRestoresDefault(t *testing.T) {
+	custom := t.TempDir()
+	st, _ := store.Open(t.TempDir())
+	m, err := NewManager(st, custom, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	m.SetDir("")
+	if m.dir == custom || !filepath.IsAbs(m.dir) {
+		t.Fatalf("clearing directory did not restore an absolute system default: %q", m.dir)
+	}
+}
+
+func TestDownloadRejectsUnavailableDirectoryBeforeEnqueue(t *testing.T) {
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := store.Open(t.TempDir())
+	m, err := NewManager(st, blocked, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	if _, err := m.AddDownloadURL("file.txt", ":invalid", nil); err == nil {
+		t.Fatal("unavailable destination must be rejected before creating a download task")
+	}
+	if len(m.List()) != 0 {
+		t.Fatal("unavailable destination created a task")
+	}
+}
+
+func TestDownloadDirectoryChangeKeepsExistingTaskPaths(t *testing.T) {
+	st, _ := store.Open(t.TempDir())
+	first, second := t.TempDir(), t.TempDir()
+	m, err := NewManager(st, first, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	oldTask := &model.DownloadTask{ID: "old-directory", Status: "paused"}
+	if err := m.addDownloadTask(oldTask, "original.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SetDir(second); err != nil {
+		t.Fatal(err)
+	}
+	newTask := &model.DownloadTask{ID: "new-directory", Status: "paused"}
+	if err := m.addDownloadTask(newTask, "next.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if oldTask.LocalPath != filepath.Join(first, "original.txt") || newTask.LocalPath != filepath.Join(second, "next.txt") {
+		t.Fatalf("old=%q new=%q", oldTask.LocalPath, newTask.LocalPath)
+	}
+	if err := m.SetDir("relative/path"); err == nil {
+		t.Fatal("relative path accepted")
+	}
+	if current, _ := m.Directory(); current != second {
+		t.Fatal("invalid path replaced working directory")
 	}
 }
 

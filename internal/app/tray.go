@@ -97,6 +97,12 @@ func (a *App) ForceQuit() {
 // 窗口到托盘而非退出；真正退出前若仍有下载任务，弹窗请用户确认。
 // 返回 true 表示阻止关闭。
 func (a *App) BeforeClose(ctx context.Context) bool {
+	a.updateMu.Lock()
+	applyingUpdate := a.updateApplying
+	a.updateMu.Unlock()
+	if applyingUpdate {
+		return false
+	}
 	realQuit := a.forceQuit.Load()
 	if TrayAvailable() && !realQuit {
 		if st, err := a.storeOrError(); err == nil {

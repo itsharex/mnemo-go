@@ -68,10 +68,11 @@ var globalUploadRate atomic.Int64
 var globalUploadThrottle uploadThrottle
 
 type uploadThrottle struct {
-	mu     sync.Mutex
-	rate   int64
-	window int64
-	start  time.Time
+	mu      sync.Mutex
+	rate    int64
+	tokens  float64
+	start   time.Time
+	changed chan struct{}
 }
 
 // SetGlobalUploadRate sets the upload speed cap (bytes/s). 0 disables the cap.
@@ -80,8 +81,12 @@ func SetGlobalUploadRate(bytesPerSec int64) {
 	globalUploadThrottle.mu.Lock()
 	if globalUploadThrottle.rate != bytesPerSec {
 		globalUploadThrottle.rate = bytesPerSec
-		globalUploadThrottle.window = 0
+		globalUploadThrottle.tokens = 0
 		globalUploadThrottle.start = time.Now()
+		if globalUploadThrottle.changed != nil {
+			close(globalUploadThrottle.changed)
+		}
+		globalUploadThrottle.changed = make(chan struct{})
 	}
 	globalUploadThrottle.mu.Unlock()
 }
@@ -93,39 +98,114 @@ func GlobalUploadRate() int64 { return globalUploadRate.Load() }
 // wired into driveutil.ProgressReader so concurrent direct uploads share one
 // bucket instead of each creating an independent task-level limit.
 func WaitGlobalUpload(n int64) {
-	if n <= 0 {
-		return
-	}
-	for {
+	_ = WaitGlobalUploadContext(context.Background(), n)
+}
+
+// WaitGlobalUploadContext charges actual bytes against one process-wide bucket.
+// Cancellation and settings changes wake waiters without leaving reserved debt.
+func WaitGlobalUploadContext(ctx context.Context, n int64) error {
+	for n > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		globalUploadThrottle.mu.Lock()
 		rate := globalUploadThrottle.rate
 		if rate <= 0 {
 			globalUploadThrottle.mu.Unlock()
-			return
+			return nil
 		}
 		now := time.Now()
-		if globalUploadThrottle.start.IsZero() {
-			globalUploadThrottle.start = now
+		burst := max(int64(1), rate/10)
+		globalUploadThrottle.tokens = min(float64(burst), globalUploadThrottle.tokens+float64(rate)*now.Sub(globalUploadThrottle.start).Seconds())
+		globalUploadThrottle.start = now
+		charge := min(n, burst)
+		if globalUploadThrottle.tokens >= float64(charge) {
+			globalUploadThrottle.tokens -= float64(charge)
+			globalUploadThrottle.mu.Unlock()
+			n -= charge
+			continue
 		}
-		if now.Sub(globalUploadThrottle.start) >= time.Second {
-			globalUploadThrottle.start = now
-			globalUploadThrottle.window = 0
-		}
-		globalUploadThrottle.window += n
-		allowed := float64(rate) * now.Sub(globalUploadThrottle.start).Seconds()
-		wait := time.Duration(0)
-		if float64(globalUploadThrottle.window) > allowed {
-			wait = time.Duration((float64(globalUploadThrottle.window) - allowed) / float64(rate) * float64(time.Second))
-		}
+		wait := time.Duration((float64(charge) - globalUploadThrottle.tokens) / float64(rate) * float64(time.Second))
+		changed := globalUploadThrottle.changed
 		globalUploadThrottle.mu.Unlock()
-		if wait <= 0 {
-			return
+		timer := time.NewTimer(max(wait, time.Microsecond))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-changed:
+			timer.Stop()
+		case <-timer.C:
 		}
-		time.Sleep(wait)
-		// The accounting window is intentionally shared; after sleeping we
-		// return because the bytes were already reserved before the wait.
-		return
 	}
+	return ctx.Err()
+}
+
+type uploadBody struct {
+	io.ReadCloser
+	ctx context.Context
+}
+
+func (b *uploadBody) Read(p []byte) (int, error) {
+	if err := b.ctx.Err(); err != nil {
+		return 0, err
+	}
+	limit := int64(32 * 1024)
+	if rate := GlobalUploadRate(); rate > 0 {
+		limit = min(limit, max(int64(1), rate/10))
+	}
+	if int64(len(p)) > limit {
+		p = p[:limit]
+	}
+	n, err := b.ReadCloser.Read(p)
+	if waitErr := WaitGlobalUploadContext(b.ctx, int64(n)); waitErr != nil {
+		return 0, waitErr
+	}
+	return n, err
+}
+
+// UploadHTTPClient applies throttling after request construction/signing so
+// ContentLength, checksums and seekable SDK inputs keep their original semantics.
+type UploadHTTPClient struct {
+	Client interface {
+		Do(*http.Request) (*http.Response, error)
+	}
+}
+
+func (c UploadHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	return DoUpload(c.Client, req)
+}
+
+// DoUpload also wraps replay bodies: redirected/retried bytes count again.
+func DoUpload(client interface {
+	Do(*http.Request) (*http.Response, error)
+}, req *http.Request) (*http.Response, error) {
+	copy := req.Clone(req.Context())
+	if req.Body != nil && req.Body != http.NoBody {
+		copy.Body = &uploadBody{ReadCloser: req.Body, ctx: req.Context()}
+		if req.GetBody != nil {
+			getBody := req.GetBody
+			copy.GetBody = func() (io.ReadCloser, error) {
+				b, err := getBody()
+				if err != nil {
+					return nil, err
+				}
+				return &uploadBody{ReadCloser: b, ctx: req.Context()}, nil
+			}
+		}
+	}
+	return client.Do(copy)
+}
+
+func (c *Client) DoUpload(ctx context.Context, method, target string, headers map[string]string, body io.Reader) (*http.Response, error) {
+	req, err := c.Req(ctx, method, target, body)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	return DoUpload(c.HTTP, req)
 }
 
 // NewClient builds a client with sane defaults.

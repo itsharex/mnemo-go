@@ -23,6 +23,98 @@ import (
 	"mnemo-go/internal/netx"
 )
 
+func TestFavoritesReadAllPagesAndWriteNativeStatus(t *testing.T) {
+	d := &Driver{}
+	p, ok := any(d).(drive.RemoteFavorites)
+	if !ok {
+		t.Fatal("123 native favorites not implemented")
+	}
+	old := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = old })
+	pages, writes := 0, 0
+	netx.TestTransportHook = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"code":0,"data":{}}`
+		switch r.URL.Path {
+		case "/b/api/restful/goapi/v1/file/starred/list":
+			pages++
+			if r.Method != http.MethodGet || r.URL.Query().Get("page") != fmt.Sprint(pages) || r.URL.Query().Get("pageSize") != "100" {
+				t.Fatalf("invalid pagination: %s %s", r.Method, r.URL)
+			}
+			if pages == 1 {
+				body = `{"code":0,"data":{"starredFileInfos":[{"fileId":9007199254740993,"fileName":"photo.jpg","fileSize":42,"fileType":0,"parentFileId":5}],"next":"cursor"}}`
+			} else {
+				if r.URL.Query().Get("next") != "cursor" {
+					t.Fatal("cursor not forwarded")
+				}
+				body = `{"code":0,"data":{"starredFileInfos":[{"fileId":12,"fileName":"Folder","fileSize":0,"fileType":1,"parentFileId":0}],"next":"-1"}}`
+			}
+		case "/b/api/restful/goapi/v1/file/starred":
+			writes++
+			var v struct {
+				IDs    []json.Number `json:"fileIdList"`
+				Status int           `json:"starredStatus"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+				t.Fatal(err)
+			}
+			want := 255
+			if writes == 2 {
+				want = 1
+			}
+			if r.Method != http.MethodPost || len(v.IDs) != 1 || v.IDs[0].String() != "9007199254740993" || v.Status != want {
+				t.Fatalf("invalid write: %+v", v)
+			}
+		default:
+			t.Fatalf("unexpected favorites endpoint %s", r.URL)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})
+	c := drive.Context{UserID: "pan123:favorites", DriveID: "pan123", Token: &model.TokenInfo{AccessToken: "token"}}
+	files, err := p.ListFavorites(context.Background(), c)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("favorites=%+v err=%v", files, err)
+	}
+	if files[0].FileID != "9007199254740993" || files[0].Size != 42 || files[0].ParentFileID != "5" || !files[0].Starred || !files[1].IsDir {
+		t.Fatalf("lost favorite metadata: %+v", files)
+	}
+	for _, starred := range []bool{true, false} {
+		ids, err := d.Favorite(context.Background(), c, []string{"9007199254740993"}, starred)
+		if err != nil || len(ids) != 1 {
+			t.Fatalf("write=%v, %v", ids, err)
+		}
+	}
+}
+
+func TestFavoritesRejectBrokenPagesAndBusinessFailures(t *testing.T) {
+	old := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = old })
+	c := drive.Context{UserID: "pan123_favorite-errors", DriveID: "d", Token: &model.TokenInfo{AccessToken: "token"}}
+	for _, body := range []string{
+		`{"code":0,"data":{}}`,
+		`{"code":0,"data":{"starredFileInfos":[{"fileId":1,"fileName":"a"}],"next":"repeat"}}`,
+		`{"code":0,"data":{"starredFileInfos":[{"fileId":1,"fileName":"a"}]}}`,
+		`{"code":403,"message":"not allowed"}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			netx.TestTransportHook = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			})
+			if _, err := (&Driver{}).ListFavorites(context.Background(), c); err == nil {
+				t.Fatal("invalid favorite snapshot accepted")
+			}
+		})
+	}
+	if ids, err := (&Driver{}).Favorite(context.Background(), c, []string{"1"}, true); err == nil || len(ids) != 0 {
+		t.Fatal("business failure accepted")
+	}
+	netx.TestTransportHook = roundTripFunc(func(r *http.Request) (*http.Response, error) { t.Fatal("invalid ID sent upstream"); return nil, nil })
+	for _, id := range []string{"", "root", "-1", "1.2", "9223372036854775808"} {
+		if _, err := (&Driver{}).Favorite(context.Background(), c, []string{id}, true); err == nil {
+			t.Errorf("invalid ID accepted: %q", id)
+		}
+	}
+}
+
 // ---- signPath / crc32 ----
 
 func TestUploadCanceledContextCannotReportSuccess(t *testing.T) {
@@ -1287,6 +1379,29 @@ func TestPutChunkReturnsHTTPStatusForPresignRetry(t *testing.T) {
 	}
 	if status != http.StatusForbidden {
 		t.Fatalf("putChunk status = %d, want %d", status, http.StatusForbidden)
+	}
+}
+
+func TestPutChunkHonorsUploadLimitAndCancellation(t *testing.T) {
+	netx.SetGlobalUploadRate(1000)
+	defer netx.SetGlobalUploadRate(0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	start := time.Now()
+	if _, err := putChunk(context.Background(), srv.URL, make([]byte, 300)); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < 200*time.Millisecond {
+		t.Fatal("part upload bypassed rate limit")
+	}
+	netx.SetGlobalUploadRate(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := putChunk(ctx, srv.URL, make([]byte, 300)); err == nil {
+		t.Fatal("throttled upload ignored cancellation")
 	}
 }
 

@@ -183,6 +183,14 @@ type WriteConnectionValidator interface {
 	ValidateWriteConnection(ctx context.Context, conn *model.ConnConfig) error
 }
 
+// RemoteFavorites is optional. A provider must support both reading and
+// modifying its native favorites before opting in. Account-specific modes
+// (for example personal vs business OneDrive) are resolved by the provider.
+type RemoteFavorites interface {
+	SupportsRemoteFavorites(ctx context.Context, c Context) (bool, error)
+	ListFavorites(ctx context.Context, c Context) ([]model.File, error)
+}
+
 // Driver is the plugin contract every provider implements.
 // Only List is required; everything else is capability-gated and optional.
 type Driver interface {

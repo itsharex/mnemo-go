@@ -18,6 +18,8 @@ export function CancelShare(arg1:model.ShareHistoryEntry):Promise<void>;
 
 export function CancelSync(arg1:string):Promise<boolean>;
 
+export function CancelUpdate():Promise<boolean>;
+
 export function CancelUpload(arg1:string):Promise<void>;
 
 export function CheckUpdate():Promise<app.CheckUpdateResult>;
@@ -66,6 +68,8 @@ export function ForceQuit():Promise<void>;
 
 export function GetDirectoryCache(arg1:string):Promise<Array<model.File>>;
 
+export function GetDownloadDirectory():Promise<string>;
+
 export function GetDownloadURL(arg1:string,arg2:string,arg3:string):Promise<model.DownloadURL>;
 
 export function GetFileDetail(arg1:string,arg2:string,arg3:string):Promise<model.File>;
@@ -77,6 +81,8 @@ export function GetPan189Captcha():Promise<string>;
 export function GetPlayCursor(arg1:string,arg2:string,arg3:string):Promise<number>;
 
 export function GetSettings():Promise<store.Settings>;
+
+export function GetUpdateStatus():Promise<app.UpdateStatus>;
 
 export function GetVideoPreview(arg1:string,arg2:string,arg3:string):Promise<model.VideoPreview>;
 
@@ -128,6 +134,8 @@ export function OfflineDownload(arg1:string,arg2:string,arg3:string,arg4:string)
 
 export function OpenBrowser(arg1:string):Promise<void>;
 
+export function OpenDownloadDirectory():Promise<void>;
+
 export function OpenFile(arg1:string):Promise<void>;
 
 export function OpenPikPakCaptcha(arg1:string):Promise<void>;
@@ -173,6 +181,8 @@ export function RenameBatch(arg1:string,arg2:string,arg3:Array<drive.FileRef>,ar
 export function RenameFile(arg1:string,arg2:string,arg3:string,arg4:string):Promise<drive.RenameResult>;
 
 export function RenameMountedAccount(arg1:string,arg2:string):Promise<model.Account>;
+
+export function RestoreFavorite(arg1:store.Favorite):Promise<void>;
 
 export function RestoreFiles(arg1:string,arg2:string,arg3:Array<string>):Promise<Array<string>>;
 

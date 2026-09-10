@@ -184,7 +184,11 @@ func (c *Client) applyDigestAuth(req *http.Request) error {
 // so it is accepted only when WWW-Authenticate explicitly offers Digest.
 // Basic and Bearer are intentionally never retried to avoid extra requests.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
-	resp, err := c.HTTP.Do(req)
+	send := c.HTTP.Do
+	if req.Method == http.MethodPut {
+		send = func(r *http.Request) (*http.Response, error) { return netx.DoUpload(c.HTTP, r) }
+	}
+	resp, err := send(req)
 	if err != nil || resp == nil || (c.authMode != webDAVAuthAuto && c.authMode != webDAVAuthDigest) {
 		return resp, err
 	}
@@ -213,7 +217,7 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 	_ = resp.Body.Close()
-	return c.HTTP.Do(retry)
+	return send(retry)
 }
 
 // DownloadAuth exposes a request-scoped authenticator for the transfer and

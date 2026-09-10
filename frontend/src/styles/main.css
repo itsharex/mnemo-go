@@ -52,15 +52,24 @@ body {
 .app-brand {
   display: inline-flex;
   align-items: center;
+  gap: 7px;
   height: 100%;
-  margin-right: 18px;
-  padding-left: 4px;
+  margin-right: 0;
+  padding-left: 0;
   color: var(--text-primary);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 650;
   letter-spacing: .01em;
   white-space: nowrap;
   --wails-draggable: drag;
+}
+.app-brand-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  object-fit: contain;
+  pointer-events: none;
 }
 .topbar-account {
   display: inline-flex;
@@ -94,7 +103,7 @@ body {
 .window-close:hover { color: #fff; background: #c43d4b; }
 .top-tabs {
   position: relative; display: flex; align-items: center; gap: 2px;
-  align-self: center; height: 28px; margin-left: 4px; padding: 3px;
+  align-self: center; height: 28px; margin-left: 0; padding: 3px;
   border-radius: var(--radius-full);
   background: var(--bg-subtle);
 }
@@ -109,7 +118,7 @@ body {
 .top-tab {
   position: relative; z-index: 1;
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  height: 22px; padding: 0 14px;
+  height: 22px; width: 34px; padding: 0;
   color: var(--text-secondary); font-size: 13px; cursor: pointer;
   border: none; background: none; border-radius: var(--radius-full);
   transition: color var(--motion-fast) var(--motion-ease);
@@ -1280,7 +1289,8 @@ body.rail-drag-active { cursor: grabbing; user-select: none; }
 .workspace-controls { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:8px; }
 .workspace-controls .input { flex:1; min-width:180px; }
 .workspace-panes { display:flex; flex:1; min-height:0; overflow:hidden; }
-.workspace-pane { flex:1; min-width:0; display:flex; overflow:hidden; border-top:2px solid transparent; }
+.workspace-pane { flex:1; min-width:0; display:flex; overflow:hidden; }
+.workspace-panes.dual .workspace-pane { border-top:2px solid transparent; }
 .workspace-pane > * { flex:1; min-width:0; }
 .workspace-panes.dual .workspace-pane.focused { border-top-color:var(--color-primary); }
 .workspace-panes.dual .workspace-pane + .workspace-pane { border-left:1px solid var(--border-light); }

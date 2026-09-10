@@ -78,6 +78,7 @@ type pan189LoginState struct {
 	SMSLogin        bool
 	SMSCaptchaToken string
 	PageKey         string
+	PageURL         string
 	Client          *netx.Client
 	CreatedAt       time.Time
 }
@@ -89,6 +90,7 @@ func pan189PasswordProof(password string) string {
 
 func newPan189LoginClient() (*netx.Client, error) {
 	hc := netx.NewClient(60 * time.Second)
+	hc.UA = ua189
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
@@ -225,6 +227,10 @@ func prepareLoginParam(ctx context.Context, user, pass string) (*pan189LoginStat
 	html, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 	resp.Body.Close()
 	page := string(html)
+	pageURL := authURL + "/api/logbox/oauth2/unifyAccountLogin.do"
+	if resp.Request != nil && resp.Request.URL != nil {
+		pageURL = resp.Request.URL.String()
+	}
 	captchaToken := pickMatch(page, `'captchaToken'\s*value='(.+?)'`)
 	if captchaToken == "" {
 		captchaToken = pickMatch(page, `captchaToken["']\s*value=["'](.+?)["']`)
@@ -240,9 +246,12 @@ func prepareLoginParam(ctx context.Context, user, pass string) (*pan189LoginStat
 	form := url.Values{}
 	form.Set("appId", appID)
 	cresp, err := hc.Do(ctx, http.MethodPost, authURL+"/api/logbox/config/encryptConf.do", map[string]string{
-		"Content-Type": "application/x-www-form-urlencoded",
-		"User-Agent":   ua189,
-		"Accept":       "application/json",
+		"Content-Type":     "application/x-www-form-urlencoded",
+		"User-Agent":       ua189,
+		"Accept":           "application/json",
+		"Origin":           authURL,
+		"Referer":          pageURL,
+		"X-Requested-With": "XMLHttpRequest",
 	}, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
@@ -281,6 +290,7 @@ func prepareLoginParam(ctx context.Context, user, pass string) (*pan189LoginStat
 		PublicKey:   conf.Data.PubKey, RsaPrefix: conf.Data.Pre,
 		SMSCaptchaToken: pickMatch(page, `(?s)id=["']j-sms-captcha["'].*?name=['"]captchaToken['"]\s*value=['"]([^'"]+)`),
 		PageKey:         firstNonEmpty(pickMatch(page, `\bpageKey\s*=\s*["']([^"']+)`), "normal"),
+		PageURL:         pageURL,
 	}, nil
 }
 
@@ -361,11 +371,14 @@ func loginSubmit(ctx context.Context, st *pan189LoginState, validateCode string)
 	form.Set("paramId", st.ParamID)
 
 	resp, err := st.Client.Do(ctx, http.MethodPost, authURL+"/api/logbox/oauth2/loginSubmit.do", map[string]string{
-		"Content-Type": "application/x-www-form-urlencoded",
-		"REQID":        st.ReqID,
-		"lt":           st.LT,
-		"User-Agent":   ua189,
-		"Accept":       "application/json;charset=UTF-8",
+		"Content-Type":     "application/x-www-form-urlencoded",
+		"REQID":            st.ReqID,
+		"lt":               st.LT,
+		"User-Agent":       ua189,
+		"Accept":           "application/json;charset=UTF-8",
+		"Origin":           authURL,
+		"Referer":          st.PageURL,
+		"X-Requested-With": "XMLHttpRequest",
 	}, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
@@ -379,12 +392,13 @@ func loginSubmit(ctx context.Context, st *pan189LoginState, validateCode string)
 		return "", errors.New("189 登录失败（响应异常）")
 	}
 	toURL := strVal(j, "toUrl")
-	if toURL == "" {
+	resultCode := strVal(j, "result")
+	if toURL == "" || resultCode != "" && resultCode != "0" {
 		msg := firstNonEmpty(strVal(j, "msg"), strVal(j, "message"), strVal(j, "errorMsg"), strVal(j, "desc"), "189 登录失败（未返回 toUrl）")
 		if code := strVal(j, "result"); code != "" {
 			msg += "（错误码 " + code + "）"
 		}
-		if strings.Contains(msg, "刷新页面后重试") {
+		if resultCode == "-20000" || pan189PageExpiredMessage(msg) {
 			return "", fmt.Errorf("%w：%s", errPan189LoginPageExpired, msg)
 		}
 		// SMS validation errors belong to the SMS session. The password-captcha
@@ -397,6 +411,10 @@ func loginSubmit(ctx context.Context, st *pan189LoginState, validateCode string)
 	return toURL, nil
 }
 
+func pan189PageExpiredMessage(message string) bool {
+	return strings.Contains(strings.Join(strings.Fields(message), ""), "刷新页面后重试")
+}
+
 func isPan189CaptchaFailure(message string) bool {
 	message = strings.ToLower(message)
 	return strings.Contains(message, "验证码") || strings.Contains(message, "captcha") || strings.Contains(message, "validatecode")
@@ -407,6 +425,7 @@ type pan189SMSState struct {
 	CaptchaRequired bool
 	ValidateCode    string
 	LastSent        time.Time
+	RedirectURL     string
 }
 
 var pan189SMSMu sync.Mutex
@@ -445,7 +464,7 @@ func RequestPan189SMS(ctx context.Context, username, validateCode string) (strin
 		return "", errors.New("短信验证码已发送，请 60 秒后再试")
 	}
 	st := state.Login
-	headers := map[string]string{"Content-Type": "application/x-www-form-urlencoded", "REQID": st.ReqID, "User-Agent": ua189}
+	headers := map[string]string{"Content-Type": "application/x-www-form-urlencoded", "REQID": st.ReqID, "lt": st.LT, "User-Agent": ua189, "Origin": authURL, "Referer": st.PageURL, "X-Requested-With": "XMLHttpRequest"}
 	form := url.Values{"appKey": {appID}, "mobile": {st.RsaUsername}}
 	resp, err := st.Client.Do(ctx, http.MethodPost, authURL+"/api/logbox/oauth2/smsNeedcaptcha.do", headers, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -493,7 +512,7 @@ func RequestPan189SMS(ctx context.Context, username, validateCode string) (strin
 		if code := strVal(result, "result"); code != "" {
 			msg += "（错误码 " + code + "）"
 		}
-		if strings.Contains(msg, "刷新页面后重试") {
+		if strVal(result, "result") == "-20000" || pan189PageExpiredMessage(msg) {
 			// Retrying with the same invalid page parameters cannot recover.
 			// Reinitialize on the user's next send, without replaying an SMS.
 			delete(pan189SMSLogins, username)
@@ -503,6 +522,7 @@ func RequestPan189SMS(ctx context.Context, username, validateCode string) (strin
 	}
 	state.LastSent = time.Now()
 	state.ValidateCode = validateCode
+	state.RedirectURL = ""
 	return "", nil
 }
 
@@ -518,22 +538,35 @@ func loginPan189BySMS(ctx context.Context, username, smsCode string) (*Session, 
 	if state == nil || state.LastSent.IsZero() {
 		return nil, errors.New("短信登录会话已过期，请重新获取验证码")
 	}
-	st := *state.Login
-	encrypted, err := rsaEncrypt(st.PublicKey, smsCode)
-	if err != nil {
-		return nil, err
+	if state.RedirectURL == "" {
+		st := *state.Login
+		encrypted, err := rsaEncrypt(st.PublicKey, smsCode)
+		if err != nil {
+			return nil, err
+		}
+		st.RsaPassword = st.RsaPrefix + encrypted
+		redirect, err := loginSubmit(ctx, &st, state.ValidateCode)
+		if err != nil {
+			if errors.Is(err, errPan189LoginPageExpired) {
+				delete(pan189SMSLogins, username)
+			}
+			return nil, err
+		}
+		state.RedirectURL = redirect
 	}
-	st.RsaPassword = st.RsaPrefix + encrypted
-	redirect, err := loginSubmit(ctx, &st, state.ValidateCode)
+	// Once accepted, never submit the one-time SMS proof again on a transient
+	// ticket-exchange failure. Retain only the redirect and its cookie session.
+	session, err := getSessionForPC(ctx, state.Login, state.RedirectURL, username)
 	if err != nil {
 		if errors.Is(err, errPan189LoginPageExpired) {
 			delete(pan189SMSLogins, username)
+			return nil, fmt.Errorf("%w，请重新获取短信验证码", err)
 		}
 		return nil, err
 	}
 	delete(pan189SMSLogins, username)
 	// The one-time SMS code must never become a persisted account password.
-	return getSessionForPC(ctx, &st, redirect, username)
+	return session, nil
 }
 
 // getSessionForPC exchanges the redirect URL for the API session key/secret.
@@ -564,7 +597,7 @@ func getSessionForPC(ctx context.Context, st *pan189LoginState, toURL, loginName
 			code := firstNonEmpty(strVal(failure, "res_code"), strVal(failure, "errorCode"))
 			message := firstNonEmpty(strVal(failure, "res_message"), strVal(failure, "errorMsg"), strVal(failure, "message"))
 			if code == "LoginRespIsNull" {
-				message = "登录凭据未被服务端接受，请重新登录"
+				return nil, fmt.Errorf("获取 189 Session 失败：HTTP %d（%s）：%w", resp.StatusCode, code, errPan189LoginPageExpired)
 			}
 			if code != "" || message != "" {
 				return nil, fmt.Errorf("获取 189 Session 失败：HTTP %d（%s）", resp.StatusCode, strings.TrimSpace(code+" "+message))

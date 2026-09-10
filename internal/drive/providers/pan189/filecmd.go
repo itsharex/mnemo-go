@@ -16,16 +16,26 @@ type fileRefItem struct {
 	IsFolder int    `json:"isFolder"`
 }
 
-// batchRefs converts drive refs into batch items, defaulting unknown kinds to
-// files (the list cache is not available here; legacy used the UI cache).
-func batchRefs(refs []drive.FileRef) []fileRefItem {
+// batchRefs keeps the name and kind from the account-scoped listing snapshot.
+// Explicit caller kinds take precedence over the cache.
+func batchRefs(c drive.Context, refs []drive.FileRef) []fileRefItem {
 	out := make([]fileRefItem, 0, len(refs))
 	for _, r := range refs {
 		isDir := 0
-		if r.IsDir != nil && *r.IsDir {
-			isDir = 1
+		name := r.ID
+		if cached, ok := drive.CachedFile(c.UserID, c.DriveID, r.ID); ok {
+			name = cached.Name
+			if cached.IsDir {
+				isDir = 1
+			}
 		}
-		out = append(out, fileRefItem{FileID: r.ID, FileName: r.ID, IsFolder: isDir})
+		if r.IsDir != nil {
+			isDir = 0
+			if *r.IsDir {
+				isDir = 1
+			}
+		}
+		out = append(out, fileRefItem{FileID: r.ID, FileName: name, IsFolder: isDir})
 	}
 	return out
 }
@@ -55,10 +65,15 @@ func (d *Driver) createBatchTask(ctx context.Context, c drive.Context, taskType,
 		return "", err
 	}
 	var res struct {
-		TaskID string `json:"taskId"`
+		TaskID listEntryID `json:"taskId"`
 	}
-	_ = json.Unmarshal(raw, &res)
-	return res.TaskID, nil
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return "", err
+	}
+	if res.TaskID == "" {
+		return "", errors.New("天翼批量操作未返回任务 ID")
+	}
+	return string(res.TaskID), nil
 }
 
 // waitBatchTask polls the task status: 4 = done, 2 = name conflict.
@@ -79,7 +94,9 @@ func (d *Driver) waitBatchTask(ctx context.Context, c drive.Context, taskType, t
 		var res struct {
 			TaskStatus int `json:"taskStatus"`
 		}
-		_ = json.Unmarshal(raw, &res)
+		if err := json.Unmarshal(raw, &res); err != nil {
+			return err
+		}
 		switch res.TaskStatus {
 		case 4:
 			return nil
@@ -183,15 +200,15 @@ func (d *Driver) Rename(ctx context.Context, c drive.Context, fileID, name strin
 }
 
 func (d *Driver) Trash(ctx context.Context, c drive.Context, fileIDs []string) ([]string, error) {
-	items := make([]fileRefItem, 0, len(fileIDs))
+	refs := make([]drive.FileRef, 0, len(fileIDs))
 	for _, id := range fileIDs {
-		items = append(items, fileRefItem{FileID: id, FileName: id})
+		refs = append(refs, drive.FileRef{ID: id})
 	}
-	return d.runBatch(ctx, c, "DELETE", items, "", 250*time.Millisecond, nil)
+	return d.runBatch(ctx, c, "DELETE", batchRefs(c, refs), "", 250*time.Millisecond, nil)
 }
 
 func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileRef) ([]string, error) {
-	items := batchRefs(refs)
+	items := batchRefs(c, refs)
 	// DELETE 任务后补 CLEAR_RECYCLE 清空回收站（对齐 AList Delete 双任务）。
 	ids, err := d.runBatch(ctx, c, "DELETE", items, "", 250*time.Millisecond, nil)
 	if err != nil {
@@ -205,11 +222,11 @@ func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileR
 }
 
 func (d *Driver) Move(ctx context.Context, c drive.Context, refs []drive.FileRef, toParentID, _ string) ([]string, error) {
-	items := batchRefs(refs)
+	items := batchRefs(c, refs)
 	return d.runBatch(ctx, c, "MOVE", items, toFolderID(toParentID), 400*time.Millisecond, map[string]string{"targetFileName": ""})
 }
 
 func (d *Driver) Copy(ctx context.Context, c drive.Context, refs []drive.FileRef, toParentID, _ string) ([]string, error) {
-	items := batchRefs(refs)
+	items := batchRefs(c, refs)
 	return d.runBatch(ctx, c, "COPY", items, toFolderID(toParentID), 1*time.Second, map[string]string{"targetFileName": ""})
 }

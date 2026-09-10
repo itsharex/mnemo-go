@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"mnemo-go/internal/config"
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/logging"
 	"mnemo-go/internal/model"
@@ -778,13 +779,12 @@ func (q *UploadQueue) ClearCompleted() {
 }
 
 // DownloadDir returns the configured download dir (helper).
-func DownloadDir(st *store.Store) string {
+func DownloadDir(st *store.Store) (string, error) {
 	s, err := st.GetSettings()
-	if err != nil || s.DownloadDir == "" {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, "Downloads")
+	if err != nil {
+		return "", err
 	}
-	return s.DownloadDir
+	return config.ResolveDownloadDir(s.DownloadDir)
 }
 
 // Close cancels all in-flight uploads and persists pending state.

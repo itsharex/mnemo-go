@@ -55,8 +55,13 @@ type App struct {
 	secrets         config.Secrets
 	dataDir         string
 
-	updateMu   sync.Mutex
-	updateInfo *updater.Info
+	updateMu       sync.Mutex
+	updateCheckMu  sync.Mutex
+	updateInfo     *updater.Info
+	updateRun      *updateDownloadRun
+	updateReady    *verifiedUpdate
+	updateState    UpdateStatus
+	updateApplying bool
 
 	migrate      *migrate.Engine
 	schedStop    chan struct{} // sync scheduler stop, closed on Shutdown
@@ -67,6 +72,7 @@ type App struct {
 	accountRefreshLast       map[string]time.Time
 	accountRefreshRetryAfter map[string]time.Time
 	accountRefreshGroup      singleflight.Group
+	favoriteLocks            sync.Map // account/drive -> *sync.Mutex; serializes cloud snapshots and edits
 
 	syncRunMu sync.Mutex
 	syncRuns  map[string]*activeSyncRun
@@ -339,7 +345,10 @@ func (a *App) startup(ctx context.Context) {
 	// Internal media/preview server. /local/ access is restricted to exact
 	// registered files under the download directory. The application data
 	// directory is excluded because it contains settings, logs and task state.
-	dlDir := transfer.DownloadDir(st)
+	dlDir, dirErr := transfer.DownloadDir(st)
+	if dirErr != nil {
+		logging.Warn("download directory is not configured correctly", "error", dirErr)
+	}
 	mediaProxy, err := preview.NewServer(dlDir)
 	if err != nil {
 		logging.Error("preview server initialization failed", "error", err)
@@ -352,7 +361,7 @@ func (a *App) startup(ctx context.Context) {
 	a.stateMu.Unlock()
 
 	// download manager + upload queue
-	downloads, err := transfer.NewManager(st, dlDir, func(ev transfer.TaskEvent) {
+	downloads, err := transfer.NewManager(st, "", func(ev transfer.TaskEvent) {
 		a.emit("transfer:event", ev)
 	})
 	if err != nil {
@@ -423,6 +432,7 @@ func (a *App) Shutdown(ctx context.Context) {
 		return
 	}
 	a.shutdownOnce.Do(func() {
+		a.CancelUpdate()
 		a.previewStopping.Store(true)
 		a.previewWindows.Range(func(_, value any) bool { value.(*previewProcess).cancel(); return true })
 		shutdownAt := time.Now()
@@ -1098,11 +1108,52 @@ func (a *App) GetSettings() (store.Settings, error) {
 	return st.GetSettings()
 }
 
+// GetDownloadDirectory exposes the effective directory without replacing the
+// empty system-default preference with a hardcoded path in settings.json.
+func (a *App) GetDownloadDirectory() (string, error) {
+	if dl := a.downloadManager(); dl != nil {
+		return dl.Directory()
+	}
+	st, err := a.storeOrError()
+	if err != nil {
+		return "", err
+	}
+	return transfer.DownloadDir(st)
+}
+
+// OpenDownloadDirectory also creates a missing valid directory before opening
+// it, so the system-default "Open" action works before the first download.
+func (a *App) OpenDownloadDirectory() error {
+	dir, err := a.GetDownloadDirectory()
+	if err != nil {
+		return err
+	}
+	if err := config.EnsureDownloadDir(dir); err != nil {
+		return err
+	}
+	a.RevealInFolder(dir)
+	return nil
+}
+
 // SaveSettings persists settings and applies runtime-relevant changes.
 func (a *App) SaveSettings(s store.Settings) error {
 	logging.Info("settings save started", "download_dir_configured", strings.TrimSpace(s.DownloadDir) != "", "proxy_configured", strings.TrimSpace(s.Proxy) != "", "max_concurrent_downloads", s.MaxConcurrentDownloads, "max_upload_speed", s.MaxUploadSpeed)
 	st, err := a.storeOrError()
 	if err != nil {
+		return err
+	}
+	s.DownloadDir, err = config.NormalizeDownloadDir(s.DownloadDir)
+	if err != nil {
+		return err
+	}
+	resolvedDir := s.DownloadDir
+	if resolvedDir == "" {
+		resolvedDir, err = config.DefaultDownloadDir()
+		if err != nil {
+			return err
+		}
+	}
+	if err := config.EnsureDownloadDir(resolvedDir); err != nil {
 		return err
 	}
 	if s.LogLevel == "" {
@@ -1118,10 +1169,13 @@ func (a *App) SaveSettings(s store.Settings) error {
 	dl := a.downloadManager()
 	mediaProxy := a.previewServer()
 	// apply download directory at runtime
-	if s.DownloadDir != "" && dl != nil {
-		dl.SetDir(s.DownloadDir)
-		if mediaProxy != nil {
-			mediaProxy.SetRoots(s.DownloadDir)
+	if dl != nil {
+		oldDir, oldErr := dl.Directory()
+		if err := dl.SetDir(resolvedDir); err != nil {
+			return err
+		}
+		if mediaProxy != nil && (oldErr != nil || oldDir != resolvedDir) {
+			mediaProxy.SetRoots(resolvedDir)
 		}
 	}
 	// apply concurrency limit at runtime

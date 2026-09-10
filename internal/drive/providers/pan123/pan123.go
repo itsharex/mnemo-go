@@ -49,6 +49,10 @@ const (
 	apiShareGet   = apiMain + "/share/get"
 	apiFileAsync  = apiMain + "/file/async"
 	apiFileDetail = apiMain + "/file/info"
+	apiFavorites  = apiMain + "/restful/goapi/v1/file/starred/list"
+	apiFavorite   = apiMain + "/restful/goapi/v1/file/starred"
+	favoriteYes   = 255
+	favoriteNo    = 1
 
 	// ua mirrors the legacy pan123 client user agent.
 	ua       = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
@@ -70,6 +74,7 @@ func init() {
 		ID:   providerID,
 		Meta: drive.GetMeta(providerID),
 		Caps: drive.NewCapabilities(providerID, map[string]bool{
+			"favorite":        true,
 			"search":          true,
 			"createShare":     true,
 			"shareExpiration": true,
@@ -566,18 +571,19 @@ func mergeFile(in, ex pan123File) pan123File {
 
 // pan123File is the normalized AList 123 file entry (PascalCase + camelCase).
 type pan123File struct {
-	FileID       string
-	FileName     string
-	Size         int64
-	Type         int // 1 = folder
-	Etag         string
-	S3KeyFlag    string
-	DownloadURL  string
-	UpdateAt     string
-	ParentFileID string
-	Category     int
-	Status       int
-	Trashed      int
+	FileID        string
+	FileName      string
+	Size          int64
+	Type          int // 1 = folder
+	Etag          string
+	S3KeyFlag     string
+	DownloadURL   string
+	UpdateAt      string
+	ParentFileID  string
+	Category      int
+	Status        int
+	Trashed       int
+	StarredStatus int
 }
 
 // pickS3 searches any raw key matching /s3.?key.?flag/i.
@@ -600,18 +606,19 @@ func pickS3(raw map[string]any) string {
 // normalizePan123File mirrors legacy normalizePan123FileMeta.
 func normalizePan123File(raw map[string]any) pan123File {
 	f := pan123File{
-		FileID:       asString(pick(raw, "FileId", "fileId")),
-		FileName:     asString(pick(raw, "FileName", "fileName")),
-		Size:         asInt64(pick(raw, "Size", "size")),
-		Type:         asInt(pick(raw, "Type", "type")),
-		Etag:         asString(pick(raw, "Etag", "etag")),
-		S3KeyFlag:    asString(pick(raw, "S3KeyFlag", "s3KeyFlag", "s3keyFlag")),
-		DownloadURL:  asString(pick(raw, "DownloadUrl", "downloadUrl")),
-		UpdateAt:     asString(pick(raw, "UpdateAt", "updateAt")),
-		ParentFileID: asString(pick(raw, "ParentFileId", "parentFileId")),
-		Category:     asInt(pick(raw, "Category", "category")),
-		Status:       asInt(pick(raw, "Status", "status")),
-		Trashed:      asInt(pick(raw, "Trashed", "trashed")),
+		FileID:        asString(pick(raw, "FileId", "fileId", "file_id")),
+		FileName:      asString(pick(raw, "FileName", "fileName", "file_name")),
+		Size:          asInt64(pick(raw, "Size", "size", "fileSize", "file_size")),
+		Type:          asInt(pick(raw, "Type", "type", "fileType", "file_type")),
+		Etag:          asString(pick(raw, "Etag", "etag")),
+		S3KeyFlag:     asString(pick(raw, "S3KeyFlag", "s3KeyFlag", "s3keyFlag")),
+		DownloadURL:   asString(pick(raw, "DownloadUrl", "downloadUrl")),
+		UpdateAt:      asString(pick(raw, "UpdateAt", "updateAt", "update_at")),
+		ParentFileID:  asString(pick(raw, "ParentFileId", "parentFileId", "parent_file_id")),
+		Category:      asInt(pick(raw, "Category", "category")),
+		Status:        asInt(pick(raw, "Status", "status")),
+		Trashed:       asInt(pick(raw, "Trashed", "trashed")),
+		StarredStatus: asInt(pick(raw, "StarredStatus", "starredStatus", "starred_status")),
 	}
 	if f.S3KeyFlag == "" {
 		f.S3KeyFlag = pickS3(raw)
@@ -835,6 +842,7 @@ func mapFile(item pan123File, driveID, parentID string) model.File {
 		f.Icon = "iconfile-folder"
 	}
 	f.DownloadURL = item.DownloadURL
+	f.Starred = item.StarredStatus == favoriteYes
 	f.Description = encodePan123MetaDesc(item)
 	f.ContentHash = ""
 	f.ContentHashName = ""
@@ -850,6 +858,77 @@ func mapFiles(items []pan123File, driveID, parentID string) []model.File {
 }
 
 // ---- list / search / trash / detail (legacy dirfilelist.ts) ----
+
+func (d *Driver) SupportsRemoteFavorites(context.Context, drive.Context) (bool, error) {
+	return true, nil
+}
+
+// ListFavorites uses the native starred feed, not a recursive directory scan.
+func (d *Driver) ListFavorites(ctx context.Context, c drive.Context) ([]model.File, error) {
+	out := []model.File{}
+	next := "0"
+	seen := map[string]bool{}
+	seenIDs := map[string]bool{}
+	for page := 1; page <= 200; page++ {
+		resp, err := d.api(ctx, c, http.MethodGet, apiFavorites, nil, map[string]string{
+			"page": strconv.Itoa(page), "pageSize": "100", "limit": "100", "next": next,
+			"driveId": "0", "parentFileId": "0", "trashed": "false", "orderBy": "file_id", "orderDirection": "desc",
+		})
+		if err != nil {
+			return nil, err
+		}
+		data := parseMap(resp.Data)
+		rows, ok := data["starredFileInfos"].([]any)
+		if !ok {
+			return nil, errors.New("123: 收藏列表响应缺少 starredFileInfos")
+		}
+		for _, row := range rows {
+			raw, ok := row.(map[string]any)
+			if !ok {
+				return nil, errors.New("123: 收藏文件信息无效")
+			}
+			item := normalizePan123File(raw)
+			if item.FileID == "" || item.FileName == "" || seenIDs[item.FileID] {
+				return nil, errors.New("123: 收藏列表包含空白或重复文件")
+			}
+			seenIDs[item.FileID] = true
+			item.StarredStatus = favoriteYes
+			putPool(c, item)
+			out = append(out, mapFile(item, c.DriveID, item.ParentFileID))
+		}
+		next = asString(data["next"])
+		if len(rows) == 0 || next == "-1" {
+			return out, nil
+		}
+		if next == "" || seen[next] {
+			return nil, errors.New("123: 收藏列表分页游标缺失或重复")
+		}
+		seen[next] = true
+	}
+	return nil, errors.New("123: 收藏列表分页超过上限")
+}
+
+func (d *Driver) Favorite(ctx context.Context, c drive.Context, fileIDs []string, favorite bool) ([]string, error) {
+	if len(fileIDs) == 0 {
+		return []string{}, nil
+	}
+	ids := make([]int64, 0, len(fileIDs))
+	for _, id := range fileIDs {
+		n, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("123: 无效的收藏文件 ID %q", id)
+		}
+		ids = append(ids, n)
+	}
+	status := favoriteNo
+	if favorite {
+		status = favoriteYes
+	}
+	if _, err := d.api(ctx, c, http.MethodPost, apiFavorite, map[string]any{"fileIdList": ids, "starredStatus": status}, nil); err != nil {
+		return nil, err
+	}
+	return fileIDs, nil
+}
 
 // fileListPageRaw returns one page from the 123 API. The API uses a numeric
 // Page field and reports "-1" in Next for the final page.

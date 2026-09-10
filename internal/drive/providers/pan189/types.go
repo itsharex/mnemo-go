@@ -5,8 +5,32 @@
 package pan189
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 )
+
+// listEntryID accepts both API encodings without rounding numeric IDs through float64.
+type listEntryID string
+
+func (id *listEntryID) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		var number json.Number
+		if err := json.Unmarshal(data, &number); err != nil {
+			return fmt.Errorf("pan189: invalid entry ID: %w", err)
+		}
+		value = number.String()
+		if strings.ContainsAny(value, ".eE") {
+			return fmt.Errorf("pan189: entry ID must be an integer")
+		}
+	}
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("pan189: empty entry ID")
+	}
+	*id = listEntryID(value)
+	return nil
+}
 
 const (
 	// PAN189Root is the canonical root folder id surfaced to the UI.

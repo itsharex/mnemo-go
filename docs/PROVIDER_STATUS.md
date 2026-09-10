@@ -205,13 +205,13 @@
 | Provider | Favorite | ProvideHashes | RapidUploadHashes | ResolveTransferHash |
 |----------|:--------:|:-------------:|:-----------------:|:-------------------:|
 | pikpak | ✅ | ❌(未声明) | ❌(未声明) | ➖ |
-| aliopen | ➖ | ✅(sha1) | ✅(sha1) | ✅ |
-| pan123 | ➖ | ✅(md5) | ✅(md5) | ✅ |
+| aliopen | ✅ 云端 | ✅(sha1) | ✅(sha1) | ✅ |
+| pan123 | ✅ 云端 | ✅(md5) | ✅(md5) | ✅ |
 | pan189 | ➖ | ✅(md5) | ✅(md5) | ✅ |
 | pan139 | ➖ | ✅(sha256) | ✅(sha256) | ✅ |
 | lanzou | ➖ | ❌ | ❌ | ➖ |
 | ilanzou | ➖ | ✅(md5) | ✅(md5) | ✅ |
-| onedrive | ➖ | ✅(sha1/quickXor) | ➖ | ➖ |
+| onedrive | ✅ 工作/学校；个人为本地 | ✅(sha1/quickXor) | ➖ | ➖ |
 | dropbox | ➖ | ✅(dropbox) | ➖ | ➖ |
 | yike | ➖ | ✅(md5) | ➖ | ➖ |
 | guangya | ➖ | ✅(md5) | ➖ | ✅ |
@@ -219,6 +219,35 @@
 | s3 | ➖ | ➖ | ➖ | ➖ |
 
 > ✅ ilanzou 已实现 `RapidUploadByHash` + `ResolveTransferHash`，并与 onedrive/dropbox 的哈希声明一起纳入跨盘秒传能力；pikpak 通过 GCID 实现秒传但未声明 hash 类型。
+
+#### 收藏逐盘核查（2026-09-10）
+
+上表 `Favorite` 表示原生接口能力，➖ 不表示 UI 无收藏：未接入原生收藏的网盘统一使用本地 `favorites.json`。本轮依据官方接口文档、官方网页公开脚本和本仓库驱动核查；测试使用模拟 HTTP，没有用真实账号进行云端写入验证。
+
+| 网盘 | 当前收藏方式 | 接口依据与适用范围 |
+|---|---|---|
+| PikPak | 云端 | 全局文件列表 `parent_id=*` + `starred` 筛选，`files:star` / `files:unstar`；读取全部分页。 |
+| OneDrive | 工作/学校云端；个人本地 | Graph `driveType` 判断账号类型；`following` / `follow` / `unfollow`。仅显示当前挂载空间可寻址的收藏，排除其他共享空间条目。未知类型、权限或网络错误直接提示，不当作“不支持”。[官方权限与接口](https://learn.microsoft.com/en-us/graph/api/driveitem-follow?view=graph-rest-1.0)。 |
+| Dropbox | 本地 | Dropbox 有产品星标，但公开 API 未提供对应读写能力。[官方开发者支持答复](https://www.dropboxforum.com/discussions/101000014/how-can-i-get-the-starred-files-via-the-api/483041)。 |
+| 123 云盘 | 云端 | 官方网页 `restful/goapi/v1/file/starred/list` 与 `restful/goapi/v1/file/starred`；`starredStatus=255/1`；按 `page`、`next` 读取全部分页，保留大整数文件 ID。[官方网页](https://yun.123pan.cn/)。 |
+| 蓝奏云 | 本地 | 当前驱动及公开网页未找到可完整读写的原生文件收藏接口；不推测私有端点。[官网](https://www.lanzou.com/)。 |
+| 蓝奏优享 | 本地 | 当前接口与网页未找到原生文件收藏读写路径。[官网](https://www.ilanzou.com/)。 |
+| 移动云盘 | 本地 | 当前个人云接口与网页未找到完整文件收藏读写路径；`star` 字段、“我的应用收藏”不单独作为原生收藏依据。[官方网页](https://yun.139.com/w/)。 |
+| 天翼云盘 | 本地 | 个人云与家庭云当前接入接口均未确认原生文件收藏读写能力。[官方网页](https://cloud.189.cn/web/main/)。 |
+| 一刻相册 | 本地，暂不适配云端 | 按用户要求，本轮不核查或接入云端收藏。 |
+| 阿里云盘 Open | 云端 | 官方 `openFile/starredList` + `openFile/update` 的 `starred` 参数；备份盘与资源库分别分页读取，以 `b:`/`r:` 保持文件身份。[列表文档](https://www.yuque.com/aliyundrive/zpfszx/zqkqp6)、[更新文档](https://www.yuque.com/aliyundrive/zpfszx/dp9gn443hh8oksgd)。 |
+| 光鸭云盘 | 本地 | 当前文件接口与网页未找到原生文件收藏读写能力；最近文件、云收藏转存任务不等同文件收藏。[官方网页](https://www.guangyapan.com/)。 |
+| WebDAV | 本地 | 通用 WebDAV 没有跨服务器统一的用户收藏语义；不写私有扩展属性。 |
+| S3 | 本地 | 通用 S3 没有统一文件收藏语义；对象标签不作为收藏，不改写对象元数据。 |
+
+统一行为：
+
+- 前端只调用 `AddFavorite` / `RemoveFavorite`，后端通过 `drive.RemoteFavorites` 判断支持情况，不添加中央 provider 分支。
+- 云端操作失败会返回错误，保留原有本地记录；分页失败、重复游标、异常列表不能替换完整快照。不同账号与空间的记录隔离。
+- 原生收藏与旧本地收藏合并展示，相同文件以云端为准；云端取消后会清除相应云端快照。旧本地收藏及备份导入项继续保留，移除纯本地项不触发云端写操作。
+- 保留收藏时间和文件大小、父目录、文件类型等信息，剔除下载和缩略图临时链接。侧边栏提示该条目是云端还是本地收藏。
+- 偏好导出读取本地快照，不要求所有账号在线；`RestoreFavorite` 将备份合并为本地收藏，不覆盖已有记录、不回放云端写操作。
+- 回归覆盖原生接口请求、分页、双盘作用域、所有本地回退、存储隔离、备份兼容、前端重复调用和账号切换。
 
 ---
 

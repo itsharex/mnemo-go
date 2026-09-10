@@ -120,6 +120,7 @@ func init() {
 		ID:   providerID,
 		Meta: drive.GetMeta(providerID),
 		Caps: drive.NewCapabilities(providerID, map[string]bool{
+			"favorite":            true,
 			"search":              true,
 			"createShare":         true,
 			"manageCreatedShares": true,
@@ -430,6 +431,7 @@ type aliFile struct {
 	Category        string `json:"category"`
 	Status          string `json:"status"`
 	DownloadURL     string `json:"download_url"`
+	Starred         bool   `json:"starred"`
 }
 
 type aliOpenDownloadResponse struct {
@@ -449,6 +451,13 @@ type client struct {
 }
 
 func clientOf(c drive.Context) (*client, error) {
+	return clientOfContext(context.Background(), c)
+}
+
+func clientOfContext(ctx context.Context, c drive.Context) (*client, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if c.Token == nil {
 		return nil, drive.ErrUnauthorized
 	}
@@ -458,12 +467,12 @@ func clientOf(c drive.Context) (*client, error) {
 	}
 	cl := &client{http: netx.NewClient(60 * time.Second), session: sess, token: c.Token}
 	if sess.AccessToken == "" {
-		if err := cl.refresh(context.Background(), c.UserID); err != nil {
+		if err := cl.refresh(ctx, c.UserID); err != nil {
 			return nil, err
 		}
 	}
 	if sess.DriveID == "" {
-		if err := cl.ensureDrive(context.Background()); err != nil {
+		if err := cl.ensureDrive(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -651,6 +660,9 @@ func (c *client) ensureDrive(ctx context.Context) error {
 func (c *client) scopedDriveID(scope Scope) string {
 	if scope == ScopeResource && c.session.ResourceDriveID != "" {
 		return c.session.ResourceDriveID
+	}
+	if scope == ScopeBackup && c.session.BackupDriveID != "" {
+		return c.session.BackupDriveID
 	}
 	return c.session.DriveID
 }
@@ -1466,6 +1478,7 @@ func mapFile(item *aliFile, driveID, parentID, scopePrefix string) model.File {
 	f.ContentHashName = item.ContentHashName
 	f.Category = item.Category
 	f.Description = item.Status
+	f.Starred = item.Starred
 	return f
 }
 
@@ -1480,6 +1493,82 @@ func (d *Driver) ID() string                       { return providerID }
 func (d *Driver) Meta() drive.Meta                 { return drive.GetMeta(providerID) }
 func (d *Driver) Capabilities() drive.Capabilities { return drive.RegistryCaps(providerID) }
 func (d *Driver) RootID() string                   { return RootID }
+
+func (d *Driver) SupportsRemoteFavorites(context.Context, drive.Context) (bool, error) {
+	return true, nil
+}
+
+func (d *Driver) ListFavorites(ctx context.Context, c drive.Context) ([]model.File, error) {
+	cl, err := clientOfContext(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	scopes := []Scope{ScopeBackup}
+	if cl.session.ResourceDriveID != "" && cl.session.ResourceDriveID != cl.scopedDriveID(ScopeBackup) {
+		scopes = append(scopes, ScopeResource)
+	}
+	out := []model.File{}
+	for _, scope := range scopes {
+		marker := ""
+		seen, seenIDs := map[string]bool{}, map[string]bool{}
+		for {
+			var page listResp
+			if err := cl.apiPost(ctx, "/adrive/v1.0/openFile/starredList", map[string]any{
+				"drive_id": cl.scopedDriveID(scope), "limit": 100, "marker": marker,
+			}, &page); err != nil {
+				return nil, err
+			}
+			if page.Items == nil {
+				return nil, errors.New("阿里云盘收藏列表响应缺少 items")
+			}
+			for _, item := range page.Items {
+				if item.FileID == "" || item.Name == "" || seenIDs[item.FileID] {
+					return nil, errors.New("阿里云盘收藏列表包含空白或重复文件")
+				}
+				seenIDs[item.FileID] = true
+				item.Starred = true
+				out = append(out, mapFile(&item, c.DriveID, item.ParentFileID, string(scope)))
+			}
+			if page.Marker == "" {
+				break
+			}
+			if seen[page.Marker] {
+				return nil, errors.New("阿里云盘收藏列表分页游标重复")
+			}
+			seen[page.Marker] = true
+			marker = page.Marker
+		}
+	}
+	return out, nil
+}
+
+func (d *Driver) Favorite(ctx context.Context, c drive.Context, fileIDs []string, favorite bool) ([]string, error) {
+	cl, err := clientOfContext(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	done := []string{}
+	for _, id := range fileIDs {
+		ref := parseRef(id)
+		if strings.TrimSpace(ref.FID) == "" || ref.FID == "root" || id == RootID {
+			return done, errors.New("阿里云盘不能收藏虚拟空间根目录")
+		}
+		if ref.Scope == ScopeResource && cl.session.ResourceDriveID == "" {
+			return done, errors.New("阿里云盘未提供资源库空间")
+		}
+		var result aliFile
+		if err := cl.apiPost(ctx, "/adrive/v1.0/openFile/update", map[string]any{
+			"drive_id": cl.scopedDriveID(ref.Scope), "file_id": ref.FID, "starred": favorite,
+		}, &result); err != nil {
+			return done, err
+		}
+		if result.FileID != ref.FID {
+			return done, errors.New("阿里云盘未确认文件收藏结果")
+		}
+		done = append(done, id)
+	}
+	return done, nil
+}
 
 func (d *Driver) List(ctx context.Context, c drive.Context, dirID string, _ *drive.ListOptions) ([]model.File, error) {
 	cl, err := clientOf(c)
@@ -1842,10 +1931,13 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	}
 	partSize := aliOpenPartSize(size)
 	partCount := aliOpenPartCount(size, partSize)
-	sessionKey := drive.UploadSessionKey(c.UserID, c.DriveID, ui.Info.ParentFileID, ui.Info.Name, size)
+	// Legacy name/size-only sessions cannot prove that their parts belong to
+	// this content or conflict policy. Leave them unused rather than mixing data.
+	sessionName := ui.Info.Name + "\x00" + aliOpenCheckNameMode(ui.Info.ConflictPolicy) + "\x00" + contentHash
+	sessionKey := drive.UploadSessionKey(c.UserID, c.DriveID, ui.Info.ParentFileID, sessionName, size)
 	savedSessionID, savedParts := drive.LoadUploadSessionState(sessionKey)
 	uploadedSet := make(map[int]bool)
-	fileID, uploadID := decodeAliOpenUploadSession(savedSessionID)
+	uploadID, fileID := decodeAliOpenUploadSession(savedSessionID)
 	if fileID == "" || uploadID == "" {
 		fileID, uploadID = "", ""
 	} else {
@@ -1980,7 +2072,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 				}
 				req.ContentLength = length
 				req.Header.Set("Content-Length", strconv.FormatInt(length, 10))
-				resp, err := cl.http.HTTP.Do(req)
+				resp, err := netx.DoUpload(cl.http.HTTP, req)
 				if err != nil {
 					return 0, err
 				}

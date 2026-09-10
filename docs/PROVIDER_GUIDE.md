@@ -56,6 +56,21 @@ func init() {
 UI 菜单/操作按能力位裁剪；能力位声明了但 Driver 未实现的方法会返回
 `ErrNotImplemented`，属实现缺陷（应由单测守护）。
 
+### 收藏（云端优先，本地回退）
+
+所有网盘都有本地收藏入口。只有同时实现原生收藏列表与修改功能时，才声明 `favorite: true` 并实现 `drive.RemoteFavorites`：
+
+```go
+type RemoteFavorites interface {
+    SupportsRemoteFavorites(ctx context.Context, c Context) (bool, error)
+    ListFavorites(ctx context.Context, c Context) ([]model.File, error)
+}
+```
+
+另外覆盖 `Driver.Favorite`，返回远端确认成功的文件 ID。`ListFavorites` 必须读取完整分页，保留文件所属空间和父目录，异常时返回错误而不是部分列表。账号类型差异由插件内部处理（如 OneDrive 个人账号返回不支持）；权限不足、网络故障等不能作为“不支持”的依据。
+
+UI 使用 `App.AddFavorite` / `App.RemoveFavorite` / `App.ListFavorites`；本地回退、云端快照、备份与账号隔离由 app/store 层负责。不要在 UI 再调用一次 `FavoriteFiles`，也不要在中央代码按 provider 写分支。逐盘现状见 [收藏核查表](PROVIDER_STATUS.md#收藏逐盘核查2026-09-10)。
+
 ### 装配
 `internal/drive/providers/all.go` 用 blank import 引入新包即完成注册：
 

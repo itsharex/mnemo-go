@@ -194,7 +194,7 @@ func (d *Driver) presignBatch(ctx context.Context, c drive.Context, api string, 
 // putChunk PUTs one chunk body to a presigned url; returns the http status.
 func putChunk(ctx context.Context, rawURL string, body []byte) (int, error) {
 	hc := netx.NewClient(5 * time.Minute)
-	resp, err := hc.Do(ctx, http.MethodPut, rawURL, map[string]string{
+	resp, err := hc.DoUpload(ctx, http.MethodPut, rawURL, map[string]string{
 		"Content-Type": "application/octet-stream",
 		"User-Agent":   ua,
 	}, bytes.NewReader(body))

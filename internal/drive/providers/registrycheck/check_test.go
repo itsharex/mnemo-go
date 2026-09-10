@@ -31,3 +31,13 @@ func TestAllProvidersRegistered(t *testing.T) {
 	}
 	_ = model.ProviderUnknown
 }
+
+func TestFavoriteCapabilitiesMatchCompleteNativeAdapters(t *testing.T) {
+	native := map[string]bool{"pikpak": true, "onedrive": true, "pan123": true, "aliopen": true}
+	for _, p := range drive.All() {
+		_, implemented := p.Factory().(drive.RemoteFavorites)
+		if implemented != native[p.ID] || p.Caps.Favorite != native[p.ID] {
+			t.Errorf("%s favorite capability=%v adapter=%v", p.ID, p.Caps.Favorite, implemented)
+		}
+	}
+}

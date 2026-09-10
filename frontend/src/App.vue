@@ -10,6 +10,7 @@ import { refreshAccountNow } from './api'
 import AccountRail from './components/AccountRail.vue'
 import AccountAvatar from './components/AccountAvatar.vue'
 import UiIcon from './components/UiIcon.vue'
+import appIcon from './assets/logo/icon.svg'
 import Modal from './components/Modal.vue'
 import LoginModal from './components/LoginModal.vue'
 import QuickOpen from './components/QuickOpen.vue'
@@ -22,6 +23,7 @@ import { WindowMinimise, WindowToggleMaximise, Quit } from '../wailsjs/runtime/r
 import { createNavigationHistory, installMouseNavigation } from './navigation'
 
 const tab = ref('pan')
+const dualPane = ref(false)
 const pageHistory = createNavigationHistory()
 pageHistory.reset('pan')
 let restoringPage = false
@@ -49,7 +51,7 @@ const pageTrans = ref('page-slide-left')
 const pageComponents = { pan: WorkspaceView, transfer: TransferView, sync: SyncView, share: ShareView, settings: SettingsView }
 const pageComponent = computed(() => pageComponents[tab.value] || PanView)
 const pageProps = computed(() => {
-  if (tab.value === 'pan') return { account: current.value, accounts: orderedAccounts.value, providers: providers.value }
+  if (tab.value === 'pan') return { account: current.value, accounts: orderedAccounts.value, providers: providers.value, dual: dualPane.value }
   if (tab.value === 'sync') return { account: current.value, accounts: orderedAccounts.value, providers: providers.value }
   if (tab.value === 'transfer' || tab.value === 'share') return { accounts: orderedAccounts.value, providers: providers.value }
   return {}
@@ -189,10 +191,10 @@ function handleConfirmOk() {
   if (typeof cb === 'function') cb()
 }
 const tabs = [
-  { key: 'pan', label: '网盘' },
-  { key: 'transfer', label: '传输' },
-  { key: 'sync', label: '同步' },
-  { key: 'share', label: '分享' },
+  { key: 'pan', label: '网盘', icon: 'cloud' },
+  { key: 'transfer', label: '传输', icon: 'migrate' },
+  { key: 'sync', label: '同步', icon: 'refresh' },
+  { key: 'share', label: '分享', icon: 'share' },
 ]
 
 const panView = ref(null)
@@ -237,10 +239,14 @@ function refresh() {
   }).catch(() => {})
 }
 
-function select(acc) {
+async function select(acc) {
   if (!acc) return
+  const sameAccount = current.value?.user_id === acc.user_id && current.value?.drive_id === acc.drive_id
   current.value = acc
   setLastDriveSelection(acc.user_id, acc.drive_id)
+  await nextTick()
+  if (current.value?.user_id !== acc.user_id || current.value?.drive_id !== acc.drive_id) return
+  panView.value?.selectAccount?.(sameAccount)
 }
 
 function onPanGo(target) {
@@ -432,20 +438,26 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
 <template>
   <div class="app-shell">
     <header class="topbar">
-      <div class="app-brand">Mnemo</div>
+      <div class="app-brand">
+        <img class="app-brand-icon" :src="appIcon" alt="" aria-hidden="true" draggable="false" />
+        <span>Mnemo</span>
+      </div>
       <div ref="tabStrip" class="top-tabs">
         <span class="top-tab-glider" :style="gliderStyle"></span>
         <button
           v-for="t in tabs"
           :key="t.key"
           class="top-tab"
+          :title="t.label"
+          :aria-label="t.label"
           :class="{ active: tab === t.key }"
           @click="switchTab(t.key)"
-        >{{ t.label }}</button>
+        ><UiIcon :name="t.icon" :size="18" /></button>
       </div>
       <div class="spacer"></div>
       <button class="icon-btn" title="快捷命令面板 (Ctrl+P)" @click="showQuickOpen = true"><UiIcon name="search" :size="16" /></button>
-      <button class="tbtn" @click="showSearch = true">搜索</button>
+      <button class="icon-btn" title="全盘搜索" aria-label="全盘搜索" @click="showSearch = true"><UiIcon name="globe" :size="17" /></button>
+      <button v-if="tab === 'pan'" class="icon-btn" :class="{ active: dualPane }" :title="dualPane ? '切换单栏' : '切换双栏'" :aria-label="dualPane ? '切换单栏' : '切换双栏'" :aria-pressed="dualPane" @click="dualPane = !dualPane"><UiIcon :name="dualPane ? 'columns' : 'single-pane'" :size="17" /></button>
       <button class="icon-btn" :title="isDark ? '切换到浅色' : '切换到深色'" @click="quickToggleTheme"><UiIcon :name="isDark ? 'sun' : 'moon'" :size="17" /></button>
       <button class="icon-btn" :class="{ active: tab === 'settings' }" title="设置 (Alt+5)" @click="switchTab('settings')"><UiIcon name="settings" :size="17" /></button>
       <AccountAvatar v-if="current" class="topbar-account" :account="current" :providers="providers" />

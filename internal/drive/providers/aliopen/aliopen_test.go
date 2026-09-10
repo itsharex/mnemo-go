@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +20,212 @@ import (
 
 type aliOpenRoundTripperFunc func(*http.Request) (*http.Response, error)
 
+type testUploadSessions struct {
+	key, id string
+	parts   []int
+}
+
+func (s *testUploadSessions) SaveUploadSession(string, []int) error { return nil }
+func (s *testUploadSessions) LoadUploadSession(string) []int        { return nil }
+func (s *testUploadSessions) ClearUploadSession(string)             {}
+func (s *testUploadSessions) SaveUploadSessionState(key, id string, parts []int) error {
+	s.key, s.id, s.parts = key, id, parts
+	return nil
+}
+func (s *testUploadSessions) LoadUploadSessionState(key string) (string, []int) {
+	if key == s.key {
+		return s.id, s.parts
+	}
+	return "", nil
+}
+
+func TestUploadResumePreservesIDsAndSeparatesReplacementContent(t *testing.T) {
+	old, limiter := netx.TestTransportHook, aliOpenLimiter
+	aliOpenLimiter = newAliOpenRateLimiter(2, 0)
+	t.Cleanup(func() { netx.TestTransportHook = old; aliOpenLimiter = limiter; drive.SetUploadSessionStore(nil) })
+	path := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dc := drive.Context{UserID: "aliopen:test", DriveID: "mounted", Token: &model.TokenInfo{RefreshToken: mustJSON(Session{AccessToken: "test", DriveID: "drive"})}}
+	sessions := &testUploadSessions{}
+	drive.SetUploadSessionStore(sessions)
+	creates, puts, completes := 0, 0, 0
+	failComplete := true
+	netx.TestTransportHook = aliOpenRoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		response := "{}"
+		if r.Method == http.MethodPut {
+			puts++
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				return nil, err
+			}
+		} else {
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			switch r.URL.Path {
+			case "/adrive/v1.0/openFile/create":
+				creates++
+				response = `{"file_id":"file-id","upload_id":"upload-id","part_info_list":[{"part_number":1,"upload_url":"https://upload.example/part"}]}`
+			case "/adrive/v1.0/openFile/complete":
+				completes++
+				if body["file_id"] != "file-id" || body["upload_id"] != "upload-id" {
+					t.Errorf("swapped resume IDs: %v", body)
+				}
+				if failComplete {
+					return nil, errors.New("interrupted before completion")
+				}
+			default:
+				t.Fatalf("unexpected request %s", r.URL.Path)
+			}
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response)), Request: r}, nil
+	})
+	upload := func(policy string) error {
+		return (&Driver{}).UploadOneFile(context.Background(), dc, &model.UploadingUI{Info: model.UploadInfo{LocalFilePath: path, ParentFileID: "b:root", Name: "file.txt", ConflictPolicy: policy}})
+	}
+	if err := upload("overwrite"); err == nil {
+		t.Fatal("expected interrupted completion")
+	}
+	failComplete = false
+	if err := upload("overwrite"); err != nil {
+		t.Fatal(err)
+	}
+	if creates != 1 || puts != 1 || completes != 2 {
+		t.Fatalf("unchanged file did not resume: %d/%d/%d", creates, puts, completes)
+	}
+	if err := os.WriteFile(path, []byte("new"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := upload("overwrite"); err != nil {
+		t.Fatal(err)
+	}
+	if creates != 2 || puts != 2 {
+		t.Fatal("same-size replacement reused old parts")
+	}
+	if err := upload("rename"); err != nil {
+		t.Fatal(err)
+	}
+	if creates != 3 || puts != 3 {
+		t.Fatal("changed conflict policy reused old session")
+	}
+}
+
 func (f aliOpenRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestFavoritesReadBothDrivesAndUpdateCorrectScope(t *testing.T) {
+	d := &Driver{}
+	p, ok := any(d).(drive.RemoteFavorites)
+	if !ok {
+		t.Fatal("Ali Open native favorites not implemented")
+	}
+	old := netx.TestTransportHook
+	oldLimiter := aliOpenLimiter
+	aliOpenLimiter = newAliOpenRateLimiter(2, 0)
+	t.Cleanup(func() { netx.TestTransportHook = old; aliOpenLimiter = oldLimiter })
+	reads, writes := 0, 0
+	netx.TestTransportHook = aliOpenRoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "openapi.alipan.com" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected API %s %s", r.Method, r.URL)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		response := ""
+		switch r.URL.Path {
+		case "/adrive/v1.0/openFile/starredList":
+			reads++
+			if body["limit"] != float64(100) {
+				t.Fatalf("wrong page size: %+v", body)
+			}
+			if body["drive_id"] == "backup" {
+				if body["marker"] == "next" {
+					response = `{"items":[],"next_marker":""}`
+				} else {
+					response = `{"items":[{"file_id":"same","parent_file_id":"folder","name":"photo.jpg","size":42,"type":"file"}],"next_marker":"next"}`
+				}
+			} else if body["drive_id"] == "resource" {
+				response = `{"items":[{"file_id":"same","parent_file_id":"root","name":"Folder","type":"folder"}]}`
+			} else {
+				t.Fatalf("wrong drive: %+v", body)
+			}
+		case "/adrive/v1.0/openFile/update":
+			writes++
+			want := "backup"
+			if writes == 2 {
+				want = "resource"
+			}
+			if body["drive_id"] != want || body["file_id"] != "same" || body["starred"] != (writes == 1) {
+				t.Fatalf("wrong favorite update: %+v", body)
+			}
+			if _, renamed := body["name"]; renamed {
+				t.Fatal("favorite must not rename file")
+			}
+			response = `{"file_id":"same"}`
+		default:
+			t.Fatalf("unexpected endpoint %s", r.URL)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response)), Request: r}, nil
+	})
+	c := drive.Context{UserID: "aliopen_favorites", DriveID: "mounted", Token: &model.TokenInfo{RefreshToken: mustJSON(Session{AccessToken: "token", DriveID: "resource", BackupDriveID: "backup", ResourceDriveID: "resource"})}}
+	files, err := p.ListFavorites(context.Background(), c)
+	if err != nil || len(files) != 2 || reads != 3 {
+		t.Fatalf("favorites=%+v, reads=%d, %v", files, reads, err)
+	}
+	if files[0].FileID != "b:same" || files[0].ParentFileID != "b:folder" || files[0].Size != 42 || !files[0].Starred || files[1].FileID != "r:same" || !files[1].IsDir {
+		t.Fatalf("lost scope/metadata: %+v", files)
+	}
+	for i, id := range []string{"b:same", "r:same"} {
+		ids, err := d.Favorite(context.Background(), c, []string{id}, i == 0)
+		if err != nil || len(ids) != 1 || ids[0] != id {
+			t.Fatalf("favorite=%v, %v", ids, err)
+		}
+	}
+}
+
+func TestFavoritesRejectPartialAliDriveSnapshotAndUnconfirmedUpdate(t *testing.T) {
+	old, limiter := netx.TestTransportHook, aliOpenLimiter
+	aliOpenLimiter = newAliOpenRateLimiter(2, 0)
+	t.Cleanup(func() { netx.TestTransportHook = old; aliOpenLimiter = limiter })
+	c := drive.Context{Token: &model.TokenInfo{RefreshToken: mustJSON(Session{AccessToken: "token", DriveID: "backup", ResourceDriveID: "resource"})}}
+	for _, body := range []string{`{}`, `{"items":[],"next_marker":"repeat"}`, `{"items":[{"file_id":"","name":"broken"}]}`, `{"code":"Forbidden","message":"permission denied"}`} {
+		t.Run(body, func(t *testing.T) {
+			netx.TestTransportHook = aliOpenRoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				var request map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				response := body
+				if request["drive_id"] == "backup" {
+					response = `{"items":[{"file_id":"ok","name":"ok.jpg"}]}`
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response)), Request: r}, nil
+			})
+			files, err := (&Driver{}).ListFavorites(context.Background(), c)
+			if err == nil || len(files) != 0 {
+				t.Fatal("partial cloud snapshot was accepted")
+			}
+		})
+	}
+	netx.TestTransportHook = aliOpenRoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`)), Request: r}, nil
+	})
+	if ids, err := (&Driver{}).Favorite(context.Background(), c, []string{"b:file"}, true); err == nil || len(ids) != 0 {
+		t.Fatal("missing update confirmation accepted")
+	}
+	netx.TestTransportHook = aliOpenRoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		t.Fatal("canceled operation sent request")
+		return nil, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&Driver{}).ListFavorites(ctx, drive.Context{Token: &model.TokenInfo{RefreshToken: "expired"}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled favorites error=%v", err)
+	}
 }
 
 func TestRefreshTokenStoresProfileAndNumericDriveID(t *testing.T) {

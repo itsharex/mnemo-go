@@ -2,10 +2,13 @@ export namespace app {
 
 	export class CheckUpdateResult {
 	    available: boolean;
+	    currentVersion: string;
 	    version: string;
 	    url: string;
 	    size: number;
 	    notes: string;
+	    releaseUrl: string;
+	    canInstall: boolean;
 
 	    static createFrom(source: any = {}) {
 	        return new CheckUpdateResult(source);
@@ -14,10 +17,13 @@ export namespace app {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.available = source["available"];
+	        this.currentVersion = source["currentVersion"];
 	        this.version = source["version"];
 	        this.url = source["url"];
 	        this.size = source["size"];
 	        this.notes = source["notes"];
+	        this.releaseUrl = source["releaseUrl"];
+	        this.canInstall = source["canInstall"];
 	    }
 	}
 	export class MigrationPreview {
@@ -124,6 +130,48 @@ export namespace app {
 	        this.Meta = this.convertValues(source["Meta"], drive.Meta);
 	        this.Capabilities = this.convertValues(source["Capabilities"], drive.Capabilities);
 	        this.Login = this.convertValues(source["Login"], drive.LoginConfig);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class UpdateStatus {
+	    revision: number;
+	    phase: string;
+	    info?: CheckUpdateResult;
+	    downloaded: number;
+	    total: number;
+	    path: string;
+	    error: string;
+
+	    static createFrom(source: any = {}) {
+	        return new UpdateStatus(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.revision = source["revision"];
+	        this.phase = source["phase"];
+	        this.info = this.convertValues(source["info"], CheckUpdateResult);
+	        this.downloaded = source["downloaded"];
+	        this.total = source["total"];
+	        this.path = source["path"];
+	        this.error = source["error"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -628,6 +676,7 @@ export namespace model {
 	    default_sbox_drive_id?: string;
 	    provider_account_id?: string;
 	    provider_root_id?: string;
+	    provider_drive_type?: string;
 	    used_size?: number;
 	    total_size?: number;
 	    free_size?: number;
@@ -671,6 +720,7 @@ export namespace model {
 	        this.default_sbox_drive_id = source["default_sbox_drive_id"];
 	        this.provider_account_id = source["provider_account_id"];
 	        this.provider_root_id = source["provider_root_id"];
+	        this.provider_drive_type = source["provider_drive_type"];
 	        this.used_size = source["used_size"];
 	        this.total_size = source["total_size"];
 	        this.free_size = source["free_size"];
@@ -900,6 +950,9 @@ export namespace model {
 	    }
 	}
 	export class MigrateItem {
+	    sourceRecorded?: boolean;
+	    sourceTime?: number;
+	    sourceHash?: string;
 	    targetId?: string;
 	    isDir: boolean;
 	    id: string;
@@ -916,6 +969,9 @@ export namespace model {
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceRecorded = source["sourceRecorded"];
+	        this.sourceTime = source["sourceTime"];
+	        this.sourceHash = source["sourceHash"];
 	        this.targetId = source["targetId"];
 	        this.isDir = source["isDir"];
 	        this.id = source["id"];
@@ -1403,6 +1459,8 @@ export namespace store {
 	    name: string;
 	    isDir: boolean;
 	    added: number;
+	    source?: string;
+	    file?: model.File;
 
 	    static createFrom(source: any = {}) {
 	        return new Favorite(source);
@@ -1416,7 +1474,27 @@ export namespace store {
 	        this.name = source["name"];
 	        this.isDir = source["isDir"];
 	        this.added = source["added"];
+	        this.source = source["source"];
+	        this.file = this.convertValues(source["file"], model.File);
 	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class LocalTag {
 	    user_id: string;

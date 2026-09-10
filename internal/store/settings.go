@@ -1,7 +1,10 @@
 package store
 
 import (
+	"fmt"
+	"mnemo-go/internal/model"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -204,17 +207,58 @@ func (s *Store) loadTagsUnlocked() (tagsDoc, error) {
 	return doc, nil
 }
 
-// Favorites mirror local favorite marks (decorating provider favorites).
+// Favorite is either a local bookmark or a cached native favorite. An empty
+// Source denotes a legacy local bookmark.
 type Favorite struct {
-	UserID  string `json:"user_id"`
-	DriveID string `json:"drive_id"`
-	FileID  string `json:"file_id"`
-	Name    string `json:"name"`
-	IsDir   bool   `json:"isDir"`
-	Added   int64  `json:"added"`
+	UserID  string      `json:"user_id"`
+	DriveID string      `json:"drive_id"`
+	FileID  string      `json:"file_id"`
+	Name    string      `json:"name"`
+	IsDir   bool        `json:"isDir"`
+	Added   int64       `json:"added"`
+	Source  string      `json:"source,omitempty"`
+	File    *model.File `json:"file,omitempty"`
 }
 
 const favoritesFile = "favorites.json"
+
+// ReplaceRemoteFavorites refreshes a cloud snapshot without erasing legacy
+// local bookmarks or another account's entries. Cloud rows win identical IDs.
+func (s *Store) ReplaceRemoteFavorites(userID, driveID string, remote []Favorite) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var list []Favorite
+	if err := s.readJSON(favoritesFile, &list); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	ids := map[string]bool{}
+	for _, f := range remote {
+		if strings.TrimSpace(f.FileID) == "" || ids[f.FileID] {
+			return fmt.Errorf("收藏快照包含空白或重复文件 ID")
+		}
+		ids[f.FileID] = true
+	}
+	added := map[string]int64{}
+	out := make([]Favorite, 0, len(list)+len(remote))
+	for _, f := range list {
+		if f.UserID == userID && f.DriveID == driveID {
+			added[f.FileID] = f.Added
+		}
+		if f.UserID == userID && f.DriveID == driveID && (f.Source == "cloud" || ids[f.FileID]) {
+			continue
+		}
+		out = append(out, f)
+	}
+	for _, f := range remote {
+		f.UserID, f.DriveID, f.Source = userID, driveID, "cloud"
+		f.Added = added[f.FileID]
+		if f.Added == 0 {
+			f.Added = time.Now().Unix()
+		}
+		out = append(out, f)
+	}
+	return s.writeJSONUnlocked(favoritesFile, out)
+}
 
 // ListFavorites returns favorites of an account.
 func (s *Store) ListFavorites(userID, driveID string) ([]Favorite, error) {
@@ -245,6 +289,12 @@ func (s *Store) AddFavorite(f Favorite) error {
 	}
 	for i, x := range list {
 		if x.UserID == f.UserID && x.DriveID == f.DriveID && x.FileID == f.FileID {
+			if f.Added == 0 {
+				f.Added = x.Added
+			}
+			if f.Added == 0 {
+				f.Added = time.Now().Unix()
+			}
 			list[i] = f
 			return s.writeJSONUnlocked(favoritesFile, list)
 		}

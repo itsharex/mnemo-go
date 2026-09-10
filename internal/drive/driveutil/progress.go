@@ -26,10 +26,11 @@ func SetUploadThrottle(f func(int64)) { uploadThrottle = f }
 // upload queue. When a global upload rate cap is configured, it throttles
 // reads to respect the cap.
 type ProgressReader struct {
-	r      io.Reader
-	read   int64
-	size   int64
-	onRead func(read int64)
+	progressOnly bool
+	r            io.Reader
+	read         int64
+	size         int64
+	onRead       func(read int64)
 	// token-bucket-style rate limiting state
 	bucket int64
 	last   time.Time
@@ -41,6 +42,12 @@ func NewProgressReader(r io.Reader, size int64, onRead func(int64)) *ProgressRea
 	return &ProgressReader{r: r, size: size, onRead: onRead, last: time.Now()}
 }
 
+// NewProgressOnlyReader reports progress when the HTTP send path already owns
+// rate limiting. This avoids charging the same bytes twice.
+func NewProgressOnlyReader(r io.Reader, size int64, onRead func(int64)) *ProgressReader {
+	return &ProgressReader{r: r, size: size, onRead: onRead, progressOnly: true}
+}
+
 func (p *ProgressReader) Read(b []byte) (int, error) {
 	n, err := p.r.Read(b)
 	if n > 0 {
@@ -48,7 +55,9 @@ func (p *ProgressReader) Read(b []byte) (int, error) {
 		if p.onRead != nil {
 			p.onRead(p.read)
 		}
-		p.throttle(int64(n))
+		if !p.progressOnly {
+			p.throttle(int64(n))
+		}
 	}
 	return n, err
 }

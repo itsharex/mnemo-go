@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"mnemo-go/internal/drive"
@@ -344,35 +345,157 @@ func (a *App) DeleteLocalTag(userID, driveID, fileID string) error {
 	return st.DeleteLocalTag(userID, driveID, fileID)
 }
 
-// ListFavorites lists local favorites.
-func (a *App) ListFavorites(userID, driveID string) []store.Favorite {
+func (a *App) lockFavorites(userID, driveID string) func() {
+	value, _ := a.favoriteLocks.LoadOrStore(userID+"\x00"+driveID, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// ListFavorites merges native favorites with pre-existing local bookmarks.
+func (a *App) ListFavorites(userID, driveID string) ([]store.Favorite, error) {
+	// Preference backups read the existing local snapshot, including accounts
+	// that are currently signed out. Do not make cloud requests for this call.
+	if userID == "" && driveID == "" {
+		st, err := a.storeOrError()
+		if err != nil {
+			return nil, err
+		}
+		return st.ListFavorites("", "")
+	}
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(driveID) == "" {
+		return nil, fmt.Errorf("收藏缺少账号或空间")
+	}
+	defer a.lockFavorites(userID, driveID)()
 	st, err := a.storeOrError()
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	list, err := st.ListFavorites(userID, driveID)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	files, supported, err := drive.ListRemoteFavorites(ctx, userID, driveID)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return list
+	if supported {
+		remote := make([]store.Favorite, 0, len(files))
+		seen := map[string]bool{}
+		for _, f := range files {
+			if f.FileID == "" || seen[f.FileID] {
+				return nil, fmt.Errorf("云端收藏列表包含空白或重复文件 ID")
+			}
+			seen[f.FileID] = true
+			f.DriveID, f.Starred = driveID, true
+			f.DownloadURL, f.Thumbnail = "", "" // never persist expiring upstream access links
+			remote = append(remote, store.Favorite{UserID: userID, DriveID: driveID, FileID: f.FileID, Name: f.Name, IsDir: f.IsDir, Source: "cloud", File: &f})
+		}
+		if err := st.ReplaceRemoteFavorites(userID, driveID, remote); err != nil {
+			return nil, err
+		}
+	}
+	return st.ListFavorites(userID, driveID)
 }
 
 // AddFavorite adds a favorite.
 func (a *App) AddFavorite(userID, driveID string, f store.Favorite) error {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(driveID) == "" || strings.TrimSpace(f.FileID) == "" {
+		return fmt.Errorf("收藏缺少账号、空间或文件 ID")
+	}
+	defer a.lockFavorites(userID, driveID)()
 	st, err := a.storeOrError()
 	if err != nil {
 		return err
 	}
-	return st.AddFavorite(f)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cloud, err := drive.SetRemoteFavorite(ctx, userID, driveID, true, f.FileID)
+	if err != nil {
+		return err
+	}
+	f.UserID, f.DriveID, f.Source = userID, driveID, "local"
+	if cloud {
+		f.Source = "cloud"
+	}
+	f = normalizeFavorite(f)
+	if err := st.AddFavorite(f); err != nil {
+		return fmt.Errorf("保存收藏记录失败：%w", err)
+	}
+	a.emit("favorites:changed", map[string]string{"user_id": userID, "drive_id": driveID})
+	return nil
+}
+
+// RestoreFavorite merges a backup as a local bookmark. Importing preferences
+// must not replay cloud mutations or require credentials for removed accounts.
+func (a *App) RestoreFavorite(f store.Favorite) error {
+	if strings.TrimSpace(f.UserID) == "" || strings.TrimSpace(f.DriveID) == "" || strings.TrimSpace(f.FileID) == "" {
+		return fmt.Errorf("收藏缺少账号、空间或文件 ID")
+	}
+	defer a.lockFavorites(f.UserID, f.DriveID)()
+	st, err := a.storeOrError()
+	if err != nil {
+		return err
+	}
+	list, err := st.ListFavorites(f.UserID, f.DriveID)
+	if err != nil {
+		return err
+	}
+	for _, existing := range list {
+		if existing.FileID == f.FileID {
+			return nil
+		}
+	}
+	f.Source = "local"
+	if err := st.AddFavorite(normalizeFavorite(f)); err != nil {
+		return err
+	}
+	a.emit("favorites:changed", map[string]string{"user_id": f.UserID, "drive_id": f.DriveID})
+	return nil
+}
+
+func normalizeFavorite(f store.Favorite) store.Favorite {
+	if f.File != nil {
+		file := *f.File
+		file.DriveID, file.FileID = f.DriveID, f.FileID
+		file.Name, file.IsDir, file.Starred = f.Name, f.IsDir, true
+		file.DownloadURL, file.Thumbnail = "", ""
+		f.File = &file
+	}
+	return f
 }
 
 // RemoveFavorite removes a favorite.
 func (a *App) RemoveFavorite(userID, driveID, fileID string) error {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(driveID) == "" || strings.TrimSpace(fileID) == "" {
+		return fmt.Errorf("收藏缺少账号、空间或文件 ID")
+	}
+	defer a.lockFavorites(userID, driveID)()
 	st, err := a.storeOrError()
 	if err != nil {
 		return err
 	}
-	return st.RemoveFavorite(userID, driveID, fileID)
+	list, err := st.ListFavorites(userID, driveID)
+	if err != nil {
+		return err
+	}
+	local := false
+	for _, f := range list {
+		if f.FileID == fileID {
+			local = f.Source != "cloud"
+			break
+		}
+	}
+	if !local {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if _, err := drive.SetRemoteFavorite(ctx, userID, driveID, false, fileID); err != nil {
+			return err
+		}
+	}
+	if err := st.RemoveFavorite(userID, driveID, fileID); err != nil {
+		return err
+	}
+	a.emit("favorites:changed", map[string]string{"user_id": userID, "drive_id": driveID})
+	return nil
 }
 
 // ---- offline download (PikPak cloud) ----

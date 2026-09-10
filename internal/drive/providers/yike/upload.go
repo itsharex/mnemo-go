@@ -22,6 +22,7 @@ import (
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
+	"mnemo-go/internal/netx"
 )
 
 const (
@@ -231,7 +232,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 		req.Header.Set("Referer", "https://photo.baidu.com/")
 		req.Header.Set("User-Agent", ua)
 		hc := &http.Client{Timeout: 5 * time.Minute}
-		resp, err := hc.Do(req)
+		resp, err := netx.DoUpload(hc, req)
 		if err != nil {
 			return err
 		}

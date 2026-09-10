@@ -76,7 +76,7 @@ func ossPut(ctx context.Context, c drive.Context, localPath string, params *pikp
 
 	var body io.Reader = f
 	if ui != nil {
-		body = driveutil.NewProgressReader(f, info.Size(), func(read int64) {
+		body = driveutil.NewProgressOnlyReader(f, info.Size(), func(read int64) {
 			ui.ReportUploadProgress(read, info.Size())
 		})
 	}
@@ -92,7 +92,7 @@ func ossPut(ctx context.Context, c drive.Context, localPath string, params *pikp
 	req.Header.Set("Authorization", authorization)
 	req.Header.Set("x-oss-security-token", securityToken)
 	req.ContentLength = info.Size()
-	resp, err := hc.HTTP.Do(req)
+	resp, err := netx.DoUpload(hc.HTTP, req)
 	if err != nil {
 		return err
 	}

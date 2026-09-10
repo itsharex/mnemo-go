@@ -2,12 +2,102 @@ package sync
 
 import (
 	"context"
+	"fmt"
+	"mnemo-go/internal/drive"
+	"mnemo-go/internal/model"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+type changingRemoteDriver struct {
+	drive.Driver
+	files             []model.File
+	uploaded, deleted []string
+}
+
+var syncTestRemote *changingRemoteDriver
+
+func init() {
+	drive.Register(drive.Registration{ID: "webdav", Caps: drive.Capabilities{Upload: true, Download: true, RecycleBin: true, UploadConflictPolicies: []string{"overwrite"}}, Factory: func() drive.Driver { return syncTestRemote }})
+}
+func (d *changingRemoteDriver) ListPaged(ctx context.Context, c drive.Context, id, marker string, opts *drive.ListOptions) (*drive.DirPage, error) {
+	return &drive.DirPage{Items: append([]model.File(nil), d.files...)}, nil
+}
+func (d *changingRemoteDriver) UploadOneFile(ctx context.Context, c drive.Context, u *model.UploadingUI) error {
+	d.uploaded = append(d.uploaded, u.Info.Name)
+	return nil
+}
+func (d *changingRemoteDriver) Trash(ctx context.Context, c drive.Context, ids []string) ([]string, error) {
+	d.deleted = append(d.deleted, ids...)
+	return ids, nil
+}
+
+type testSyncSnapshots struct{ entries []Entry }
+
+func (s *testSyncSnapshots) LoadSyncSnapshot(string) ([]Entry, error) { return s.entries, nil }
+func (s *testSyncSnapshots) SaveSyncSnapshot(_ string, entries []Entry) error {
+	s.entries = entries
+	return nil
+}
+func (s *testSyncSnapshots) ClearSyncSnapshot(string) error { s.entries = nil; return nil }
+
+func TestSyncRejectsRemoteDeletionAndNewFileRaces(t *testing.T) {
+	for _, deletion := range []bool{false, true} {
+		t.Run(fmt.Sprint(deletion), func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("local"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			d := &changingRemoteDriver{files: []model.File{{FileID: "a", Name: "a.txt", Size: 3, Time: 1}}}
+			cfg := Config{ID: "test", UserID: "webdav:test", DriveID: "webdav:test", LocalDir: root, RemoteDir: "root", Direction: "two-way", ConflictPolicy: "local", DeletePropagation: true}
+			snap := &testSyncSnapshots{}
+			if deletion {
+				d.files = append(d.files, model.File{FileID: "b", Name: "b.txt", Size: 3, Time: 1})
+				for _, f := range d.files {
+					snap.entries = append(snap.entries, Entry{Scope: configScope(cfg), RemoteName: f.Name, Paired: true, LocalSize: 3, LocalTime: 1, RemoteSize: 3, RemoteTime: 1, Hash: ":"})
+				}
+			} else if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("local"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			syncTestRemote = d
+			e := NewEngine(func(_ string, done, total int) {
+				if done == 1 {
+					if deletion {
+						d.files[1].ContentHash = "changed"
+					} else {
+						d.files = append(d.files, model.File{FileID: "new-b", Name: "b.txt", Size: 5, Time: 1})
+					}
+				}
+			}, WithSnapshotStore(snap))
+			err := e.ExecutePlan(context.Background(), cfg, "", nil)
+			if err == nil || len(d.deleted) != 0 || len(d.uploaded) != 1 {
+				t.Fatalf("remote change was not protected: uploads=%v deletes=%v err=%v", d.uploaded, d.deleted, err)
+			}
+		})
+	}
+}
+func TestSyncRejectsRemoteChangeAfterEarlierTransfer(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("local"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &changingRemoteDriver{files: []model.File{{FileID: "a", Name: "a.txt", Size: 3, Time: 1}, {FileID: "b", Name: "b.txt", Size: 3, Time: 1}}}
+	syncTestRemote = d
+	e := NewEngine(func(_ string, done, total int) {
+		if done == 1 {
+			d.files[1].Time = 999
+		}
+	})
+	err := e.ExecutePlan(context.Background(), Config{ID: "test", UserID: "webdav:test", DriveID: "webdav:test", LocalDir: root, RemoteDir: "root", Direction: "two-way", ConflictPolicy: "local"}, "", nil)
+	if err == nil || len(d.uploaded) != 1 || d.uploaded[0] != "a.txt" {
+		t.Fatalf("remote edit overwritten: uploads=%v err=%v", d.uploaded, err)
+	}
+}
 
 func TestRunRejectsUnknownDirectionBeforeAccessingFiles(t *testing.T) {
 	err := NewEngine(nil).Run(context.Background(), Config{Direction: "pul"})

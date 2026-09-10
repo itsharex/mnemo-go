@@ -145,6 +145,8 @@
 |:----:|---------|------|
 | ✅ | `client.go` POST `/drive/v1/files:star` 或 `:unstar`，body 为 `ids` | 无 |
 
+`Driver` 同时实现 `RemoteFavorites`：`ListFavorites` 通过全局列表的 `starred=true`、`trashed=false` 筛选读取全部分页，保留真实父目录。异常页或重复游标返回错误，不替换缓存。前端统一收藏入口由后端选择云端实现，避免重复调用。已通过模拟 HTTP 的分页与收藏/取消回归；未进行真实账号写入验证。
+
 ---
 
 ## 11. 搜索

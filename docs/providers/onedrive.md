@@ -9,10 +9,12 @@
 ## 能力声明（onedrive.go:18-22）
 
 ```
-search, createShare, shareExpiration, sharePassword, shareHistory: true
+favorite, search, createShare, shareExpiration, sharePassword, shareHistory: true
 SetHashes(["sha1", "quickxorhash"], nil)
 ```
 > trashView 未设；ProvideHashes 已声明
+
+`favorite` 是按账号类型启用的原生能力：工作/学校空间使用 Graph `/me/drive/following`、`/items/{id}/follow`、`/items/{id}/unfollow`；个人账号回退本地收藏。通过 `driveType` 识别并缓存类型，不将未知类型或请求失败当作可用。列表只保留当前挂载空间条目，支持分页、token 失效重试；关注操作必须返回对应文件 ID。依据：[Graph 关注权限](https://learn.microsoft.com/en-us/graph/api/driveitem-follow?view=graph-rest-1.0)、[取消关注](https://learn.microsoft.com/en-us/graph/api/driveitem-unfollow?view=graph-rest-1.0)。已通过模拟 HTTP 回归，未进行真实租户写入验证。
 
 ---
 

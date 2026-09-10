@@ -974,7 +974,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	size := info.Size()
 	ui.Info.Size = size
 	if size < s3MultipartThreshold {
-		pr := driveutil.NewProgressReader(f, size, func(read int64) {
+		pr := driveutil.NewProgressOnlyReader(f, size, func(read int64) {
 			updateUploadProgress(ui, read)
 		})
 		_, err = cc.client.PutObject(ctx, &s3.PutObjectInput{
@@ -982,7 +982,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 			Key:           aws.String(key),
 			Body:          pr,
 			ContentLength: aws.Int64(size),
-		})
+		}, func(o *s3.Options) { o.HTTPClient = netx.UploadHTTPClient{Client: o.HTTPClient} })
 	} else {
 		err = uploadMultipart(ctx, cc, key, f, ui)
 	}
@@ -1051,7 +1051,7 @@ func uploadMultipart(ctx context.Context, cc *conn, key string, f *os.File, ui *
 			// buffer can be passed directly without a second 16 MiB allocation.
 			Body:          bytes.NewReader(buf[:n]),
 			ContentLength: aws.Int64(int64(n)),
-		})
+		}, func(o *s3.Options) { o.HTTPClient = netx.UploadHTTPClient{Client: o.HTTPClient} })
 		if err != nil {
 			return err
 		}

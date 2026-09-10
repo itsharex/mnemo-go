@@ -9,7 +9,7 @@
 ## 能力声明（`init` 注册）
 
 ```
-search, createShare, shareExpiration, sharePassword, shareHistory, importShare: true
+favorite, search, createShare, shareExpiration, sharePassword, shareHistory, importShare: true
 copy, recycleBin, permanentDelete: true
 trashView, trashRestore: false
 SetHashes(["sha1"], ["sha1"])
@@ -31,6 +31,8 @@ SetConflictPolicies(["refuse", "rename", "skip", "overwrite"])
 ---
 
 ## 2. 文件列表（双盘 b:/r:）
+
+收藏使用 Open 官方 `POST /adrive/v1.0/openFile/starredList`，按空间分别读取全部 `next_marker` 分页，备份盘与资源库仍使用 `b:`/`r:` 文件 ID。添加与取消调用 `POST /adrive/v1.0/openFile/update`，只传 `drive_id/file_id/starred`，不改变文件名。`scopedDriveID` 优先使用明确的 `backup_drive_id`，避免默认盘为资源库时错误访问备份盘。依据：[官方列表文档](https://www.yuque.com/aliyundrive/zpfszx/zqkqp6)、[官方更新文档](https://www.yuque.com/aliyundrive/zpfszx/dp9gn443hh8oksgd)。已覆盖双空间、分页、失败快照保护和读写请求模拟测试，未进行真实账号写入验证。
 
 | 子功能 | 状态 | Go 证据 | 差距 |
 |--------|:----:|---------|------|

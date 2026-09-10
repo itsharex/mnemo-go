@@ -15,6 +15,7 @@ import (
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
+	"mnemo-go/internal/netx"
 )
 
 // Graph simple upload limit (4 MiB).
@@ -38,7 +39,7 @@ func smallUploadPath(parentID, fileName string) string {
 
 // rawPut performs a PUT with an auth header.
 func (c *client) rawPut(ctx context.Context, target string, body io.Reader) (string, error) {
-	resp, err := c.http.Do(ctx, http.MethodPut, target, c.headers(map[string]string{"Content-Type": "application/octet-stream"}), body)
+	resp, err := c.http.DoUpload(ctx, http.MethodPut, target, c.headers(map[string]string{"Content-Type": "application/octet-stream"}), body)
 	if err != nil {
 		return "", err
 	}
@@ -139,7 +140,7 @@ func (c *client) sessionUpload(ctx context.Context, dc drive.Context, f *os.File
 		}
 		req.Header.Set("Content-Range", "bytes "+strconv.FormatInt(pos, 10)+"-"+strconv.FormatInt(end, 10)+"/"+strconv.FormatInt(size, 10))
 		req.Header.Set("Content-Length", strconv.Itoa(n))
-		resp, err := c.http.HTTP.Do(req)
+		resp, err := netx.DoUpload(c.http.HTTP, req)
 		if err != nil {
 			return err
 		}

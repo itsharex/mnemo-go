@@ -630,7 +630,65 @@ func CopyBatch(userID, driveID string, fileIDs []FileRef, toParentID, toParentDe
 	return d.Copy(context.Background(), c, fileIDs, toParentID, toParentDesc)
 }
 
-// FavoriteBatch sets/clears remote favorite on files.
+// ListRemoteFavorites distinguishes unsupported providers from failed requests.
+func ListRemoteFavorites(ctx context.Context, userID, driveID string) (files []model.File, supported bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	d, c, err := driverAndCtx(userID, driveID)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { err = withTokenPersist(err, c) }()
+	p, ok := d.(RemoteFavorites)
+	if !ok {
+		return nil, false, nil
+	}
+	supported, err = p.SupportsRemoteFavorites(ctx, c)
+	if err != nil || !supported {
+		return nil, supported, err
+	}
+	files, err = p.ListFavorites(ctx, c)
+	return
+}
+
+// SetRemoteFavorite returns supported=false only when the provider/account
+// explicitly has no native favorites. Network or permission errors never
+// silently downgrade an operation to local-only success.
+func SetRemoteFavorite(ctx context.Context, userID, driveID string, favorite bool, fileID string) (supported bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(fileID) == "" {
+		return false, errors.New("收藏文件 ID 不能为空")
+	}
+	d, c, err := driverAndCtx(userID, driveID)
+	if err != nil {
+		return false, err
+	}
+	defer func() { err = withTokenPersist(err, c) }()
+	p, ok := d.(RemoteFavorites)
+	if !ok {
+		return false, nil
+	}
+	supported, err = p.SupportsRemoteFavorites(ctx, c)
+	if err != nil || !supported {
+		return supported, err
+	}
+	ids, err := d.Favorite(ctx, c, []string{fileID}, favorite)
+	if err != nil {
+		return true, err
+	}
+	for _, id := range ids {
+		if id == fileID {
+			return true, nil
+		}
+	}
+	return true, fmt.Errorf("云端未确认文件 %s 的收藏操作", fileID)
+}
+
+// FavoriteBatch is the legacy remote-only facade. Local fallback belongs to
+// the app layer, which has access to file metadata and persistent bookmarks.
 func FavoriteBatch(userID, driveID string, favorite bool, fileIDs []string) (ids []string, err error) {
 	d, c, err := driverAndCtx(userID, driveID)
 	if err != nil {

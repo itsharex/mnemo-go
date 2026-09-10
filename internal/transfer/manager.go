@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"mnemo-go/internal/config"
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/logging"
 	"mnemo-go/internal/model"
@@ -50,6 +51,7 @@ type Manager struct {
 	lastPersist        map[string]progressPersistState
 	onEvent            OnTaskEvent
 	dir                string
+	dirError           error
 	stop               chan struct{}
 	ctx                context.Context // root context for all downloads, canceled on Shutdown
 	cancel             context.CancelFunc
@@ -62,14 +64,18 @@ type Manager struct {
 
 // NewManager creates a download manager.
 func NewManager(st *store.Store, downloadDir string, onEvent OnTaskEvent) (*Manager, error) {
-	if downloadDir == "" {
-		home, _ := os.UserHomeDir()
-		downloadDir = filepath.Join(home, "Downloads")
-	}
-	_ = os.MkdirAll(downloadDir, 0o755)
 	maxConc := 3
 	keepTasks := true
 	settings, settingsErr := st.GetSettings()
+	if downloadDir == "" && settingsErr == nil {
+		downloadDir = settings.DownloadDir
+	}
+	downloadDir, dirErr := config.ResolveDownloadDir(downloadDir)
+	if dirErr != nil {
+		// Keep the app usable so an invalid legacy preference can be repaired.
+		// New downloads are rejected until the user selects a valid location.
+		logging.Warn("download directory resolution failed", "error", dirErr)
+	}
 	if settingsErr == nil {
 		if settings.MaxConcurrentDownloads > 0 {
 			maxConc = settings.MaxConcurrentDownloads
@@ -89,6 +95,7 @@ func NewManager(st *store.Store, downloadDir string, onEvent OnTaskEvent) (*Mana
 		lastPersist:        map[string]progressPersistState{},
 		onEvent:            onEvent,
 		dir:                downloadDir,
+		dirError:           dirErr,
 		stop:               make(chan struct{}),
 		ctx:                rootCtx,
 		maxConcurrent:      maxConc,
@@ -115,14 +122,31 @@ func (m *Manager) SetEventSink(fn OnTaskEvent) {
 
 // SetDir updates the download directory at runtime. Subsequent downloads use
 // the new directory; existing tasks keep their already-assigned LocalPath.
-func (m *Manager) SetDir(dir string) {
-	if dir == "" {
-		return
+func (m *Manager) SetDir(dir string) error {
+	resolved := dir
+	if !filepath.IsAbs(resolved) {
+		var err error
+		resolved, err = config.ResolveDownloadDir(dir)
+		if err != nil {
+			return err
+		}
 	}
-	_ = os.MkdirAll(dir, 0o755)
+	resolved = filepath.Clean(resolved)
+	m.targetMu.Lock()
+	defer m.targetMu.Unlock()
 	m.mu.Lock()
-	m.dir = dir
+	m.dir = resolved
+	m.dirError = nil
 	m.mu.Unlock()
+	return nil
+}
+
+// Directory returns the effective location, including any startup resolution
+// error, without changing existing tasks or creating filesystem entries.
+func (m *Manager) Directory() (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.dir, m.dirError
 }
 
 // SetConcurrency changes the queue limit without replacing a semaphore under
@@ -258,13 +282,21 @@ func safeDownloadTask(task model.DownloadTask) model.DownloadTask {
 // addDownloadTask atomically assigns a collision-free final path and publishes
 // the task. Serializing assignment through targetMu prevents two concurrent
 // enqueue calls from selecting the same .part/.state/final file set.
-func (m *Manager) addDownloadTask(t *model.DownloadTask, requestedName string) {
+func (m *Manager) addDownloadTask(t *model.DownloadTask, requestedName string) error {
 	m.targetMu.Lock()
+	defer m.targetMu.Unlock()
+	dir, err := m.Directory()
+	if err != nil {
+		return err
+	}
+	if err := config.EnsureDownloadDir(dir); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	t.LocalPath = m.nextDownloadPathLocked(safeName(requestedName))
 	m.mu.Unlock()
 	m.update(t)
-	m.targetMu.Unlock()
+	return nil
 }
 
 // nextDownloadPathLocked must be called with m.mu held.
@@ -339,7 +371,9 @@ func (m *Manager) AddDownload(userID, driveID string, f model.File) (*model.Down
 		Created:  time.Now().Unix(),
 		Updated:  time.Now().Unix(),
 	}
-	m.addDownloadTask(t, f.Name)
+	if err := m.addDownloadTask(t, f.Name); err != nil {
+		return nil, err
+	}
 	go m.runDownload(t)
 	result := safeDownloadTask(*t)
 	return &result, nil
@@ -362,7 +396,9 @@ func (m *Manager) AddDownloadURL(name, url string, headers map[string]string) (*
 		Created: time.Now().Unix(),
 		Updated: time.Now().Unix(),
 	}
-	m.addDownloadTask(t, name)
+	if err := m.addDownloadTask(t, name); err != nil {
+		return nil, err
+	}
 	go m.runDownload(t)
 	result := safeDownloadTask(*t)
 	return &result, nil
@@ -441,7 +477,7 @@ func (m *Manager) runDownload(t *model.DownloadTask) {
 	}
 	opts.Limiter = m.speedLimiter
 	if url == "" && t.UserID != "" {
-		u, err := drive.GetDownloadURL(t.UserID, t.DriveID, t.FileID, 14400)
+		u, err := drive.GetDownloadURLContext(ctx, t.UserID, t.DriveID, t.FileID, 14400)
 		if err != nil {
 			m.mu.Lock()
 			if !m.removed[t.ID] && t.Status != "canceled" && t.Status != "paused" {
@@ -525,7 +561,7 @@ func (m *Manager) runDownload(t *model.DownloadTask) {
 	// running. Re-resolve once for account-backed tasks and reuse the .part
 	// file; direct URL tasks have no provider context and remain unchanged.
 	if err != nil && t.UserID != "" && isExpiredDownloadError(err) && ctx.Err() == nil {
-		if fresh, refreshErr := drive.GetDownloadURL(t.UserID, t.DriveID, t.FileID, 14400); refreshErr == nil && fresh != nil && fresh.URL != "" {
+		if fresh, refreshErr := drive.GetDownloadURLContext(ctx, t.UserID, t.DriveID, t.FileID, 14400); refreshErr == nil && fresh != nil && fresh.URL != "" {
 			url = fresh.URL
 			opts.Headers = fresh.Headers
 			opts.RequestAuth = fresh.RequestAuth

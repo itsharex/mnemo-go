@@ -5,17 +5,74 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
+	"mnemo-go/internal/netx"
 )
 
 type countingRoundTripper struct {
 	mu      sync.Mutex
 	methods []string
+}
+
+type uploadRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f uploadRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func TestMultipartUploadPreservesSDKBodyAndHonorsLimit(t *testing.T) {
+	old := TransportOverride
+	netx.SetGlobalUploadRate(1000)
+	t.Cleanup(func() { TransportOverride = old; netx.SetGlobalUploadRate(0) })
+	puts := 0
+	TransportOverride = uploadRoundTripper(func(r *http.Request) (*http.Response, error) {
+		body := ""
+		header := make(http.Header)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Query().Has("uploads"):
+			body = `<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>file</Key><UploadId>session</UploadId></InitiateMultipartUploadResult>`
+		case r.Method == http.MethodPut:
+			puts++
+			b, err := io.ReadAll(r.Body)
+			if err != nil {
+				return nil, err
+			}
+			if len(b) < 300 || r.ContentLength < 300 {
+				t.Errorf("SDK upload body/length: %d/%d", len(b), r.ContentLength)
+			}
+			header.Set("ETag", `"part"`)
+		case r.Method == http.MethodPost:
+			body = `<CompleteMultipartUploadResult><Bucket>bucket</Bucket><Key>file</Key><ETag>etag</ETag></CompleteMultipartUploadResult>`
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+		}
+		return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, make([]byte, 300), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	cc, err := connOf(drive.Context{Token: &model.TokenInfo{Conn: testS3Config()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := uploadMultipart(context.Background(), cc, "file", f, &model.UploadingUI{Info: model.UploadInfo{Size: 300}}); err != nil {
+		t.Fatal(err)
+	}
+	if puts != 1 || time.Since(start) < 200*time.Millisecond {
+		t.Fatalf("SDK upload bypassed limit: puts=%d elapsed=%v", puts, time.Since(start))
+	}
 }
 
 func (rt *countingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {

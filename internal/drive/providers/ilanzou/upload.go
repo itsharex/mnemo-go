@@ -18,6 +18,7 @@ import (
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
+	"mnemo-go/internal/netx"
 )
 
 const uploadPartSize = 8 * 1024 * 1024 // 单片 8MB
@@ -198,7 +199,7 @@ func qiniuPut(ctx context.Context, rawURL, upToken string, data []byte) (map[str
 	}
 	req.Header.Set("Authorization", "UpToken "+upToken)
 	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := httpClient.Do(req)
+	resp, err := netx.DoUpload(httpClient, req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -319,7 +320,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 			return err
 		}
 		req.Header.Set("Content-Type", mw.FormDataContentType())
-		resp, err := httpClient.Do(req)
+		resp, err := netx.DoUpload(httpClient, req)
 		if err != nil {
 			return err
 		}

@@ -260,6 +260,9 @@ func (e *Engine) ExecutePlan(ctx context.Context, cfg Config, token string, choi
 		if err := checkPlannedLocal(cfg, c.Path, c.Local); err != nil {
 			return fmt.Errorf("%s: %w", c.Path, err)
 		}
+		if err := checkPlannedRemote(ctx, cfg, c.Path, c.Remote); err != nil {
+			return err
+		}
 		action := c.Action
 		if action == "conflict" {
 			policy := choices[c.Path]
@@ -305,7 +308,7 @@ func (e *Engine) ExecutePlan(ctx context.Context, cfg Config, token string, choi
 					} else {
 						return err
 					}
-					if err := e.uploadPlanned(ctx, cfg, entry); err != nil {
+					if err := e.uploadPlanned(ctx, cfg, entry, nil); err != nil {
 						return err
 					}
 					expectedLocal[name] = entry
@@ -315,7 +318,7 @@ func (e *Engine) ExecutePlan(ctx context.Context, cfg Config, token string, choi
 		}
 		switch action {
 		case "upload":
-			err = e.uploadPlanned(ctx, cfg, *c.Local)
+			err = e.uploadPlanned(ctx, cfg, *c.Local, c.Remote)
 		case "download":
 			err = e.downloadEntry(ctx, cfg, *c.Remote, c.Path, c.Local)
 		case "delete-local":
@@ -370,7 +373,7 @@ func (e *Engine) ExecutePlan(ctx context.Context, cfg Config, token string, choi
 	return nil
 }
 
-func (e *Engine) uploadPlanned(ctx context.Context, cfg Config, entry Entry) error {
+func (e *Engine) uploadPlanned(ctx context.Context, cfg Config, entry Entry, expectedRemote *Entry) error {
 	if err := drive.ValidateUploadItems(cfg.UserID, cfg.DriveID, []drive.UploadValidationItem{{Name: filepath.Base(entry.RemoteName), Size: entry.Size}}); err != nil {
 		return err
 	}
@@ -389,6 +392,9 @@ func (e *Engine) uploadPlanned(ctx context.Context, cfg Config, entry Entry) err
 	if err != nil {
 		return err
 	}
+	if err := checkPlannedRemote(ctx, cfg, entry.RemoteName, expectedRemote); err != nil {
+		return err
+	}
 	if err := handler(ctx, &model.UploadingUI{UploadID: entry.LocalPath, Info: model.UploadInfo{LocalFilePath: entry.LocalPath, ParentFileID: parent, DriveID: cfg.DriveID, Name: filepath.Base(entry.RemoteName), Size: entry.Size, ConflictPolicy: driveutil.ConflictPolicyOverwrite}}); err != nil {
 		return err
 	}
@@ -398,6 +404,48 @@ func (e *Engine) uploadPlanned(ctx context.Context, cfg Config, entry Entry) err
 	}
 	if after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
 		return fmt.Errorf("本地文件在上传期间变化，请重试")
+	}
+	return nil
+}
+
+// checkPlannedRemote reads fresh parent listings, including planned absence.
+// Never use the UI metadata cache when deciding whether a write is still safe.
+// Providers without conditional writes still have a request-sized race window;
+// this check prevents earlier transfers from making the entire plan stale.
+func checkPlannedRemote(ctx context.Context, cfg Config, name string, expected *Entry) error {
+	parent := cfg.RemoteDir
+	parts := strings.Split(name, "/")
+	changed := func() error { return fmt.Errorf("远端文件已变化，请重新预览: %s", name) }
+	for i, part := range parts {
+		files, err := drive.ListDirAllContext(ctx, cfg.UserID, cfg.DriveID, parent, nil)
+		if err != nil {
+			return fmt.Errorf("复核远端文件 %s: %w", name, err)
+		}
+		var found *model.File
+		for j := range files {
+			if files[j].Name == part {
+				if found != nil {
+					return changed()
+				}
+				found = &files[j]
+			}
+		}
+		if found == nil {
+			if expected == nil {
+				return nil
+			}
+			return changed()
+		}
+		if i < len(parts)-1 {
+			if !found.IsDir || found.FileID == "" {
+				return changed()
+			}
+			parent = found.FileID
+			continue
+		}
+		if expected == nil || found.IsDir || found.FileID != expected.RemoteID || found.Size != expected.Size || found.Time != expected.ModTime || found.ContentHashName+":"+found.ContentHash != expected.Hash {
+			return changed()
+		}
 	}
 	return nil
 }
@@ -467,6 +515,9 @@ func (e *Engine) downloadEntry(ctx context.Context, cfg Config, entry Entry, nam
 		return err
 	}
 	if err := checkPlannedLocal(cfg, name, expected); err != nil {
+		return err
+	}
+	if err := checkPlannedRemote(ctx, cfg, entry.RemoteName, &entry); err != nil {
 		return err
 	}
 	return os.Rename(path, target)

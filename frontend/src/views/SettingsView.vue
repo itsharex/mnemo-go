@@ -1,7 +1,8 @@
 <script setup>
+import packageInfo from '../../package.json'
 // 设置页：左侧导航 + 右侧平面行式布局，极简干净无冗余说明
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { GetSettings, SaveSettings, ClearCache, PickDirectory, RevealInFolder, GetLogPath, ClearLogs, ExportLogs } from '../api'
+import { GetSettings, SaveSettings, GetDownloadDirectory, OpenDownloadDirectory, ClearCache, PickDirectory, RevealInFolder, GetLogPath, ClearLogs, ExportLogs } from '../api'
 import { Environment } from '../../wailsjs/runtime/runtime'
 import { getPrefs, setPref } from '../appearance'
 import SegTabs from '../components/SegTabs.vue'
@@ -9,7 +10,7 @@ import UiIcon from '../components/UiIcon.vue'
 import UiSelect from '../components/UiSelect.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import { cleanBackupPrefs } from '../workspace'
-import { ListFavorites, AddFavorite, listAccounts, setAccountCustomMeta as saveAccountMeta } from '../api'
+import { ListFavorites, RestoreFavorite, listAccounts, setAccountCustomMeta as saveAccountMeta } from '../api'
 
 const emit = defineEmits(['toast', 'theme', 'update', 'clear-cache'])
 const backupBusy = ref(false), pendingBackup = ref(null)
@@ -52,7 +53,7 @@ async function restorePrefs() {
       const aliases = data.preferences.accountAliases || {}, icons = data.preferences.accountIcons || {}
       if (Object.hasOwn(aliases, acc.user_id) || Object.hasOwn(icons, acc.user_id)) await saveAccountMeta(acc.user_id, aliases[acc.user_id] ?? acc.custom_name ?? '', icons[acc.user_id] ?? acc.custom_icon ?? '')
     }
-    for (const favorite of data.favorites) await AddFavorite(favorite.user_id, favorite.drive_id, favorite)
+    for (const favorite of data.favorites) await RestoreFavorite(favorite)
     for (const [key, value] of Object.entries(data.preferences)) setPref(key, value)
     const current = await GetSettings()
     await SaveSettings({ ...current, theme: data.theme })
@@ -87,6 +88,21 @@ const clearingCache = ref(false)
 const clearingLogs = ref(false)
 const exportingLogs = ref(false)
 const logPath = ref('')
+const effectiveDownloadDir = ref(''), downloadDirError = ref('')
+let directoryReadSeq = 0
+async function refreshDownloadDirectory() {
+  const seq = ++directoryReadSeq
+  try {
+    const dir = await GetDownloadDirectory()
+    if (seq !== directoryReadSeq) return
+    effectiveDownloadDir.value = dir || ''
+    downloadDirError.value = ''
+  } catch (error) {
+    if (seq !== directoryReadSeq) return
+    effectiveDownloadDir.value = ''
+    downloadDirError.value = String(error?.message || error)
+  }
+}
 let pendingSave = false
 const bodyEl = ref(null)
 const activeNav = ref('general')
@@ -166,6 +182,7 @@ async function loadSettings() {
 		settings.value.logLevel = settings.value.logLevel || 'info'
 		logPath.value = await GetLogPath().catch(() => '')
     loaded.value = true
+    await refreshDownloadDirectory()
   } catch (e) {
     loadError.value = '设置加载失败：' + String(e?.message || e)
   } finally {
@@ -217,9 +234,15 @@ async function save(silent) {
     s.maxDownloadSpeed = Math.max(0, Number(s.maxDownloadSpeed) || 0) * 1024
     s.maxUploadSpeed = Math.max(0, Number(s.maxUploadSpeed) || 0) * 1024
     await SaveSettings(s)
+    await refreshDownloadDirectory()
+    if (settings.value.downloadDir === s.downloadDir && s.downloadDir.trim() && effectiveDownloadDir.value) {
+      settings.value.downloadDir = effectiveDownloadDir.value
+    }
     if (!silent) emit('toast', '设置已保存', 'success')
+    return true
   } catch (e) {
     emit('toast', '保存失败: ' + String(e), 'error')
+    return false
   } finally {
     saving.value = false
     if (pendingSave) { pendingSave = false; save(true) }
@@ -243,18 +266,21 @@ function onInputCommit() {
 
 async function pickDownloadDir() {
   let dir
-  try { dir = await PickDirectory('选择下载文件夹', settings.value.downloadDir || '') } catch { return }
+  try { dir = await PickDirectory('选择下载文件夹', effectiveDownloadDir.value || '') } catch { return }
   if (!dir) return
   settings.value.downloadDir = dir
   save(true)
 }
 
-function openDownloadDir() {
-  if (settings.value.downloadDir) {
-    RevealInFolder(settings.value.downloadDir)
-  } else {
-    emit('toast', '当前使用系统默认下载目录', 'info')
-  }
+async function openDownloadDir() {
+  try { await OpenDownloadDirectory() }
+  catch (error) { emit('toast', '打开下载目录失败：' + String(error?.message || error), 'error') }
+}
+
+async function resetDownloadDir() {
+  const previous = settings.value.downloadDir
+  settings.value.downloadDir = ''
+  if (!(await save(true))) settings.value.downloadDir = previous
 }
 
 function setDownloadLimitPreset(kb) {
@@ -456,19 +482,22 @@ async function exportLogs() {
           <header class="sg-heading"><h2>传输</h2></header>
           <div class="sg-card">
             <div class="sg-row">
-              <div class="sg-text"><span class="sg-label">下载保存目录</span></div>
+              <div class="sg-text"><span class="sg-label">下载保存目录</span><span class="sg-desc">留空跟随系统下载位置</span></div>
               <div class="sg-control sg-control-grow">
                 <input
                   class="input"
                   v-model="settings.downloadDir"
-                  placeholder="系统默认下载目录"
+                  :placeholder="effectiveDownloadDir || '系统默认下载目录'"
+                  :title="downloadDirError || effectiveDownloadDir"
                   @blur="onInputCommit"
                   @keydown.enter="onInputCommit"
                 />
                 <button class="btn sm" @click="pickDownloadDir">选择</button>
-                <button v-if="settings.downloadDir" class="btn sm" @click="openDownloadDir">打开</button>
+                <button class="btn sm" :disabled="!effectiveDownloadDir || saving" @click="openDownloadDir">打开</button>
+                <button v-if="settings.downloadDir" class="btn sm" :disabled="saving" @click="resetDownloadDir">恢复默认</button>
               </div>
             </div>
+            <div v-if="downloadDirError" class="sg-row" role="alert"><span class="sg-desc">{{ downloadDirError }}</span></div>
 
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">最大并发下载数</span></div>
@@ -698,6 +727,7 @@ async function exportLogs() {
         <section class="settings-group" id="sg-update">
           <header class="sg-heading"><h2>更新</h2></header>
           <div class="sg-card">
+            <div class="sg-row"><div class="sg-text"><span class="sg-label">当前版本</span><span class="sg-desc">只检查正式版更新</span></div><div class="sg-control">{{ packageInfo.version }}</div></div>
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">自动检查更新</span></div>
               <div class="sg-control">

@@ -448,7 +448,8 @@ function parsePan139SMSRequired(err) {
   pan139SMSRequired.value = true
   form.value.login_mode = 'sms'
   form.value.sms_code = ''
-  errorText.value = '请获取并填写短信验证码'
+  const detail = String(err).split(/\r?\n/).slice(1).join('\n').trim()
+  errorText.value = detail ? `${detail}\n请获取并填写短信验证码` : '请获取并填写短信验证码'
   return true
 }
 

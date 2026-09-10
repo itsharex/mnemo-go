@@ -1236,7 +1236,7 @@ func putPan139UploadPart(ctx context.Context, hc *netx.Client, f *os.File, part 
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Origin", "https://yun.139.com")
 	req.Header.Set("Referer", "https://yun.139.com/")
-	resp, err := hc.HTTP.Do(req)
+	resp, err := netx.DoUpload(hc.HTTP, req)
 	if err != nil {
 		return err
 	}

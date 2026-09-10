@@ -30,6 +30,102 @@ func onedriveResponse(req *http.Request, status int, body string) *http.Response
 	}
 }
 
+func TestFavoritesRejectUnknownAccountTypeAndMalformedList(t *testing.T) {
+	d := &Driver{}
+	ctx := drive.Context{DriveID: "local", Token: &model.TokenInfo{AccessToken: "token", ProviderDriveType: "unexpected"}}
+	if supported, err := d.SupportsRemoteFavorites(context.Background(), ctx); err == nil || supported {
+		t.Fatal("unknown account type treated as business")
+	}
+	old := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = old })
+	netx.TestTransportHook = onedriveRoundTripper(func(r *http.Request) (*http.Response, error) {
+		body := `{}`
+		if r.URL.Path == "/v1.0/me/drive" {
+			body = `{"id":"drive"}`
+		}
+		return onedriveResponse(r, 200, body), nil
+	})
+	ctx.Token.ProviderDriveType = "business"
+	if _, err := d.ListFavorites(context.Background(), ctx); err == nil {
+		t.Fatal("malformed following list accepted as empty snapshot")
+	}
+}
+
+func TestFavoritesPaginateWithinCurrentDriveAndFollowUnfollow(t *testing.T) {
+	old := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = old })
+	netx.TestTransportHook = onedriveRoundTripper(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1.0/me/drive":
+			return onedriveResponse(r, 200, `{"id":"own-drive","driveType":"business"}`), nil
+		case "/v1.0/me/drive/following":
+			if r.URL.Query().Get("skiptoken") == "next" {
+				return onedriveResponse(r, 200, `{"value":[{"id":"folder","name":"Folder","folder":{},"parentReference":{"id":"root","driveId":"own-drive"}}]}`), nil
+			}
+			return onedriveResponse(r, 200, `{"value":[{"id":"file","name":"file.jpg","size":42,"parentReference":{"id":"parent","driveId":"own-drive"}},{"id":"foreign","name":"foreign.jpg","parentReference":{"driveId":"foreign-drive"}}],"@odata.nextLink":"https://graph.microsoft.com/v1.0/me/drive/following?skiptoken=next"}`), nil
+		case "/v1.0/me/drive/items/file/follow":
+			if r.Method != http.MethodPost {
+				t.Fatal("follow method")
+			}
+			return onedriveResponse(r, 200, `{"id":"file"}`), nil
+		case "/v1.0/me/drive/items/file/unfollow":
+			if r.Method != http.MethodPost {
+				t.Fatal("unfollow method")
+			}
+			return onedriveResponse(r, 204, ""), nil
+		default:
+			t.Fatalf("unexpected request %s", r.URL)
+			return nil, nil
+		}
+	})
+	d := &Driver{}
+	c := drive.Context{DriveID: "mounted", Token: &model.TokenInfo{AccessToken: "token"}}
+	if supported, err := d.SupportsRemoteFavorites(context.Background(), c); err != nil || !supported || c.Token.ProviderDriveType != "business" {
+		t.Fatalf("support=%v, %v", supported, err)
+	}
+	files, err := d.ListFavorites(context.Background(), c)
+	if err != nil || len(files) != 2 || files[0].FileID != "file" || files[0].ParentFileID != "parent" || files[0].Size != 42 || !files[0].Starred || !files[1].IsDir {
+		t.Fatalf("favorites=%+v, %v", files, err)
+	}
+	for _, favorite := range []bool{true, false} {
+		ids, err := d.Favorite(context.Background(), c, []string{"file"}, favorite)
+		if err != nil || len(ids) != 1 || ids[0] != "file" {
+			t.Fatalf("favorite=%v %v", ids, err)
+		}
+	}
+}
+
+func TestFavoritesRejectPartialPagesAndUnconfirmedFollow(t *testing.T) {
+	old := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = old })
+	for _, page := range []string{
+		`{"value":[],"@odata.nextLink":"/me/drive/following"}`,
+		`{"value":[],"@odata.nextLink":"https://untrusted.invalid/following"}`,
+		`{"value":[{"id":"file"}]}`,
+	} {
+		t.Run(page, func(t *testing.T) {
+			netx.TestTransportHook = onedriveRoundTripper(func(r *http.Request) (*http.Response, error) {
+				body := page
+				if r.URL.Host != "graph.microsoft.com" {
+					t.Fatal("token sent to foreign server")
+				}
+				if r.URL.Path == "/v1.0/me/drive" {
+					body = `{"id":"own-drive"}`
+				}
+				return onedriveResponse(r, 200, body), nil
+			})
+			if _, err := (&Driver{}).ListFavorites(context.Background(), drive.Context{Token: &model.TokenInfo{AccessToken: "token"}}); err == nil {
+				t.Fatal("incomplete snapshot accepted")
+			}
+		})
+	}
+	netx.TestTransportHook = onedriveRoundTripper(func(r *http.Request) (*http.Response, error) { return onedriveResponse(r, 200, `{}`), nil })
+	ids, err := (&Driver{}).Favorite(context.Background(), drive.Context{Token: &model.TokenInfo{AccessToken: "token"}}, []string{"file"}, true)
+	if err == nil || len(ids) != 0 {
+		t.Fatal("unconfirmed follow accepted")
+	}
+}
+
 func TestCreateShareUsesMicrosoftGraphCreateLink(t *testing.T) {
 	previous := netx.TestTransportHook
 	t.Cleanup(func() { netx.TestTransportHook = previous })

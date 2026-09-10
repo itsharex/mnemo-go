@@ -523,7 +523,7 @@ func (c *client) UploadSmall(ctx context.Context, path string, r io.Reader, size
 				}
 			}
 		}
-		resp, err := c.http.Do(ctx, http.MethodPost, contentHost+"/files/upload", headers, r)
+		resp, err := c.http.DoUpload(ctx, http.MethodPost, contentHost+"/files/upload", headers, r)
 		if err != nil {
 			return "", err
 		}
@@ -721,7 +721,7 @@ func (c *client) contentJSON(ctx context.Context, endpoint string, apiArg []byte
 		headers["Dropbox-API-Arg"] = string(apiArg)
 	}
 	for attempt := 0; attempt < 3; attempt++ {
-		resp, err := c.http.Do(ctx, http.MethodPost, contentHost+endpoint, headers, bytesReader(chunk))
+		resp, err := c.http.DoUpload(ctx, http.MethodPost, contentHost+endpoint, headers, bytesReader(chunk))
 		if err != nil {
 			return err
 		}

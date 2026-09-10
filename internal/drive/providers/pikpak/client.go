@@ -1289,6 +1289,31 @@ func (c *client) Copy(ctx context.Context, ids []string, toParentID string) erro
 	})
 }
 
+// ListFavorites reads the global starred feed with cursor pagination.
+func (c *client) ListFavorites(ctx context.Context) ([]File, error) {
+	q := url.Values{"limit": {"100"}, "parent_id": {"*"}, "thumbnail_size": {"SIZE_LARGE"}, "filters": {`{"starred":{"eq":true},"trashed":{"eq":false},"phase":{"eq":"PHASE_TYPE_COMPLETE"}}`}}
+	out := []File{}
+	seen := map[string]bool{}
+	for {
+		var page listResp
+		if err := c.get(ctx, "/drive/v1/files", q, &page); err != nil {
+			return nil, err
+		}
+		if page.Files == nil {
+			return nil, errors.New("pikpak: 收藏列表响应缺少 files")
+		}
+		out = append(out, page.Files...)
+		if page.NextPageToken == "" {
+			return out, nil
+		}
+		if seen[page.NextPageToken] {
+			return nil, errors.New("pikpak: 收藏列表分页游标重复")
+		}
+		seen[page.NextPageToken] = true
+		q.Set("page_token", page.NextPageToken)
+	}
+}
+
 // Star sets starred state.
 func (c *client) Star(ctx context.Context, ids []string, starred bool) error {
 	command := "star"

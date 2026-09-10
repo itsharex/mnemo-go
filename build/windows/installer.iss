@@ -8,7 +8,7 @@
 
 #define MyAppName "Mnemo"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.2"
+  #define MyAppVersion "0.3.0"
 #endif
 #define MyAppExeName "Mnemo.exe"
 
@@ -25,8 +25,13 @@ OutputBaseFilename={#MyArchSuffix}-Setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+#if Pos("arm64", MyArchSuffix) > 0
+ArchitecturesInstallIn64BitMode=arm64
+ArchitecturesAllowed=arm64
+#else
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
+#endif
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
@@ -46,3 +51,10 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: ShouldRestartAfterUpdate
+
+[Code]
+function ShouldRestartAfterUpdate: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:MNEMORESTART|0}') = '1');
+end;

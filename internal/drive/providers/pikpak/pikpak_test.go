@@ -41,6 +41,67 @@ func TestFileSizeAcceptsQuotedAndNumericIntegers(t *testing.T) {
 	}
 }
 
+func TestFavoritePaginationAndNativeStarOperations(t *testing.T) {
+	c := newClient("token", "device", "favorite-test")
+	reads, writes := 0, 0
+	c.http.HTTP.Transport = pikpakRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodGet {
+			reads++
+			q := r.URL.Query()
+			var filter map[string]map[string]any
+			if err := json.Unmarshal([]byte(q.Get("filters")), &filter); err != nil {
+				t.Fatal(err)
+			}
+			if r.URL.Path != "/drive/v1/files" || q.Get("parent_id") != "*" || filter["starred"]["eq"] != true || filter["trashed"]["eq"] != false {
+				t.Fatalf("wrong favorite filter: %s", r.URL)
+			}
+			if reads == 1 {
+				return pikpakResponse(r, 200, `{"files":[{"id":"a","parent_id":"folder","name":"a.jpg","starred":true}],"next_page_token":"next"}`), nil
+			}
+			if q.Get("page_token") != "next" {
+				t.Fatal("page token lost")
+			}
+			return pikpakResponse(r, 200, `{"files":[{"id":"b","name":"b.mp4","starred":true}],"next_page_token":""}`), nil
+		}
+		writes++
+		want := "/drive/v1/files:star"
+		if writes == 2 {
+			want = "/drive/v1/files:unstar"
+		}
+		var body struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if r.Method != http.MethodPost || r.URL.Path != want || len(body.IDs) != 1 || body.IDs[0] != "a" {
+			t.Fatalf("wrong star request: %s %+v", r.URL, body)
+		}
+		return pikpakResponse(r, 200, `{}`), nil
+	})
+	files, err := c.ListFavorites(context.Background())
+	if err != nil || len(files) != 2 || files[0].ParentID != "folder" {
+		t.Fatalf("favorites=%+v, %v", files, err)
+	}
+	for _, starred := range []bool{true, false} {
+		if err := c.Star(context.Background(), []string{"a"}, starred); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestFavoriteMalformedAndCyclicPagesAreNotEmptySuccess(t *testing.T) {
+	for _, body := range []string{`{}`, `{"files":null}`, `{"files":[],"next_page_token":"cycle"}`} {
+		t.Run(body, func(t *testing.T) {
+			c := newClient("token", "device", "favorite-invalid")
+			c.http.HTTP.Transport = pikpakRoundTripper(func(r *http.Request) (*http.Response, error) { return pikpakResponse(r, 200, body), nil })
+			if _, err := c.ListFavorites(context.Background()); err == nil {
+				t.Fatal("invalid favorite response accepted")
+			}
+		})
+	}
+}
+
 func TestPikPakQuotedQuotaAndDownloadSize(t *testing.T) {
 	c := newClient("token", "device", "account")
 	c.http.HTTP.Transport = pikpakRoundTripper(func(r *http.Request) (*http.Response, error) {

@@ -265,15 +265,21 @@ func (d *Driver) doOnce(ctx context.Context, tok *model.TokenInfo, sess *Session
 		return nil, err
 	}
 	defer resp.Body.Close()
-	text, _ := io.ReadAll(resp.Body)
+	text, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	bodyText := string(text)
+	// Session failures can use HTTP 400/401 as well as a 200 business error.
+	// Check them before the generic HTTP error branch.
+	if resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests &&
+		(strings.Contains(bodyText, "userSessionBO is null") || strings.Contains(bodyText, "InvalidSessionKey")) {
+		return &rawResponse{needRefresh: true, text: bodyText}, nil
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, truncateStr(bodyText, 300))
 	}
 
-	if strings.Contains(bodyText, "userSessionBO is null") || strings.Contains(bodyText, "InvalidSessionKey") {
-		return &rawResponse{needRefresh: true, text: bodyText}, nil
-	}
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(text, &parsed); err == nil {
 		code := strVal(parsed, "errorCode")
@@ -353,10 +359,13 @@ func jsonEscape(s string) string {
 // back to a silent re-login when the open token is invalid or credentials are
 // stored (mirrors legacy refreshPan189Session).
 func (d *Driver) refreshSession(ctx context.Context, tok *model.TokenInfo, sess *Session) (*Session, error) {
-	return d.refreshSessionOnce(ctx, sess, true)
+	return d.refreshSessionOnce(ctx, tok, sess, true)
 }
 
-func (d *Driver) refreshSessionOnce(ctx context.Context, sess *Session, allowRefresh bool) (*Session, error) {
+func (d *Driver) refreshSessionOnce(ctx context.Context, tok *model.TokenInfo, sess *Session, allowRefresh bool) (*Session, error) {
+	if sess == nil {
+		return nil, errors.New("189 Session 缺失，请重新登录")
+	}
 	relogin := func() (*Session, error) {
 		if sess.Username == "" || sess.Password == "" {
 			return nil, errors.New("无法刷新 189 Session")
@@ -382,23 +391,17 @@ func (d *Driver) refreshSessionOnce(ctx context.Context, sess *Session, allowRef
 	q.Set("accessToken", sess.AccessToken)
 	u.RawQuery = q.Encode()
 
-	hc := netx.NewClient(60 * time.Second)
-	resp, err := hc.Do(ctx, http.MethodGet, u.String(), map[string]string{
+	status, body, err := pan189SessionResponse(ctx, u.String(), map[string]string{
 		"Accept":       "application/json",
 		"User-Agent":   ua189,
 		"X-Request-ID": randomRequestID(),
-	}, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	})
 	if err != nil {
 		return nil, err
 	}
 	var j map[string]json.RawMessage
 	if err := json.Unmarshal(body, &j); err != nil {
-		return nil, fmt.Errorf("刷新 189 Session 失败: %s", truncateStr(string(body), 160))
+		return nil, fmt.Errorf("刷新 189 Session 失败（HTTP %d，响应不是有效 JSON）", status)
 	}
 	code := strVal(j, "errorCode")
 	resCode := strVal(j, "res_code")
@@ -406,7 +409,12 @@ func (d *Driver) refreshSessionOnce(ctx context.Context, sess *Session, allowRef
 		if allowRefresh && sess.RefreshToken != "" {
 			next, refreshErr := refreshPan189OpenToken(ctx, sess)
 			if refreshErr == nil {
-				return d.refreshSessionOnce(ctx, next, false)
+				// Token rotation may succeed before session exchange fails. Persist
+				// the new open tokens while retaining the previous API session.
+				if tok != nil {
+					saveSession(tok, next)
+				}
+				return d.refreshSessionOnce(ctx, tok, next, false)
 			}
 			if sess.Username == "" || sess.Password == "" {
 				return nil, refreshErr
@@ -416,6 +424,9 @@ func (d *Driver) refreshSessionOnce(ctx context.Context, sess *Session, allowRef
 			return relogin()
 		}
 		return nil, errors.New("189 Session 失效，请重新登录")
+	}
+	if status < 200 || status >= 300 || (code != "" && code != "0") || (resCode != "" && resCode != "0") {
+		return nil, pan189SessionError(status, j)
 	}
 	sKey := strVal(j, "sessionKey")
 	sSecret := strVal(j, "sessionSecret")
@@ -434,7 +445,49 @@ func (d *Driver) refreshSessionOnce(ctx context.Context, sess *Session, allowRef
 	if sess.Username != "" && sess.Password != "" {
 		return relogin()
 	}
-	return nil, errors.New(firstNonEmpty(strVal(j, "res_message"), strVal(j, "message"), "刷新 189 Session 失败"))
+	return nil, pan189SessionError(status, j)
+}
+
+const pan189SessionRetryDelay = 300 * time.Millisecond
+
+// Only the idempotent session GET is retried, at most once. Token rotation and
+// interactive login are never replayed blindly after a transport failure.
+func pan189SessionResponse(ctx context.Context, rawURL string, headers map[string]string) (int, []byte, error) {
+	hc := netx.NewClient(60 * time.Second)
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := hc.Do(ctx, http.MethodGet, rawURL, headers, nil)
+		status := 0
+		var body []byte
+		if err == nil {
+			status = resp.StatusCode
+			body, err = io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+			resp.Body.Close()
+		}
+		if ctx.Err() != nil {
+			return 0, nil, ctx.Err()
+		}
+		retryable := err != nil || status == http.StatusRequestTimeout || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+		if !retryable || attempt == 1 {
+			if err != nil {
+				return status, nil, errors.New("刷新 189 Session 网络请求失败，请稍后重试")
+			}
+			return status, body, nil
+		}
+		timer := time.NewTimer(pan189SessionRetryDelay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, nil, ctx.Err()
+		}
+	}
+	return 0, nil, errors.New("刷新 189 Session 失败")
+}
+
+func pan189SessionError(status int, fields map[string]json.RawMessage) error {
+	code := firstNonEmpty(strVal(fields, "errorCode"), strVal(fields, "res_code"), "unknown")
+	message := firstNonEmpty(strVal(fields, "errorMsg"), strVal(fields, "res_message"), strVal(fields, "message"), strVal(fields, "msg"), "未返回有效会话")
+	return fmt.Errorf("刷新 189 Session 失败（HTTP %d，code=%s）：%s", status, truncateStr(code, 80), truncateStr(message, 160))
 }
 
 func refreshPan189OpenToken(ctx context.Context, sess *Session) (*Session, error) {

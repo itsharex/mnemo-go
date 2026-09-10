@@ -198,7 +198,7 @@ func putPart(ctx context.Context, rawURL string, headers map[string]string, chun
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := hc.HTTP.Do(req)
+	resp, err := netx.DoUpload(hc.HTTP, req)
 	if err != nil {
 		return err
 	}

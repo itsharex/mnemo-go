@@ -14,6 +14,7 @@ import (
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
+	"mnemo-go/internal/netx"
 )
 
 const (
@@ -235,7 +236,7 @@ func uploadLanzouRaw(ctx context.Context, cookie, baseURL, contentType string, b
 		if mergedCookie != "" {
 			req.Header.Set("cookie", mergedCookie)
 		}
-		resp, err := httpClient.Do(req)
+		resp, err := netx.DoUpload(httpClient, req)
 		if err != nil {
 			return nil, err
 		}

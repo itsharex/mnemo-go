@@ -28,6 +28,28 @@ func (d *Driver) Meta() drive.Meta                 { return drive.GetMeta(provid
 func (d *Driver) Capabilities() drive.Capabilities { return drive.RegistryCaps(providerID) }
 func (d *Driver) RootID() string                   { return RootID }
 
+func (d *Driver) SupportsRemoteFavorites(context.Context, drive.Context) (bool, error) {
+	return true, nil
+}
+
+func (d *Driver) ListFavorites(ctx context.Context, c drive.Context) ([]model.File, error) {
+	cl, err := clientOf(c)
+	if err != nil {
+		return nil, err
+	}
+	items, err := cl.ListFavorites(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.File, 0, len(items))
+	for i := range items {
+		f := mapFile(&items[i], c.DriveID, items[i].ParentID)
+		f.Starred = true
+		out = append(out, f)
+	}
+	return out, nil
+}
+
 func clientOf(c drive.Context) (*client, error) {
 	if c.Token == nil || c.Token.AccessToken == "" {
 		return nil, drive.ErrUnauthorized

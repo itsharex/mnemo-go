@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
 import {
   listDir, listTrash, search, mkdir, rename, trash, remove, restore,
-  move, copy, favorite, createShare, uploadFiles, validateUploadFiles, migrateFiles, download,
+  move, copy, createShare, uploadFiles, validateUploadFiles, migrateFiles, download,
   AddFavorite, RemoveFavorite, ListFavorites, OfflineDownload, PickDirectory, PickFiles,
   formatBytes, formatTime, formatTimeParts, iconOf, extOf, openKindOf, copyText,
   capsOf, providerMetaOf, providerOf, accountName, providerIconUrl, GetDirectoryCache, SaveDirectoryCache, DeleteDirectoryCache, onEvent,
@@ -25,10 +25,12 @@ const props = defineProps({
   account: Object,
   keyboardActive: { type: Boolean, default: true },
   locationKey: { type: String, default: '' },
+  cloudDragEnabled: { type: Boolean, default: false },
+  cloudDragActive: { type: Boolean, default: false },
   accounts: { type: Array, default: () => [] },
   providers: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['toast', 'go'])
+const emit = defineEmits(['toast', 'go', 'cloud-drag-start', 'cloud-drag-end', 'cloud-drop'])
 
 // ---------- 状态 ----------
 const mode = ref('list') // list | trash | search | favorite
@@ -179,19 +181,36 @@ const rootTitle = computed(() => meta.value.rootTitle || '全部文件')
 const dirCache = new Map() // key -> { files: File[], at: number }
 const DIR_CACHE_MAX = 200
 const DIR_CACHE_TTL_MS = 10 * 60 * 1000
+const TREE_PREFETCH_LIMIT = 6
+const TREE_PREFETCH_CONCURRENCY = 2
+const TREE_PREFETCH_DELAY_MS = 180
+const directoryRequests = new Map()
+let prefetchTimer = null, prefetchQueue = [], prefetchActive = 0, prefetchReady = false
+let viewDisposed = false
 const cacheWrites = new Map()
 function cacheKeyPart(value) { return encodeURIComponent(String(value ?? '')) }
+function validDirectory(list) {
+  if (!Array.isArray(list)) return false
+  const ids = new Set()
+  return list.every(file => {
+    const id = file?.file_id
+    if (typeof id !== 'string' || !id.trim() || ids.has(id)) return false
+    ids.add(id)
+    return true
+  })
+}
 function dirCacheKey(uidV, didV, modeV, idV, kwV) {
   return [providerOf(uidV), uidV, didV, modeV, idV || '', kwV || ''].map(cacheKeyPart).join('|')
 }
 function cacheDir(key, list) {
+  if (!validDirectory(list)) return
   dirCache.set(key, { files: list || [], at: Date.now() })
   if (dirCache.size > DIR_CACHE_MAX) { const first = dirCache.keys().next().value; dirCache.delete(first) }
 }
 function getCachedDir(key) {
   const cached = dirCache.get(key)
   if (!cached) return null
-  if (Date.now() - cached.at > DIR_CACHE_TTL_MS) {
+  if (!validDirectory(cached.files) || Date.now() - cached.at > DIR_CACHE_TTL_MS) {
     dirCache.delete(key)
     return null
   }
@@ -214,6 +233,8 @@ function persistDir(key, list, epoch = cacheEpoch) {
 }
 function isPersistableMode(modeV) { return modeV === 'list' }
 function invalidateDirCache(uidV, didV, modeV, idV) {
+  cacheEpoch++
+  cancelDirectoryPrefetch()
   // 变更后清掉该目录缓存，避免后台刷新前闪现旧数据
   const prefix = dirCacheKey(uidV, didV, modeV, idV, '')
   for (const k of dirCache.keys()) if (k.startsWith(prefix)) dirCache.delete(k)
@@ -238,7 +259,7 @@ const gridColumnCount = ref(1)
 const gridRowPitch = ref(166)
 let listResizeObserver = null
 
-function currentViewKey() { return [mode.value, dirId.value, keyword.value].join('|') }
+function currentViewKey() { return dirCacheKey(uid.value, did.value, mode.value, dirId.value, keyword.value) }
 
 function updateVirtualMetrics(el = listEl.value) {
   if (!el) return
@@ -281,6 +302,7 @@ watch([loading, files], () => {
 
 async function load(id) {
   if (!props.account) return
+  cancelDirectoryPrefetch()
   const seq = ++loadSeq
   pendingScrollSeq = seq
   const epoch = cacheEpoch
@@ -302,7 +324,7 @@ async function load(id) {
     // intentionally account/provider keyed and is ignored once fresh data
     // has arrived from the provider.
     GetDirectoryCache(ckey).then((list) => {
-      if (seq !== loadSeq || epoch !== cacheEpoch || networkDone || !Array.isArray(list)) return
+      if (seq !== loadSeq || epoch !== cacheEpoch || networkDone || !validDirectory(list)) return
       displayedCache = true
       files.value = list
       cacheDir(ckey, list)
@@ -314,11 +336,12 @@ async function load(id) {
     let list
     if (snapMode === 'trash') list = (await listTrash(snapUid, snapDid)) || []
     else if (snapMode === 'search') list = snapKw ? (await search(snapUid, snapDid, snapKw.trim())) || [] : []
-    else list = (await listDir(snapUid, snapDid, id)) || []
+    else list = await requestDirectory(snapUid, snapDid, id, epoch)
     networkDone = true
     recordAccountHealth(snapUid)
     // 时序保护：过期响应（账号/目录已切换或有更新请求）直接丢弃
     if (seq !== loadSeq || epoch !== cacheEpoch) return
+    if (!validDirectory(list)) throw new Error('目录数据包含空白或重复的文件 ID，请刷新重试')
     files.value = list
     // 清理当前目录已不存在的缩略图错误标记，避免瞬时失败被永久记住
     const validIds = new Set(list.map((f) => f.file_id))
@@ -326,8 +349,11 @@ async function load(id) {
     for (const k in thumbErrors.value) if (validIds.has(k)) nextErr[k] = thumbErrors.value[k]
     thumbErrors.value = nextErr
     cacheDir(ckey, list)
-    if (epoch === cacheEpoch && isPersistableMode(snapMode)) persistDir(ckey, list, epoch)
-    if (snapMode === 'list') updateTreeSnapshot(id, list, snapUid, snapDid)
+    if (epoch === cacheEpoch && isPersistableMode(snapMode)) persistDir(ckey, list, epoch).catch(() => {})
+    if (snapMode === 'list') {
+      updateTreeSnapshot(id, list, snapUid, snapDid)
+      scheduleDirectoryPrefetch(list)
+    }
   } catch (e) {
     networkDone = true
     recordAccountHealth(snapUid, e)
@@ -349,6 +375,51 @@ function updateTreeSnapshot(id, list, snapUid = uid.value, snapDid = did.value) 
   }
 }
 
+function requestDirectory(user, drive, id, epoch = cacheEpoch) {
+  const key = `${epoch}|${dirCacheKey(user, drive, 'list', id, '')}`
+  if (directoryRequests.has(key)) return directoryRequests.get(key)
+  const pending = Promise.resolve().then(() => listDir(user, drive, id)).then(result => {
+    const list = result || []
+    if (!validDirectory(list)) throw new Error('目录数据包含空白或重复的文件 ID，请刷新重试')
+    return list
+  })
+  directoryRequests.set(key, pending)
+  pending.finally(() => { if (directoryRequests.get(key) === pending) directoryRequests.delete(key) }).catch(() => {})
+  return pending
+}
+
+function cancelDirectoryPrefetch() {
+  clearTimeout(prefetchTimer)
+  prefetchQueue = []
+  prefetchReady = false
+}
+
+function scheduleDirectoryPrefetch(list) {
+  cancelDirectoryPrefetch()
+  if (viewDisposed || mode.value !== 'list') return
+  const seen = new Set()
+  prefetchQueue = list.filter(file => {
+    if (!file.isDir || !file.file_id || seen.has(file.file_id)) return false
+    seen.add(file.file_id)
+    return !getCachedDir(dirCacheKey(uid.value, did.value, 'list', file.file_id, ''))
+  }).slice(0, TREE_PREFETCH_LIMIT).map(file => ({ id: file.file_id, user: uid.value, drive: did.value, epoch: cacheEpoch }))
+  prefetchTimer = setTimeout(() => { prefetchReady = true; drainDirectoryPrefetch() }, TREE_PREFETCH_DELAY_MS)
+}
+
+function drainDirectoryPrefetch() {
+  if (!prefetchReady || viewDisposed) return
+  while (prefetchActive < TREE_PREFETCH_CONCURRENCY && prefetchQueue.length) {
+    const item = prefetchQueue.shift()
+    if (item.user !== uid.value || item.drive !== did.value || item.epoch !== cacheEpoch) continue
+    prefetchActive++
+    // A one-level warm-up only: results do not enqueue grandchildren.
+    listDirectorySnapshot(item.id).catch(() => {}).finally(() => {
+      prefetchActive--
+      drainDirectoryPrefetch()
+    })
+  }
+}
+
 async function listDirectorySnapshot(id) {
   const snapUid = uid.value, snapDid = did.value
   const epoch = cacheEpoch
@@ -357,30 +428,34 @@ async function listDirectorySnapshot(id) {
   if (inMemory) return inMemory.files
   const persisted = await GetDirectoryCache(key).catch(() => null)
   if (epoch !== cacheEpoch || snapUid !== uid.value || snapDid !== did.value) return []
-  if (Array.isArray(persisted)) {
+  if (validDirectory(persisted)) {
     cacheDir(key, persisted)
     updateTreeSnapshot(id, persisted, snapUid, snapDid)
     return persisted
   }
-  const list = (await listDir(snapUid, snapDid, id)) || []
+  const list = await requestDirectory(snapUid, snapDid, id, epoch)
   if (epoch !== cacheEpoch || snapUid !== uid.value || snapDid !== did.value) return []
   cacheDir(key, list)
-  if (epoch === cacheEpoch) persistDir(key, list, epoch)
+  if (epoch === cacheEpoch) persistDir(key, list, epoch).catch(() => {})
   updateTreeSnapshot(id, list, snapUid, snapDid)
   return list
 }
 
+let favoriteLoadSeq = 0
+const favoritesLoaded = ref(false)
 async function loadFavorites() {
+  const seq = ++favoriteLoadSeq
   if (!props.account) { favorites.value = []; favoriteError.value = ''; return }
   const snapUid = uid.value, snapDid = did.value
   try {
     const list = (await ListFavorites(snapUid, snapDid)) || []
-    if (snapUid === uid.value && snapDid === did.value) {
+    if (!viewDisposed && seq === favoriteLoadSeq && snapUid === uid.value && snapDid === did.value) {
       favorites.value = list
+      favoritesLoaded.value = true
       favoriteError.value = ''
     }
   } catch (e) {
-    if (snapUid === uid.value && snapDid === did.value) favoriteError.value = String(e && e.message ? e.message : e)
+    if (!viewDisposed && seq === favoriteLoadSeq && snapUid === uid.value && snapDid === did.value) favoriteError.value = String(e && e.message ? e.message : e)
   }
 }
 
@@ -516,9 +591,9 @@ function navigateHistory(direction) {
 }
 
 function refresh() {
-  if (mode.value === 'list') load(dirId.value)
-  else if (mode.value === 'favorite') loadFavorites()
-  else load(null)
+  if (mode.value === 'list') return load(dirId.value)
+  if (mode.value === 'favorite') return loadFavorites()
+  return load(null)
 }
 
 function showTrash() {
@@ -535,11 +610,13 @@ function showFavorites() {
   loadFavorites()
 }
 
-const favoriteFiles = computed(() =>
-  favorites.value.map((f) => ({
-    file_id: f.file_id, name: f.name, isDir: f.isDir, size: 0, time: f.added, category: '', starred: false,
-  }))
-)
+function favoriteFile(f) {
+  return {
+    size: 0, time: f.added, category: '', ...f.file,
+    drive_id: f.drive_id, file_id: f.file_id, name: f.name, isDir: f.isDir, starred: true,
+  }
+}
+const favoriteFiles = computed(() => favorites.value.map(favoriteFile))
 
 // 搜索：Enter/按钮触发；Esc 清空并返回目录
 function enterSearch() {
@@ -570,14 +647,15 @@ function persistLocation() {
   const a = props.account
   if (!a || mode.value !== 'list') return
   clearTimeout(locSaveTimer)
+  const location = {
+    dirId: dirId.value,
+    pathStack: [...pathStack.value],
+    treeSelected: treeSelected.value,
+    expanded: Object.keys(expanded.value).filter((key) => expanded.value[key]),
+  }
   locSaveTimer = setTimeout(() => {
     const all = { ...(getPrefs().panLocations || {}) }
-    all[a.user_id + props.locationKey] = {
-      dirId: dirId.value,
-      pathStack: pathStack.value,
-      treeSelected: treeSelected.value,
-      expanded: Object.keys(expanded.value).filter((k) => expanded.value[k]),
-    }
+    all[a.user_id + props.locationKey] = location
     // 最多保留最近 20 个账号的位置
     const keys = Object.keys(all)
     if (keys.length > 20) for (const k of keys.slice(0, keys.length - 20)) delete all[k]
@@ -592,13 +670,15 @@ async function toggleTree(idOrNode, name) {
   const id = typeof idOrNode === 'object' ? idOrNode.file_id : idOrNode
   expanded.value[id] = !expanded.value[id]
   const snapUid = uid.value, snapDid = did.value
+  const epoch = cacheEpoch
   if (expanded.value[id] && !tree.value[id] && props.account) {
     try {
       const list = await listDirectorySnapshot(id)
-      if (snapUid !== uid.value || snapDid !== did.value) return
+      if (epoch !== cacheEpoch || snapUid !== uid.value || snapDid !== did.value) return
       updateTreeSnapshot(id, list, snapUid, snapDid)
+      scheduleDirectoryPrefetch(list)
     } catch (e) {
-      if (snapUid === uid.value && snapDid === did.value) {
+      if (epoch === cacheEpoch && snapUid === uid.value && snapDid === did.value) {
         expanded.value[id] = false
         emit('toast', `目录树加载失败：${String(e && e.message ? e.message : e)}`, 'error')
       }
@@ -608,16 +688,17 @@ async function toggleTree(idOrNode, name) {
 
 // 幂等展开（加载子目录），用于根节点默认展开
 async function expandTree(id, name) {
-  if (expanded.value[id]) return
+  if (expanded.value[id] && tree.value[id]) return
   expanded.value[id] = true
   const snapUid = uid.value, snapDid = did.value
+  const epoch = cacheEpoch
   if (!tree.value[id] && props.account) {
     try {
       const list = await listDirectorySnapshot(id)
-      if (snapUid !== uid.value || snapDid !== did.value) return
+      if (epoch !== cacheEpoch || snapUid !== uid.value || snapDid !== did.value) return
       updateTreeSnapshot(id, list, snapUid, snapDid)
     } catch (e) {
-      if (snapUid === uid.value && snapDid === did.value) {
+      if (epoch === cacheEpoch && snapUid === uid.value && snapDid === did.value) {
         expanded.value[id] = false
         emit('toast', `目录树加载失败：${String(e && e.message ? e.message : e)}`, 'error')
       }
@@ -816,21 +897,31 @@ function targets(file) {
   return file && isSel(file) && selected.value.length > 1 ? selected.value : [file]
 }
 
-// ---------- 收藏（本地收藏 + 云端收藏同步） ----------
-function isFav(file) { return favorites.value.some((f) => f.file_id === file.file_id) }
+// ---------- 收藏（后端按网盘能力选择云端或本地） ----------
+function isFav(file) { return !!file && (favorites.value.some((f) => f.file_id === file.file_id) || ((!favoritesLoaded.value || favoriteError.value) && !!file.starred)) }
+function removingFavorites(file) { return targets(file).filter(Boolean).every(isFav) }
 
 async function toggleFav(file) {
-  const list = targets(file)
-  const removing = isFav(file)
-  await run(async () => {
-    if (removing) {
-      for (const f of list) await RemoveFavorite(uid.value, did.value, f.file_id)
-      if (caps.value.favorite) { try { await favorite(uid.value, did.value, false, list.map((f) => f.file_id)) } catch { /* 云端同步失败不阻塞 */ } }
-    } else {
-      for (const f of list) await AddFavorite(uid.value, did.value, { file_id: f.file_id, name: f.name, isDir: f.isDir, user_id: uid.value, drive_id: did.value, added: Math.floor(Date.now() / 1000) })
-      if (caps.value.favorite) { try { await favorite(uid.value, did.value, true, list.map((f) => f.file_id)) } catch { /* 同上 */ } }
+  const list = [...targets(file)].filter(Boolean)
+  if (running || !list.length) return
+  const snapUid = uid.value, snapDid = did.value
+  const removing = list.every(isFav)
+  let completed = 0
+  running = true
+  favoriteLoadSeq++
+  try {
+    for (const f of list) {
+      if (removing) await RemoveFavorite(snapUid, snapDid, f.file_id)
+      else await AddFavorite(snapUid, snapDid, { file_id: f.file_id, name: f.name, isDir: !!f.isDir, user_id: snapUid, drive_id: snapDid, file: f })
+      completed++
     }
-  }, removing ? '已移出收藏' : '已加入收藏')
+    emit('toast', removing ? '已移出收藏' : '已加入收藏', 'success')
+  } catch (e) {
+    emit('toast', `${completed ? `已完成 ${completed}/${list.length} 项，` : ''}${String(e)}`, 'error')
+  } finally {
+    if (!viewDisposed && snapUid === uid.value && snapDid === did.value) await loadFavorites()
+    running = false
+  }
 }
 
 // ---------- 右键菜单 ----------
@@ -854,7 +945,7 @@ function onCtx(e, file) {
   const list = [
     caps.value.download && { icon: 'download', label: '下载', action: 'download' },
     caps.value.createShare && { icon: 'share', label: '分享', action: 'share' },
-    { icon: 'star', label: isFav(file) ? '移出收藏' : '加入收藏', action: 'fav' },
+    { icon: 'star', label: removingFavorites(file) ? '移出收藏' : '加入收藏', action: 'fav' },
     { sep: true },
     caps.value.move && { icon: 'move', label: '移动到…', action: 'move' },
     caps.value.copy && { icon: 'copy', label: '复制到…', action: 'copy' },
@@ -1101,6 +1192,7 @@ function confirmDeleteSelected() {
 
 // ---------- 收藏打开 ----------
 function openFav(f) {
+  if (f.file) f = favoriteFile(f)
   if (f.isDir) {
     mode.value = 'list'
     pathStack.value = [{ id: f.file_id, name: f.name }]
@@ -1235,14 +1327,25 @@ function onKey(e) {
 
 watch(() => [props.account?.user_id || '', props.account?.drive_id || '', rootKey.value], ([nextUid, nextDid]) => {
   const a = props.account
-  if (!a) { files.value = []; return }
+  cancelDirectoryPrefetch()
+  cacheEpoch++
+  loadSeq++
+  files.value = []
+  selected.value = []
+  error.value = ''
+  clearTimeout(filterTimer)
+  filterRaw.value = ''
+  filter.value = ''
+  favorites.value = []
+  favoritesLoaded.value = false
+  favoriteLoadSeq++
+  favoriteError.value = ''
+  if (!a) { loading.value = false; return }
   tree.value = {}
   expanded.value = {}
   treeParents.value = {}
   treeNames.value = {}
   thumbErrors.value = {}
-  favorites.value = []
-  favoriteError.value = ''
   // 恢复该账号上次浏览位置；没有记录时回根目录
   const saved = (getPrefs().panLocations || {})[a.user_id + props.locationKey]
   if (saved && saved.dirId && saved.dirId !== rootKey.value) {
@@ -1256,14 +1359,14 @@ watch(() => [props.account?.user_id || '', props.account?.drive_id || '', rootKe
     for (const id of saved.expanded || []) expanded.value[id] = true
     expanded.value[rootKey.value] = true
     // 预载展开节点的子目录，让树直接呈现上次的展开形态
-    for (const id of Object.keys(expanded.value)) if (!tree.value[id]) expandTree(id)
+    for (const id of Object.keys(expanded.value).slice(0, TREE_PREFETCH_LIMIT)) if (!tree.value[id]) expandTree(id)
     load(saved.dirId)
   } else {
     goHome()
     expanded.value[rootKey.value] = true
   }
   loadFavorites()
-})
+}, { immediate: true })
 
 async function onDropUpload(paths) {
   if (!props.account || mode.value !== 'list' || !caps.value.upload) return
@@ -1282,8 +1385,43 @@ function openUploadModal() {
   uploadPickModal.value = true
 }
 
+function snapshot() {
+  return { account: props.account, dirId: dirId.value, path: crumbs.value, files: [...selected.value], mode: mode.value }
+}
+function startCloudDrag(event, file) {
+  if (!props.cloudDragEnabled || mode.value !== 'list' || !file.file_id) { event.preventDefault(); return }
+  if (!isSel(file)) selected.value = [file]
+  emit('cloud-drag-start', snapshot(), event)
+}
+function dropCloudFiles(event, file = null) {
+  if (!props.cloudDragActive) return
+  event.preventDefault()
+  event.stopPropagation()
+  emit('cloud-drop', file?.isDir ? file : null)
+}
+
+async function invalidateDirectories(user, drive, ids = []) {
+  const prefix = [providerOf(user), user, drive].map(cacheKeyPart).join('|') + '|'
+  for (const key of dirCache.keys()) if (key.startsWith(prefix)) dirCache.delete(key)
+  const active = user === uid.value && drive === did.value
+  if (active) {
+    cacheEpoch++
+    cancelDirectoryPrefetch()
+    tree.value = {}
+    treeParents.value = {}
+    treeNames.value = {}
+  }
+  const directories = new Set([...ids, ...(active ? [dirId.value] : [])])
+  await Promise.all([...directories].filter(Boolean).map(id => {
+    const key = dirCacheKey(user, drive, 'list', id, '')
+    return queueCacheWrite(key, () => DeleteDirectoryCache(key)).catch(() => {})
+  }))
+  if (active && user === uid.value && drive === did.value) return refresh()
+}
+
 defineExpose({
-  snapshot: () => ({ account: props.account, dirId: dirId.value, path: crumbs.value, files: [...selected.value], mode: mode.value }),
+  snapshot,
+  invalidateDirectories,
   navigate: async location => {
     mode.value = 'list'; selected.value = []; keyword.value = ''
     dirId.value = location.dirId || rootKey.value
@@ -1296,6 +1434,7 @@ defineExpose({
   openMkdirModal,
   openUploadModal,
   clearCache: () => {
+    cancelDirectoryPrefetch()
     cacheEpoch++
     loadSeq++
     dirCache.clear()
@@ -1321,15 +1460,24 @@ watch(listEl, (el) => {
 watch([listShown, viewMode], () => nextTick(() => updateVirtualMetrics()), { flush: 'post' })
 
 let pageActive = false
+let pageWasDeactivated = false
 let stopPreviewSaved
+let stopFavoritesChanged
 function activatePage() {
   if (pageActive) return
   pageActive = true
   window.addEventListener('keydown', onKey)
   window.addEventListener('mousemove', sideMove)
   window.addEventListener('mouseup', sideUp)
+  if (pageWasDeactivated && props.account) {
+    pageWasDeactivated = false
+    load(dirId.value)
+    loadFavorites()
+  }
 }
 function deactivatePage() {
+  cancelDirectoryPrefetch()
+  pageWasDeactivated = true
   pageActive = false
   window.removeEventListener('keydown', onKey)
   window.removeEventListener('mousemove', sideMove)
@@ -1342,18 +1490,21 @@ function deactivatePage() {
 onActivated(activatePage)
 onDeactivated(deactivatePage)
 onMounted(() => {
+  stopFavoritesChanged = onEvent('favorites:changed', (event) => {
+    if (!running && event?.user_id === uid.value && event?.drive_id === did.value) loadFavorites()
+  })
   stopPreviewSaved = onEvent('preview:saved', (user, drive) => {
     if (user === uid.value && drive === did.value) refresh()
   })
   activatePage()
-  if (props.account) {
-    expanded.value[rootKey.value] = true
-    load(rootKey.value)
-    loadFavorites()
-  }
 })
 onBeforeUnmount(() => {
+  viewDisposed = true
+  cacheEpoch++
+  cancelDirectoryPrefetch()
+  clearTimeout(locSaveTimer)
   stopPreviewSaved?.()
+  stopFavoritesChanged?.()
   deactivatePage()
   clearTimeout(filterTimer)
   clearTimeout(hoverTimer)
@@ -1384,13 +1535,13 @@ onBeforeUnmount(() => {
             <div
               v-for="f in favorites" :key="f.file_id"
               class="tree-node"
-              :title="f.name"
+              :title="`${f.name} · ${f.source === 'cloud' ? '云端收藏' : '本地收藏'}`"
               @click="openFav(f)"
             >
               <span class="tn-arrow"></span><UiIcon :name="f.isDir ? 'folder' : iconOf(f)" :size="14" :class="f.isDir ? '' : 'ft-' + iconOf(f)" /><span class="tn-label">{{ f.name }}</span>
             </div>
             <div v-if="favoriteError" class="tree-load-error" role="alert">
-              <span>收藏加载失败</span>
+              <span :title="favoriteError">收藏加载失败：{{ favoriteError }}</span>
               <button type="button" @click.stop="loadFavorites">重试</button>
             </div>
             <div v-else-if="!favorites.length" class="tree-empty">暂无收藏</div>
@@ -1430,7 +1581,7 @@ onBeforeUnmount(() => {
         <div class="pan-resizer" :class="{ resizing: isSideResizing }" @mousedown="sideDown"></div>
 
         <!-- 右侧文件区（支持桌面文件拖拽上传） -->
-        <DragDropZone class="pan-right" @drop-files="onDropUpload">
+        <DragDropZone class="pan-right" @drop-files="onDropUpload" @drop="dropCloudFiles($event)">
           <!-- 面包屑路径条（置顶、矮） -->
           <div class="pathbar">
             <template v-if="mode === 'list'">
@@ -1477,7 +1628,7 @@ onBeforeUnmount(() => {
             <div class="toppanbtn" v-if="selected.length">
               <button v-if="caps.download" class="tbtn" @click="doDownload()"><UiIcon name="download" :size="15" />下载</button>
               <button v-if="caps.createShare" class="tbtn" title="分享 (Ctrl+Shift+S)" @click="openShareModal"><UiIcon name="share" :size="15" />分享</button>
-              <button class="tbtn" @click="toggleFav(selected[0])"><UiIcon name="star" :size="15" />{{ isFav(selected[0]) && selected.length === 1 ? '移出收藏' : '收藏' }}</button>
+              <button class="tbtn" @click="toggleFav(selected[0])"><UiIcon name="star" :size="15" />{{ selected.every(isFav) ? '移出收藏' : '收藏' }}</button>
               <button v-if="caps.move" class="tbtn" @click="modalFile = [...selected]; modal = 'movedir'"><UiIcon name="move" :size="15" />移动</button>
               <button v-if="caps.copy" class="tbtn" @click="modalFile = [...selected]; modal = 'copydir'"><UiIcon name="copy" :size="15" />复制</button>
               <button v-if="caps.recycleBin && mode !== 'trash'" class="tbtn danger" title="删除 (Delete)" @click="run(() => trash(uid, did, selIds()), '已移入回收站')"><UiIcon name="trash" :size="15" />删除</button>
@@ -1535,12 +1686,16 @@ onBeforeUnmount(() => {
           <div v-else-if="error" class="empty"><span class="empty-icon"><UiIcon name="warning" :size="30" /></span><span>{{ error }}</span><button class="btn sm" @click="refresh">重试</button></div>
 
           <!-- 列表视图（旧版 fileitem 行） -->
-          <div v-else-if="viewMode === 'list'" ref="listEl" :key="currentViewKey()" class="file-list" @scroll.passive="onListScroll">
+          <div v-else-if="viewMode === 'list'" ref="listEl" :key="'list:' + currentViewKey()" class="file-list" @scroll.passive="onListScroll">
             <div v-if="listVirtualized" aria-hidden="true" :style="{ height: listVirtualTop + 'px' }"></div>
             <div
               v-for="r in listRenderRows"
               :key="r.f.file_id"
               class="fileitem"
+              :draggable="cloudDragEnabled && mode === 'list'"
+              @dragstart="startCloudDrag($event, r.f)"
+              @dragend="emit('cloud-drag-end')"
+              @drop="dropCloudFiles($event, r.f)"
               :class="{ selected: isSel(r.f), focus: focusId === r.f.file_id, 'anchor-node': rangIsSelecting && rangAnchor === r.f.file_id }"
               @click="toggleSel(r.f, $event)"
               @dblclick="onRowOpen(r.f)"
@@ -1563,7 +1718,7 @@ onBeforeUnmount(() => {
                   <template v-else>{{ r.f.name }}</template>
                 </div>
               </div>
-              <span v-if="r.f.starred" class="fstar-mark"><UiIcon name="star" :size="13" /></span>
+              <span v-if="isFav(r.f)" class="fstar-mark"><UiIcon name="star" :size="13" /></span>
               <div class="filesize">{{ r.sizeText }}</div>
               <div class="filetime">
                 <span class="filedate">{{ r.timeParts.date }}</span>
@@ -1578,12 +1733,16 @@ onBeforeUnmount(() => {
           </div>
 
           <!-- 网格视图（旧版 griditem） -->
-          <div v-else ref="listEl" :key="currentViewKey()" class="file-list gridlist" @scroll.passive="onListScroll">
+          <div v-else ref="listEl" :key="'grid:' + currentViewKey()" class="file-list gridlist" @scroll.passive="onListScroll">
             <div v-if="gridVirtualized" aria-hidden="true" :style="{ gridColumn: '1 / -1', height: gridVirtualTop + 'px' }"></div>
             <div
               v-for="r in gridRenderRows"
               :key="r.f.file_id"
               class="griditem"
+              :draggable="cloudDragEnabled && mode === 'list'"
+              @dragstart="startCloudDrag($event, r.f)"
+              @dragend="emit('cloud-drag-end')"
+              @drop="dropCloudFiles($event, r.f)"
               :class="{ selected: isSel(r.f), focus: focusId === r.f.file_id, 'anchor-node': rangIsSelecting && rangAnchor === r.f.file_id }"
               @click="toggleSel(r.f, $event)"
               @dblclick="onRowOpen(r.f)"
@@ -1594,7 +1753,7 @@ onBeforeUnmount(() => {
                   <UiIcon v-if="isSel(r.f)" name="check" :size="11" />
                 </button>
               </span>
-              <span v-if="r.f.starred" class="gstar"><UiIcon name="star" :size="12" /></span>
+              <span v-if="isFav(r.f)" class="gstar"><UiIcon name="star" :size="12" /></span>
               <div class="gridicon" :class="!r.thumb ? 'ft-' + r.icon : ''">
                 <img v-if="r.thumb" :src="r.thumb" loading="lazy" alt="" @error="markThumbError(r.f.file_id)" />
                 <UiIcon v-else :name="r.icon" :size="32" />

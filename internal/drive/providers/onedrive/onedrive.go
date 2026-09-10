@@ -23,6 +23,7 @@ func init() {
 		ID:   providerID,
 		Meta: drive.GetMeta(providerID),
 		Caps: drive.NewCapabilities(providerID, map[string]bool{
+			"favorite":            true,
 			"search":              true,
 			"createShare":         true,
 			"shareExpiration":     true,
@@ -54,6 +55,147 @@ func (d *Driver) ID() string                       { return providerID }
 func (d *Driver) Meta() drive.Meta                 { return drive.GetMeta(providerID) }
 func (d *Driver) Capabilities() drive.Capabilities { return drive.RegistryCaps(providerID) }
 func (d *Driver) RootID() string                   { return RootID }
+
+func (d *Driver) SupportsRemoteFavorites(ctx context.Context, c drive.Context) (bool, error) {
+	if c.Token != nil && c.Token.ProviderDriveType == "personal" {
+		return false, nil
+	}
+	cl, err := clientOf(c)
+	if err != nil {
+		return false, err
+	}
+	if c.Token.ProviderDriveType == "" {
+		var info struct {
+			DriveType string `json:"driveType"`
+		}
+		err := cl.getJSON(ctx, "/me/drive?$select=driveType", &info)
+		if isGraphAuthenticationFailure(err) {
+			cl, err = refreshedClientAfterGraphAuthFailure(ctx, c, err)
+			if err == nil {
+				err = cl.getJSON(ctx, "/me/drive?$select=driveType", &info)
+			}
+		}
+		if err != nil {
+			return false, err
+		}
+		switch info.DriveType {
+		case "personal", "business", "documentLibrary":
+			c.Token.ProviderDriveType = info.DriveType
+		default:
+			return false, errors.New("OneDrive 未返回有效账号类型，暂时无法确定收藏方式")
+		}
+	}
+	switch c.Token.ProviderDriveType {
+	case "personal":
+		return false, nil
+	case "business", "documentLibrary":
+		return true, nil
+	default:
+		return false, errors.New("OneDrive 账号类型无效，暂时无法确定收藏方式")
+	}
+}
+
+func (d *Driver) ListFavorites(ctx context.Context, c drive.Context) ([]model.File, error) {
+	cl, err := clientOf(c)
+	if err != nil {
+		return nil, err
+	}
+	var current struct {
+		ID string `json:"id"`
+	}
+	err = cl.getJSON(ctx, "/me/drive?$select=id", &current)
+	if isGraphAuthenticationFailure(err) {
+		cl, err = refreshedClientAfterGraphAuthFailure(ctx, c, err)
+		if err == nil {
+			err = cl.getJSON(ctx, "/me/drive?$select=id", &current)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if current.ID == "" {
+		return nil, errors.New("OneDrive 未返回当前空间 ID")
+	}
+	next := "/me/drive/following"
+	seen := map[string]bool{}
+	out := []model.File{}
+	refreshed := false
+	for next != "" {
+		if seen[next] {
+			return nil, errors.New("OneDrive 收藏列表分页游标重复")
+		}
+		seen[next] = true
+		var page childrenResp
+		err := cl.getJSON(ctx, next, &page)
+		if !refreshed && isGraphAuthenticationFailure(err) {
+			refreshed = true
+			cl, err = refreshedClientAfterGraphAuthFailure(ctx, c, err)
+			if err == nil {
+				err = cl.getJSON(ctx, next, &page)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		if page.Value == nil {
+			return nil, errors.New("OneDrive 收藏列表响应缺少 value")
+		}
+		for i := range page.Value {
+			item := &page.Value[i]
+			// The following feed also includes foreign shared drives, which this
+			// mount cannot address using /me/drive/items. Keep account scope exact.
+			if item.ParentReference == nil || item.ParentReference.DriveID == "" {
+				return nil, errors.New("OneDrive 收藏项缺少所属空间")
+			}
+			if item.ParentReference.DriveID != current.ID {
+				continue
+			}
+			f := mapItem(item, c.DriveID, item.ParentReference.ID)
+			f.Starred = true
+			out = append(out, f)
+		}
+		next = page.NextLink
+	}
+	return out, nil
+}
+
+func (d *Driver) Favorite(ctx context.Context, c drive.Context, ids []string, favorite bool) ([]string, error) {
+	cl, err := clientOf(c)
+	if err != nil {
+		return nil, err
+	}
+	command := "follow"
+	if !favorite {
+		command = "unfollow"
+	}
+	done := []string{}
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" {
+			return done, errors.New("OneDrive 收藏文件 ID 不能为空")
+		}
+		endpoint := "/me/drive/items/" + url.PathEscape(id) + "/" + command
+		var result Item
+		var out any
+		if favorite {
+			out = &result
+		}
+		err := cl.jsonDo(ctx, http.MethodPost, endpoint, nil, out)
+		if isGraphAuthenticationFailure(err) {
+			cl, err = refreshedClientAfterGraphAuthFailure(ctx, c, err)
+			if err == nil {
+				err = cl.jsonDo(ctx, http.MethodPost, endpoint, nil, out)
+			}
+		}
+		if err != nil {
+			return done, err
+		}
+		if favorite && result.ID != id {
+			return done, errors.New("OneDrive 未确认文件收藏结果")
+		}
+		done = append(done, id)
+	}
+	return done, nil
+}
 
 func clientOf(c drive.Context) (*client, error) {
 	if c.Token == nil || c.Token.AccessToken == "" {
@@ -539,13 +681,17 @@ func fetchOneDriveProfile(ctx context.Context, accessToken string, tok *model.To
 
 	// /me/drive — quota + drive id
 	var driveInfo struct {
-		ID    string `json:"id"`
-		Quota *struct {
+		ID        string `json:"id"`
+		DriveType string `json:"driveType"`
+		Quota     *struct {
 			Total int64 `json:"total"`
 			Used  int64 `json:"used"`
 		} `json:"quota"`
 	}
 	if err := cl.getJSON(ctx, "/me/drive", &driveInfo); err == nil {
+		if driveInfo.DriveType != "" {
+			tok.ProviderDriveType = driveInfo.DriveType
+		}
 		if driveInfo.ID != "" {
 			tok.DefaultDriveID = model.BuildDriveID(providerID, driveInfo.ID)
 		}

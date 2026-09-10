@@ -26,6 +26,10 @@ export function CancelSync(arg1) {
   return window['go']['app']['App']['CancelSync'](arg1);
 }
 
+export function CancelUpdate() {
+  return window['go']['app']['App']['CancelUpdate']();
+}
+
 export function CancelUpload(arg1) {
   return window['go']['app']['App']['CancelUpload'](arg1);
 }
@@ -122,6 +126,10 @@ export function GetDirectoryCache(arg1) {
   return window['go']['app']['App']['GetDirectoryCache'](arg1);
 }
 
+export function GetDownloadDirectory() {
+  return window['go']['app']['App']['GetDownloadDirectory']();
+}
+
 export function GetDownloadURL(arg1, arg2, arg3) {
   return window['go']['app']['App']['GetDownloadURL'](arg1, arg2, arg3);
 }
@@ -144,6 +152,10 @@ export function GetPlayCursor(arg1, arg2, arg3) {
 
 export function GetSettings() {
   return window['go']['app']['App']['GetSettings']();
+}
+
+export function GetUpdateStatus() {
+  return window['go']['app']['App']['GetUpdateStatus']();
 }
 
 export function GetVideoPreview(arg1, arg2, arg3) {
@@ -246,6 +258,10 @@ export function OpenBrowser(arg1) {
   return window['go']['app']['App']['OpenBrowser'](arg1);
 }
 
+export function OpenDownloadDirectory() {
+  return window['go']['app']['App']['OpenDownloadDirectory']();
+}
+
 export function OpenFile(arg1) {
   return window['go']['app']['App']['OpenFile'](arg1);
 }
@@ -336,6 +352,10 @@ export function RenameFile(arg1, arg2, arg3, arg4) {
 
 export function RenameMountedAccount(arg1, arg2) {
   return window['go']['app']['App']['RenameMountedAccount'](arg1, arg2);
+}
+
+export function RestoreFavorite(arg1) {
+  return window['go']['app']['App']['RestoreFavorite'](arg1);
 }
 
 export function RestoreFiles(arg1, arg2, arg3) {

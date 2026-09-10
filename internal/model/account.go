@@ -62,6 +62,7 @@ type TokenInfo struct {
 
 	ProviderAccountID string `json:"provider_account_id,omitempty"`
 	ProviderRootID    string `json:"provider_root_id,omitempty"`
+	ProviderDriveType string `json:"provider_drive_type,omitempty"`
 
 	UsedSize  int64 `json:"used_size,omitempty"`
 	TotalSize int64 `json:"total_size,omitempty"`

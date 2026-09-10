@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -102,44 +103,56 @@ func (d *Driver) listPage(ctx context.Context, c drive.Context, dirID string, pa
 			FolderList []json.RawMessage `json:"folderList"`
 		} `json:"fileListAO"`
 	}
-	_ = json.Unmarshal(raw, &res)
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, true, fmt.Errorf("pan189: 目录响应解析失败: %w", err)
+	}
 	items := make([]model.File, 0)
 	if res.FileListAO == nil {
 		return items, true, nil
 	}
 	for _, rf := range res.FileListAO.FolderList {
 		var f struct {
-			ID         string `json:"id"`
-			Name       string `json:"name"`
-			LastOpTime string `json:"lastOpTime"`
-			CreateDate string `json:"createDate"`
-			ParentID   string `json:"parentId"`
+			ID         listEntryID `json:"id"`
+			Name       string      `json:"name"`
+			LastOpTime string      `json:"lastOpTime"`
+			CreateDate string      `json:"createDate"`
 		}
-		_ = json.Unmarshal(rf, &f)
+		if err := json.Unmarshal(rf, &f); err != nil {
+			return nil, true, fmt.Errorf("pan189: 文件夹解析失败: %w", err)
+		}
 		items = append(items, mapFile(pan189File{
-			ID: f.ID, Name: f.Name, LastOpTime: f.LastOpTime, CreateDate: f.CreateDate,
-			ParentID: f.ParentID, IsFolder: true,
+			ID: string(f.ID), Name: f.Name, LastOpTime: f.LastOpTime, CreateDate: f.CreateDate,
+			IsFolder: true,
 		}, c.DriveID, parent))
 	}
 	for _, rf := range res.FileListAO.FileList {
 		var f struct {
-			ID         string `json:"id"`
-			Name       string `json:"name"`
-			Size       int64  `json:"size"`
-			MD5        string `json:"md5"`
-			LastOpTime string `json:"lastOpTime"`
-			CreateDate string `json:"createDate"`
+			ID         listEntryID `json:"id"`
+			Name       string      `json:"name"`
+			Size       int64       `json:"size"`
+			MD5        string      `json:"md5"`
+			LastOpTime string      `json:"lastOpTime"`
+			CreateDate string      `json:"createDate"`
 			Icon       struct {
 				SmallURL string `json:"smallUrl"`
 				LargeURL string `json:"largeUrl"`
 			} `json:"icon"`
 		}
-		_ = json.Unmarshal(rf, &f)
+		if err := json.Unmarshal(rf, &f); err != nil {
+			return nil, true, fmt.Errorf("pan189: 文件解析失败: %w", err)
+		}
 		items = append(items, mapFile(pan189File{
-			ID: f.ID, Name: f.Name, Size: f.Size, MD5: f.MD5,
+			ID: string(f.ID), Name: f.Name, Size: f.Size, MD5: f.MD5,
 			LastOpTime: f.LastOpTime, CreateDate: f.CreateDate,
 			SmallURL: f.Icon.SmallURL, LargeURL: f.Icon.LargeURL,
 		}, c.DriveID, parent))
+	}
+	seen := make(map[string]bool, len(items))
+	for _, item := range items {
+		if item.FileID == "" || seen[item.FileID] {
+			return nil, true, errors.New("pan189: 目录响应包含空白或重复的文件 ID")
+		}
+		seen[item.FileID] = true
 	}
 	done := len(res.FileListAO.FolderList) == 0 && len(res.FileListAO.FileList) == 0
 	return items, done, nil

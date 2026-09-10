@@ -20,6 +20,7 @@ import (
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
+	"mnemo-go/internal/netx"
 )
 
 // calcPartSize mirrors legacy calcPartSize.
@@ -230,7 +231,7 @@ func directPut(ctx context.Context, ui *model.UploadingUI, f *os.File, uploadURL
 		ResponseHeaderTimeout: 60 * time.Second,
 		TLSHandshakeTimeout:   30 * time.Second,
 	}}
-	resp, err := hc.Do(req)
+	resp, err := netx.DoUpload(hc, req)
 	if err != nil {
 		return err
 	}
@@ -322,7 +323,7 @@ func ossMultipart(ctx context.Context, ui *model.UploadingUI, f *os.File, endpoi
 				UploadId:   uploadID,
 				PartNumber: aws.Int32(int32(idx + 1)),
 				Body:       body,
-			})
+			}, func(o *s3.Options) { o.HTTPClient = netx.UploadHTTPClient{Client: o.HTTPClient} })
 			if err != nil {
 				fail(err)
 				return

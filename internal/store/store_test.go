@@ -75,6 +75,43 @@ func TestOpenAndSettings(t *testing.T) {
 	}
 }
 
+func TestFavoriteCloudSnapshotsPreserveLocalRecordsAndAddedTime(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []Favorite{
+		{UserID: "u", DriveID: "d", FileID: "local", Added: 10},
+		{UserID: "u", DriveID: "d", FileID: "both", Added: 20},
+		{UserID: "other", DriveID: "d", FileID: "cloud", Source: "cloud", Added: 30},
+		{UserID: "u", DriveID: "other", FileID: "cloud", Source: "cloud", Added: 40},
+	} {
+		if err := st.AddFavorite(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remote := []Favorite{{FileID: "both", Name: "renamed"}, {FileID: "cloud", Name: "fresh"}}
+	if err := st.ReplaceRemoteFavorites("u", "d", remote); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.ListFavorites("u", "d")
+	if len(got) != 3 {
+		t.Fatalf("merged favorites = %+v", got)
+	}
+	for _, f := range got {
+		if f.Added == 0 || f.FileID == "both" && f.Added != 20 {
+			t.Fatalf("lost favorite timestamp: %+v", f)
+		}
+	}
+	if err := st.ReplaceRemoteFavorites("u", "d", nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.ListFavorites("", "")
+	if len(got) != 3 {
+		t.Fatalf("snapshot erased local/other account records: %+v", got)
+	}
+}
+
 func TestAtomicJSONWriteCleansTempAfterRenameFailure(t *testing.T) {
 	dir := t.TempDir()
 	st, err := Open(dir)

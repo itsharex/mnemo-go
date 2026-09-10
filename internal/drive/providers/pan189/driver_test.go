@@ -2,6 +2,7 @@ package pan189
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
@@ -119,6 +120,94 @@ func TestExpireTimeFromURL(t *testing.T) {
 
 func TestDriverImplementsInterface(t *testing.T) {
 	var _ drive.Driver = (*Driver)(nil)
+}
+
+func TestListPagePreservesDistinctIDs(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	for _, cloud := range []string{CloudPersonal, CloudFamily} {
+		t.Run(cloud, func(t *testing.T) {
+			netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return pan189AuthResponse(req, http.StatusOK, nil, `{"fileListAO":{"folderList":[{"id":9007199254740992,"name":"A","parentId":-11},{"id":9007199254740993,"name":"B","parentId":-11},{"id":"folder-c","name":"C"}],"fileList":[{"id":9007199254740994,"name":"a.txt","size":12},{"id":"file-b","name":"b.txt"}]}}`), nil
+			})
+			sess := &Session{SessionKey: "key", SessionSecret: "secret", CloudType: cloud, FamilyID: "family", FamilySessionKey: "family-key", FamilySessionSecret: "family-secret"}
+			items, done, err := (&Driver{}).listPage(t.Context(), drive.Context{DriveID: "pan189:test", Token: &model.TokenInfo{AccessToken: sess.SessionKey, RefreshToken: mustJSON(sess)}}, PAN189Root, 1)
+			if err != nil || done || len(items) != 5 {
+				t.Fatalf("listPage = %+v, %v, %v", items, done, err)
+			}
+			for i, want := range []string{"9007199254740992", "9007199254740993", "folder-c", "9007199254740994", "file-b"} {
+				if items[i].FileID != want || items[i].ParentFileID != PAN189Root || items[i].IsDir != (i < 3) {
+					t.Errorf("item[%d] = %+v, want ID %q", i, items[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestBatchActionsPreserveFolderIdentity(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	c := drive.Context{UserID: "pan189:batch-test", DriveID: "batch-drive", Token: &model.TokenInfo{AccessToken: "skey", RefreshToken: mustJSON(sessionForTest())}}
+	drive.RememberFile(c.UserID, c.DriveID, model.File{FileID: "folder", Name: "资料", IsDir: true})
+	t.Cleanup(func() { drive.ClearFileMetaCache() })
+	for _, action := range []string{"MOVE", "COPY", "DELETE"} {
+		t.Run(action, func(t *testing.T) {
+			checked := false
+			netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if err := req.ParseForm(); err != nil {
+					return nil, err
+				}
+				if req.URL.Path == "/batch/createBatchTask.action" {
+					var items []fileRefItem
+					if err := json.Unmarshal([]byte(req.Form.Get("taskInfos")), &items); err != nil {
+						return nil, err
+					}
+					if len(items) != 1 || items[0].IsFolder != 1 || items[0].FileName != "资料" || req.Form.Get("type") != action {
+						t.Errorf("batch payload = %+v, type = %q", items, req.Form.Get("type"))
+					}
+					return pan189AuthResponse(req, http.StatusOK, nil, `{"taskId":9007199254740993}`), nil
+				}
+				if req.URL.Path == "/batch/checkBatchTask.action" && req.Form.Get("taskId") == "9007199254740993" {
+					checked = true
+					return pan189AuthResponse(req, http.StatusOK, nil, `{"taskStatus":4}`), nil
+				}
+				return nil, fmt.Errorf("unexpected batch request %s", req.URL.Path)
+			})
+			d := &Driver{}
+			var err error
+			switch action {
+			case "MOVE":
+				_, err = d.Move(t.Context(), c, []drive.FileRef{{ID: "folder"}}, "target", "")
+			case "COPY":
+				_, err = d.Copy(t.Context(), c, []drive.FileRef{{ID: "folder"}}, "target", "")
+			case "DELETE":
+				_, err = d.Trash(t.Context(), c, []string{"folder"})
+			}
+			if err != nil || !checked {
+				t.Fatalf("batch error = %v, completion checked = %v", err, checked)
+			}
+		})
+	}
+}
+
+func TestListPageRejectsInvalidIdentity(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	for _, entries := range []string{
+		`[{"name":"missing"}]`, `[{"id":null}]`, `[{"id":""}]`, `[{"id":" "}]`,
+		`[{"id":{}}]`, `[{"id":true}]`, `[{"id":1.5}]`, `[{"id":1e3}]`,
+		`[{"id":123},{"id":"123"}]`,
+	} {
+		t.Run(entries, func(t *testing.T) {
+			netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return pan189AuthResponse(req, http.StatusOK, nil, `{"fileListAO":{"folderList":`+entries+`}}`), nil
+			})
+			items, _, err := (&Driver{}).listPage(t.Context(), drive.Context{Token: &model.TokenInfo{AccessToken: "skey", RefreshToken: mustJSON(sessionForTest())}}, PAN189Root, 1)
+			if err == nil || len(items) != 0 {
+				t.Fatalf("invalid entries returned items=%+v error=%v", items, err)
+			}
+		})
+	}
 }
 
 func TestGetInfoPseudoEntries(t *testing.T) {

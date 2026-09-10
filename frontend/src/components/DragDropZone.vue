@@ -30,7 +30,7 @@ function onDragLeave(e) {
 
 function onDragOver(e) {
   e.preventDefault()
-  if (e.dataTransfer) {
+  if (e.dataTransfer?.types?.includes('Files')) {
     e.dataTransfer.dropEffect = 'copy'
   }
 }

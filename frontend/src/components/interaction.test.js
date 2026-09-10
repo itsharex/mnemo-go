@@ -22,6 +22,10 @@ const api = vi.hoisted(() => ({
   GetDirectoryCache: vi.fn().mockResolvedValue(null),
   SaveDirectoryCache: vi.fn().mockResolvedValue(undefined),
   ListFavorites: vi.fn().mockResolvedValue([]),
+  AddFavorite: vi.fn().mockResolvedValue(undefined),
+  RemoveFavorite: vi.fn().mockResolvedValue(undefined),
+  RestoreFavorite: vi.fn().mockResolvedValue(undefined),
+  favorite: vi.fn().mockResolvedValue([]),
   onFileDrop: vi.fn(() => () => {}),
   formatTimeParts: vi.fn(() => ({ date: '', clock: '' })),
   CheckUpdate: vi.fn(),
@@ -121,9 +125,93 @@ Object.defineProperty(globalThis, 'localStorage', {
 
 const wrappers = []
 beforeEach(() => {
+  api.ListFavorites.mockReset().mockResolvedValue([])
+  api.AddFavorite.mockReset().mockResolvedValue(undefined)
+  api.RemoveFavorite.mockReset().mockResolvedValue(undefined)
   api.openKindOf.mockImplementation(file => file.name.endsWith('.wav') ? 'audio' : 'image')
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
   vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
+})
+
+describe('网盘收藏', () => {
+  const account = { user_id: 'pikpak_favorites', drive_id: 'drive' }
+  const file = { file_id: 'file', name: 'photo.jpg', isDir: false, size: 42, parent_file_id: 'parent', category: 'image' }
+  async function prepare() {
+    api.capsOf.mockReturnValue({ favorite: true })
+    api.listDir.mockResolvedValue([file])
+    const wrapper = mountAttached(PanView, { props: { account } })
+    await flushPromises()
+    await wrapper.get('.fileitem').trigger('contextmenu', { clientX: 10, clientY: 10 })
+    await nextTick()
+    return wrapper
+  }
+  it('添加收藏只调用统一入口，并保存完整文件信息', async () => {
+    const wrapper = await prepare()
+    Array.from(document.querySelectorAll('[role="menuitem"]')).find(item => item.textContent.includes('加入收藏')).click()
+    await flushPromises()
+    expect(api.AddFavorite).toHaveBeenCalledExactlyOnceWith(account.user_id, account.drive_id, expect.objectContaining({ file_id: file.file_id, file: expect.objectContaining({ size: 42, parent_file_id: 'parent' }) }))
+    expect(api.favorite).not.toHaveBeenCalled()
+  })
+  it('收藏失败显示错误并重新获取已经部分成功的列表', async () => {
+    api.AddFavorite.mockRejectedValue(new Error('云端收藏失败'))
+    const wrapper = await prepare()
+    const before = api.ListFavorites.mock.calls.length
+    Array.from(document.querySelectorAll('[role="menuitem"]')).find(item => item.textContent.includes('加入收藏')).click()
+    await flushPromises()
+    expect(wrapper.emitted('toast')).toContainEqual([expect.stringContaining('云端收藏失败'), 'error'])
+    expect(wrapper.emitted('toast').some(event => event[1] === 'success')).toBe(false)
+    expect(api.ListFavorites.mock.calls.length).toBeGreaterThan(before)
+  })
+  it('收藏列表保留大小和预览信息', async () => {
+    api.ListFavorites.mockResolvedValue([{ ...file, file, source: 'cloud', added: 10 }])
+    const wrapper = await prepare()
+    await wrapper.findAll('.tree-node').find(node => node.text().startsWith('收藏')).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.fileitem').text()).toContain('42 B')
+  })
+  it('取消收藏只调用统一入口', async () => {
+    api.ListFavorites.mockResolvedValue([{ ...file, file, source: 'cloud' }])
+    const wrapper = await prepare()
+    Array.from(document.querySelectorAll('[role="menuitem"]')).find(item => item.textContent.includes('移出收藏')).click()
+    await flushPromises()
+    expect(api.RemoveFavorite).toHaveBeenCalledExactlyOnceWith(account.user_id, account.drive_id, 'file')
+    expect(api.favorite).not.toHaveBeenCalled()
+    expect(wrapper.emitted('toast')).toContainEqual(['已移出收藏', 'success'])
+  })
+  it('快速刷新不会让较早返回的旧收藏覆盖新收藏', async () => {
+    let first, second
+    api.ListFavorites.mockImplementationOnce(() => new Promise(resolve => { first = resolve }))
+      .mockImplementationOnce(() => new Promise(resolve => { second = resolve }))
+    const wrapper = await prepare()
+    await wrapper.findAll('.tree-node').find(node => node.text().startsWith('收藏')).trigger('click')
+    second([{ file_id: 'new', name: '新收藏.jpg', isDir: false, source: 'cloud' }])
+    await flushPromises()
+    first([{ file_id: 'old', name: '旧收藏.jpg', isDir: false, source: 'cloud' }])
+    await flushPromises()
+    expect(wrapper.text()).toContain('新收藏.jpg')
+    expect(wrapper.text()).not.toContain('旧收藏.jpg')
+  })
+  it('批量收藏期间切换账号仍只操作原账号，部分失败显示进度', async () => {
+    let finishFirst
+    api.AddFavorite.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve }))
+      .mockRejectedValueOnce(new Error('第二项失败'))
+    api.capsOf.mockReturnValue({})
+    api.listDir.mockResolvedValue([file, { ...file, file_id: 'second', name: 'second.jpg' }])
+    const wrapper = mountAttached(PanView, { props: { account } })
+    await flushPromises()
+    const rows = wrapper.findAll('.fileitem')
+    await rows[0].trigger('click')
+    await rows[1].trigger('click', { ctrlKey: true })
+    await rows[0].trigger('contextmenu', { clientX: 10, clientY: 10 })
+    Array.from(document.querySelectorAll('[role="menuitem"]')).find(item => item.textContent.includes('加入收藏')).click()
+    await flushPromises()
+    await wrapper.setProps({ account: { user_id: 'webdav:other', drive_id: 'other' } })
+    finishFirst()
+    await flushPromises()
+    expect(api.AddFavorite).toHaveBeenCalledTimes(2)
+    expect(api.AddFavorite.mock.calls.every(([user, drive]) => user === account.user_id && drive === account.drive_id)).toBe(true)
+    expect(wrapper.emitted('toast')).toContainEqual([expect.stringContaining('已完成 1/2 项'), 'error'])
+  })
 })
 
 function mountAttached(component, options = {}) {

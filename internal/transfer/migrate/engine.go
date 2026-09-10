@@ -424,37 +424,46 @@ func (e *Engine) tryStreamMigrate(ctx context.Context, job *Job, srcFile *model.
 		return true, fmt.Errorf("stream: resolve download url: %w", err)
 	}
 
+	return true, streamMigration(ctx, dl, job, func(reader io.Reader) error {
+		return streamUploader(ctx, targetParent, srcFile.Name, srcFile.Size, reader)
+	})
+}
+
+func streamMigration(ctx context.Context, dl *model.DownloadURL, job *Job, upload func(io.Reader) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	// set up the io.Pipe: the download goroutine writes to pw, the upload
 	// reads from pr.
 	pr, pw := io.Pipe()
+	defer pr.Close()
 
 	// goroutine: stream the download into the pipe writer.
 	downloadErrCh := make(chan error, 1)
 	go func() {
-		defer pw.Close()
-		downloadErrCh <- downloadToCounted(ctx, dl, pw, job)
+		err := downloadToCounted(ctx, dl, pw, job)
+		_ = pw.CloseWithError(err)
+		downloadErrCh <- err
 	}()
 
 	// upload from the pipe reader on the target.
-	uploadErr := streamUploader(ctx, targetParent, srcFile.Name, srcFile.Size, pr)
+	uploadErr := upload(pr)
 
-	// if the upload failed, we must ensure the download goroutine finishes
-	// (it may still be blocked writing to pw). Cancel the pipe reader side.
-	if uploadErr != nil {
-		_ = pr.CloseWithError(uploadErr)
-	}
+	// An uploader may return before reading the body, even without an error.
+	// Release blocked pipe writes and cancel any outstanding source request.
+	_ = pr.CloseWithError(uploadErr)
+	cancel()
 
 	// wait for the download goroutine to complete.
 	downloadErr := <-downloadErrCh
 
 	if uploadErr != nil {
-		return true, fmt.Errorf("stream: upload: %w", uploadErr)
+		return fmt.Errorf("stream: upload: %w", uploadErr)
 	}
 	if downloadErr != nil {
-		return true, fmt.Errorf("stream: download: %w", downloadErr)
+		return fmt.Errorf("stream: download: %w", downloadErr)
 	}
 
-	return true, nil
+	return nil
 }
 
 // spoolMigrate downloads the source to a temp file then uploads it to the

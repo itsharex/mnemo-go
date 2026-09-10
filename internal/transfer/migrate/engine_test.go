@@ -2,10 +2,82 @@ package migrate
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"mnemo-go/internal/model"
 )
+
+func TestStreamMigrationStopsWhenUploaderReturnsEarly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, strings.Repeat("x", 65536))
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readerCh := make(chan io.Reader, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- streamMigration(ctx, &model.DownloadURL{URL: server.URL}, &Job{}, func(r io.Reader) error {
+			readerCh <- r
+			return nil
+		})
+	}()
+	reader := <-readerCh
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("an unread download must not be reported as complete")
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		_ = reader.(io.Closer).Close()
+		<-done
+		t.Fatal("migration blocked after uploader returned without consuming the stream")
+	}
+}
+
+func TestStreamMigrationPropagatesDownloadFailureToUploader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		_, _ = io.WriteString(w, "short")
+	}))
+	defer server.Close()
+	var readErr error
+	err := streamMigration(context.Background(), &model.DownloadURL{URL: server.URL}, &Job{}, func(r io.Reader) error {
+		_, readErr = io.ReadAll(r)
+		return readErr
+	})
+	if err == nil || !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated source must fail the upload: migration=%v upload=%v", err, readErr)
+	}
+}
+
+func TestStreamMigrationTransfersCompleteBody(t *testing.T) {
+	payload := strings.Repeat("migration-content", 8192)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, payload)
+	}))
+	defer server.Close()
+	job := &Job{}
+	var body []byte
+	err := streamMigration(context.Background(), &model.DownloadURL{URL: server.URL}, job, func(r io.Reader) error {
+		var err error
+		body, err = io.ReadAll(r)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != payload || job.ProcessedBytes != int64(len(payload)) {
+		t.Fatalf("incorrect transfer: received=%d processed=%d want=%d", len(body), job.ProcessedBytes, len(payload))
+	}
+}
 
 func TestCommonHashMethod(t *testing.T) {
 	cases := []struct {

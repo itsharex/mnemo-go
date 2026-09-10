@@ -20,7 +20,59 @@ import (
 	"mnemo-go/internal/netx"
 )
 
+func TestPan139RefreshResolvesAndCachesQuotaDomain(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	queries, quotas := 0, 0
+	fail := false
+	netx.TestTransportHook = pan139RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "user-njs.yun.139.com" || req.Header.Get("Authorization") == "" || req.Header.Get("mcloud-sign") == "" {
+			t.Fatalf("missing signed user API request: %s", req.URL)
+		}
+		switch req.URL.Path {
+		case "/user/status/query":
+			queries++
+			return pan139Response(req, 200, nil, `{"success":true,"data":{"userDomainId":9007199254740993}}`), nil
+		case "/user/disk/quota/detail":
+			quotas++
+			var body map[string]string
+			_ = json.NewDecoder(req.Body).Decode(&body)
+			if body["userDomainId"] != "9007199254740993" {
+				t.Fatal("domain ID lost precision")
+			}
+			if fail {
+				return pan139Response(req, 503, nil, `{}`), nil
+			}
+			return pan139Response(req, 200, nil, `{"success":true,"data":{"diskSize":"1024","freeDiskSize":"768"}}`), nil
+		default:
+			t.Fatalf("unexpected endpoint: %s", req.URL)
+			return nil, nil
+		}
+	})
+	auth := encodeAuthorization("pc", "test-account", fmt.Sprintf("a|b|c|%d", time.Now().Add(30*24*time.Hour).UnixMilli()))
+	token := &model.TokenInfo{AccessToken: auth, RefreshToken: mustJSON(map[string]string{"personalCloudHost": "https://personal.example", "keep": "metadata"})}
+	d := &Driver{}
+	for i := 0; i < 2; i++ {
+		if _, err := d.RefreshAccount(t.Context(), drive.Context{}, token); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if queries != 1 || quotas != 2 || token.TotalSize != 1024<<20 || token.UsedSize != 256<<20 || !strings.Contains(token.RefreshToken, "metadata") {
+		t.Fatal("quota or metadata not retained")
+	}
+	fail = true
+	if _, err := d.RefreshAccount(t.Context(), drive.Context{}, token); err == nil || token.TotalSize != 1024<<20 {
+		t.Fatal("quota failure should preserve snapshot and report error")
+	}
+}
+
 func TestParsePan139QuotaSupportsResponseVariants(t *testing.T) {
+	for _, raw := range []string{`{"diskSize":"1024","freeDiskSize":"768"}`, `{"diskInfo":{"diskSize":1024,"freeDiskSize":768}}`} {
+		used, total, ok := parsePan139Quota([]byte(raw))
+		if !ok || used != 256<<20 || total != 1024<<20 {
+			t.Fatalf("MB quota = %d/%d ok=%v", used, total, ok)
+		}
+	}
 	used, total, ok := parsePan139Quota([]byte(`{"usedSize":"12","totalSize":100}`))
 	if !ok || used != 12 || total != 100 {
 		t.Fatalf("string quota = %d/%d ok=%v, want 12/100 true", used, total, ok)
@@ -50,6 +102,70 @@ func TestPan139S305ExplainsAccountPasswordRequirement(t *testing.T) {
 	_, _, err := submitPan139Login(context.Background(), &pan139LoginState{Client: hc, Username: "test", Password: "test"}, false, "")
 	if err == nil || !strings.Contains(err.Error(), "移动认证账号密码") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestPan139LoginReadsBodyRedirect(t *testing.T) {
+	for _, body := range []string{
+		`<script>window.location.href="https://mail.10086.cn/main?sid=body-session&amp;x=1";</script>`,
+		`{"code":"S_OK","var":{"loginSuccessUrl":"https://mail.10086.cn/main?sid=body-session"}}`,
+	} {
+		state, _ := newPan139LoginState("13800138000", "", "")
+		state.Client.HTTP.Transport = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return pan139Response(r, 200, nil, body), nil
+		})
+		_, sid, err := submitPan139Login(context.Background(), state, true, "123456")
+		if err != nil || sid != "body-session" {
+			t.Fatalf("body redirect lost: sid=%q err=%v", sid, err)
+		}
+	}
+}
+
+func TestPan139UnknownExpirationRefreshesWithServer(t *testing.T) {
+	expires := time.Now().Add(30 * 24 * time.Hour).UnixMilli()
+	auth := encodeAuthorization("pc", "13800138000", "token|a|b|opaque")
+	nextToken := fmt.Sprintf("new-token|a|b|%d", expires)
+	calls := 0
+	hc := netx.NewClient(time.Second)
+	hc.HTTP.Transport = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return pan139Response(r, 200, nil, "<root><return>0</return><token>"+nextToken+"</token></root>"), nil
+	})
+	next, err := refreshAuthorization(hc, auth)
+	if err != nil || next != encodeAuthorization("pc", "13800138000", nextToken) || calls != 1 {
+		t.Fatalf("server refresh failed: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestPan139UnknownExpirationDoesNotAcceptInvalidRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{
+		{503, "<root><return>0</return><token>new|a|b|4102444800000</token></root>"},
+		{200, "<root><return>0</return><token>new|a|b|opaque</token></root>"},
+		{200, "<root><return>1</return><desc>invalid token</desc></root>"},
+	} {
+		calls := 0
+		hc := netx.NewClient(time.Second)
+		hc.HTTP.Transport = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			return pan139Response(r, tc.status, nil, tc.body), nil
+		})
+		_, err := refreshAuthorization(hc, encodeAuthorization("pc", "13800138000", "token|a|b|opaque"))
+		if err == nil || calls != 1 {
+			t.Fatalf("invalid refresh accepted or retried: status=%d calls=%d err=%v", tc.status, calls, err)
+		}
+	}
+}
+
+func TestPan139HTTPFailureCannotBecomeSuccessfulLogin(t *testing.T) {
+	state, _ := newPan139LoginState("13800138000", "", "")
+	state.Client.HTTP.Transport = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return pan139Response(r, 400, http.Header{"Location": {"https://mail.10086.cn/main?sid=invalid"}}, ""), nil
+	})
+	if _, _, err := submitPan139Login(context.Background(), state, true, "123456"); err == nil {
+		t.Fatal("HTTP failure accepted as login success")
 	}
 }
 

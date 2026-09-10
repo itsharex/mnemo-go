@@ -18,6 +18,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"net/http"
@@ -268,6 +269,8 @@ func normalizeAuthorization(authorization string) string {
 	return authorization
 }
 
+var errPan139Expiration = errors.New("pan139: authorization expiration 无效")
+
 // decodeAuthorization parses Basic base64(user:account:token|...|expiration).
 func decodeAuthorization(authorization string) (raw, account, tokenPart, splits0 string, expiration int64, err error) {
 	authorization = normalizeAuthorization(authorization)
@@ -281,6 +284,9 @@ func decodeAuthorization(authorization string) (raw, account, tokenPart, splits0
 	}
 	account = splits[1]
 	tokenPart = strings.Join(splits[2:], ":")
+	if splits[0] == "" || account == "" || tokenPart == "" {
+		return "", "", "", "", 0, errors.New("pan139: authorization 无效")
+	}
 	strs := strings.Split(tokenPart, "|")
 	if len(strs) < 4 {
 		return "", "", "", "", 0, errors.New("pan139: authorization token 无效")
@@ -289,7 +295,7 @@ func decodeAuthorization(authorization string) (raw, account, tokenPart, splits0
 	// The expiration stays at index 3 (the provider's reference client contract).
 	expiration, err = strconv.ParseInt(strs[3], 10, 64)
 	if err != nil || expiration <= 0 {
-		return "", "", "", "", 0, errors.New("pan139: authorization expiration 无效")
+		return authorization, account, tokenPart, splits[0], 0, errPan139Expiration
 	}
 	return authorization, account, tokenPart, splits[0], expiration, nil
 }
@@ -301,23 +307,34 @@ func encodeAuthorization(splits0, account, token string) string {
 // refreshAuthorization refreshes a near-expiry token.
 func refreshAuthorization(hc *netx.Client, authorization string) (string, error) {
 	_, account, tokenPart, splits0, expiration, err := decodeAuthorization(authorization)
-	if err != nil {
+	if err != nil && !errors.Is(err, errPan139Expiration) {
 		return "", err
 	}
 	remain := expiration - time.Now().UnixMilli()
 	if remain > 15*24*60*60*1000 {
-		return authorization, nil
+		return normalizeAuthorization(authorization), nil
 	}
-	if remain < 0 {
+	if expiration > 0 && remain < 0 {
 		return "", errors.New("authorization 已过期，请重新登录")
 	}
-	reqBody := fmt.Sprintf("<root><token>%s</token><account>%s</account><clienttype>656</clienttype></root>", tokenPart, account)
+	// Unknown expiry metadata is not proof of an invalid credential. Let the
+	// refresh endpoint validate it once, without inventing a local expiry.
+	var escapedToken, escapedAccount strings.Builder
+	_ = xml.EscapeText(&escapedToken, []byte(tokenPart))
+	_ = xml.EscapeText(&escapedAccount, []byte(account))
+	reqBody := fmt.Sprintf("<root><token>%s</token><account>%s</account><clienttype>656</clienttype></root>", escapedToken.String(), escapedAccount.String())
 	resp, err := hc.Do(context.Background(), http.MethodPost, refreshURL, map[string]string{"Content-Type": "application/xml", "User-Agent": ua}, strings.NewReader(reqBody))
 	if err != nil {
 		return "", err
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("读取 139 token 刷新响应失败：%w", readErr)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("刷新 139 token 失败：HTTP %d", resp.StatusCode)
+	}
 	ret := regexp.MustCompile(`<return>([^<]*)</return>`).FindStringSubmatch(string(body))
 	tok := regexp.MustCompile(`<token>([^<]*)</token>`).FindStringSubmatch(string(body))
 	if len(ret) < 2 || ret[1] != "0" || len(tok) < 2 || tok[1] == "" {
@@ -328,7 +345,11 @@ func refreshAuthorization(hc *netx.Client, authorization string) (string, error)
 		}
 		return "", errors.New(msg)
 	}
-	return encodeAuthorization(splits0, account, tok[1]), nil
+	next := encodeAuthorization(splits0, account, html.UnescapeString(tok[1]))
+	if _, _, _, _, _, err := decodeAuthorization(next); err != nil {
+		return "", fmt.Errorf("139 刷新后的授权格式仍无法识别，请重新登录：%w", err)
+	}
+	return next, nil
 }
 
 // cred is the parsed 139 session.
@@ -364,15 +385,15 @@ func loadCred(hc *netx.Client, tok *model.TokenInfo) (*cred, error) {
 	}
 	account := stored.Account
 	authChanged := false
-	_, acc, _, _, _, err := decodeAuthorization(auth)
-	if err != nil {
-		return nil, err
-	}
-	account = acc
 	next, err := refreshAuthorization(hc, auth)
 	if err != nil {
 		return nil, err
 	}
+	_, acc, _, _, _, err := decodeAuthorization(next)
+	if err != nil {
+		return nil, err
+	}
+	account = acc
 	if next != auth {
 		auth = next
 		tok.AccessToken = next
@@ -616,6 +637,17 @@ func parsePan139Quota(raw json.RawMessage) (used, total int64, ok bool) {
 		if json.Unmarshal(nested, &nestedValues) == nil {
 			values = nestedValues
 		}
+	}
+	if nested, exists := values["diskInfo"]; exists {
+		return parsePan139Quota(nested)
+	}
+	// The user quota API reports diskSize/freeDiskSize in MiB, unlike file APIs.
+	if free, hasFree := pan139QuotaInt64(values, "freeDiskSize"); hasFree {
+		total, hasTotal := pan139QuotaInt64(values, "diskSize")
+		if !hasTotal || total <= 0 || total > (1<<63-1)/(1<<20) || free < 0 || free > total {
+			return 0, 0, false
+		}
+		return (total - free) * (1 << 20), total * (1 << 20), true
 	}
 	used, hasUsed := pan139QuotaInt64(values, "usedSize", "used", "useSize", "used_size")
 	total, hasTotal := pan139QuotaInt64(values, "totalSize", "total", "diskSize", "total_size")
@@ -1465,20 +1497,41 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	if err != nil {
 		return nil, err
 	}
-	// getDiskInfo is a single signed account request. A quota failure must not
-	// turn a still-valid 139 session into a login failure or erase its last
-	// successful capacity snapshot.
-	raw, err := d.personalPostWithCred(ctx, hc, cr, "/file/getDiskInfo", map[string]any{
-		"commonAccountInfo": map[string]any{
-			"account":     cr.account,
-			"accountType": 1,
-		},
-	})
-	if err == nil {
-		if used, total, ok := parsePan139Quota(raw); ok {
-			applyPan139Quota(token, used, total)
+	// The web client resolves older logins through status/query before querying
+	// quota. Cache only the domain ID; never substitute the phone/account ID.
+	userCred := *cr
+	userCred.host = "https://user-njs.yun.139.com/user"
+	stored := map[string]json.RawMessage{}
+	_ = json.Unmarshal([]byte(token.RefreshToken), &stored)
+	var domainID pan139FlexString
+	_ = json.Unmarshal(stored["userDomainId"], &domainID)
+	if domainID.String() == "" {
+		raw, queryErr := d.personalPostWithCred(ctx, hc, &userCred, "/status/query", map[string]any{})
+		if queryErr != nil {
+			return nil, fmt.Errorf("获取 139 容量账号信息失败：%w", queryErr)
 		}
+		var info struct {
+			DomainID pan139FlexString `json:"userDomainId"`
+		}
+		if json.Unmarshal(raw, &info) != nil || info.DomainID.String() == "" {
+			return nil, errors.New("139 未返回容量查询所需的 userDomainId")
+		}
+		domainID = info.DomainID
+		if stored == nil {
+			stored = map[string]json.RawMessage{}
+		}
+		stored["userDomainId"], _ = json.Marshal(domainID.String())
+		token.RefreshToken = mustJSON(stored)
 	}
+	raw, err := d.personalPostWithCred(ctx, hc, &userCred, "/disk/quota/detail", map[string]any{"userDomainId": domainID.String()})
+	if err != nil {
+		return nil, fmt.Errorf("获取 139 云空间失败：%w", err)
+	}
+	used, total, ok := parsePan139Quota(raw)
+	if !ok {
+		return nil, errors.New("139 容量接口未返回有效空间信息")
+	}
+	applyPan139Quota(token, used, total)
 	return token, nil
 }
 
@@ -1653,12 +1706,12 @@ func authLogin(ctx context.Context, req drive.AuthRequest) (*model.TokenInfo, er
 			}
 		}
 	}
-	_, account, _, _, _, err := decodeAuthorization(authorization)
+	hc := netx.NewClient(60 * time.Second)
+	next, err := refreshAuthorization(hc, authorization)
 	if err != nil {
 		return nil, err
 	}
-	hc := netx.NewClient(60 * time.Second)
-	next, err := refreshAuthorization(hc, authorization)
+	_, account, _, _, _, err := decodeAuthorization(next)
 	if err != nil {
 		return nil, err
 	}
@@ -1714,6 +1767,10 @@ func loginByPassword(ctx context.Context, username, password, mailCookies string
 	}
 	location, sid, err := submitPan139Login(ctx, state, false, "")
 	if err != nil {
+		if pan139RiskCode(location) == "S305" {
+			deletePan139LoginState(username)
+			return "", fmt.Errorf("pan139_sms_required\n%w", err)
+		}
 		return "", err
 	}
 	if sid == "" {
@@ -1819,14 +1876,23 @@ func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, s
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
 	location = resp.Header.Get("Location")
+	if location == "" {
+		location = pan139BodyRedirect(string(body))
+	}
 	state.MailCookies = mergePan139ResponseCookies(state.MailCookies, resp.Cookies())
 	syncPan139JarCookies(state)
+	if resp.StatusCode >= http.StatusBadRequest {
+		return location, "", fmt.Errorf("139 登录失败：HTTP %d", resp.StatusCode)
+	}
 	if code := pan139RiskCode(location); code != "" {
 		if code == "S305" {
 			if sms {
 				return location, "", errors.New("139 登录失败：S305 短信验证码错误，请重新获取")
 			}
 			return location, "", errors.New("139 登录失败：S305 尚未设置移动认证账号密码，可切换到短信验证码登录，或在 139 邮箱官网设置密码后重试")
+		}
+		if code == "S001" {
+			return location, "", errors.New("139 登录失败：S001，服务端拒绝本次登录，请核对账号信息或切换短信登录")
 		}
 		if _, ok := pan139SMSScene(code); !ok {
 			return location, "", fmt.Errorf("139 登录失败：%s", code)
@@ -1838,9 +1904,6 @@ func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, s
 	if sid == "" && pan139NeedsSMS(location) {
 		return location, "", nil
 	}
-	if sid == "" && resp.StatusCode >= http.StatusBadRequest {
-		return location, "", fmt.Errorf("139 登录失败：HTTP %d", resp.StatusCode)
-	}
 	if sid == "" && len(bytesTrimSpace(body)) > 0 {
 		// Some gateways return the redirect as a plain HTML/JSON fragment.
 		text := string(bytesTrimSpace(body))
@@ -1850,6 +1913,25 @@ func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, s
 		}
 	}
 	return location, sid, nil
+}
+
+// Parse explicit redirects only; unrelated sid strings in a login page are not
+// evidence of a successful login. Never execute returned JavaScript.
+func pan139BodyRedirect(body string) string {
+	var result struct {
+		Code string `json:"code"`
+		Var  struct {
+			URL string `json:"loginSuccessUrl"`
+		} `json:"var"`
+	}
+	if json.Unmarshal([]byte(body), &result) == nil && result.Code == "S_OK" {
+		return result.Var.URL
+	}
+	pattern := `(?i)(?:(?:window\.|top\.|parent\.)?location(?:\.href)?\s*=\s*|(?:window\.|top\.|parent\.)?location\.replace\(\s*)["']([^"']+)["']`
+	if match := regexp.MustCompile(pattern).FindStringSubmatch(body); len(match) > 1 {
+		return html.UnescapeString(match[1])
+	}
+	return ""
 }
 
 func finishPan139Login(ctx context.Context, state *pan139LoginState, sid string) (string, error) {

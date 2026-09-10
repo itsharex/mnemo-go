@@ -239,7 +239,6 @@ function onItemPointerDown(e, acc) {
 function onItemClick(acc) {
   if (suppressClick) { suppressClick = false; return }
   menu.value = null
-  if (props.current?.user_id === acc.user_id) return
   emit('select', acc)
 }
 
@@ -392,6 +391,7 @@ function onMenu(action) {
             <span class="rail-name">{{ accountName(acc) }}</span>
             <span v-if="accountHealth[acc.user_id] && accountHealth[acc.user_id].status !== 'ok'" class="rail-sub" style="color:var(--color-warning)">{{ healthLabels[accountHealth[acc.user_id].status] }}</span>
             <span class="rail-sub" v-if="hasQuota(acc)">{{ acc.usage.usedStr }} / {{ acc.usage.sizeStr }}</span>
+            <span class="rail-sub" v-else-if="acc.usage?.type === 'unlimited'">总空间不限量</span>
             <span class="rail-sub" v-else>{{ labelOfAcc(acc) }}</span>
             <span v-if="hasQuota(acc)" class="rail-quota"><i :style="{ width: quotaPct(acc) + '%' }"></i></span>
           </span>

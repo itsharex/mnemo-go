@@ -17,10 +17,179 @@ import (
 	"testing"
 	"time"
 
+	"mnemo-go/internal/model"
 	"mnemo-go/internal/netx"
 )
 
+func TestPan189AccountRefreshReusesValidSession(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	requests := 0
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if req.URL.Path != "/portal/getUserSizeInfo.action" || req.Header.Get("SessionKey") != "still-valid" {
+			return nil, fmt.Errorf("unnecessary session renewal: %s", req.URL.Path)
+		}
+		return pan189AuthResponse(req, 200, nil, `{"cloudCapacityInfo":{"usedSize":"12","totalSize":"100"},"familyCapacityInfo":{"usedSize":20,"totalSize":200}}`), nil
+	})
+	sess := &Session{SessionKey: "still-valid", SessionSecret: "secret", AccessToken: "open-token", CloudType: CloudPersonal}
+	token := &model.TokenInfo{AccessToken: sess.SessionKey, RefreshToken: mustJSON(sess)}
+	next, err := (&Driver{}).RefreshAccount(t.Context(), drive.Context{Token: token}, token)
+	if err != nil || next == nil || next.UsedSize != 12 || next.AccessToken != "still-valid" || requests != 1 {
+		t.Fatalf("refresh = %+v, %v, requests=%d", next, err, requests)
+	}
+}
+
+func TestPan189CapacityKeepsFamilySeparate(t *testing.T) {
+	raw := []byte(`{"cloudCapacityInfo":{"usedSize":"12","totalSize":"100"},"familyCapacityInfo":{"usedSize":30,"totalSize":200}}`)
+	used, total, ok := parsePan189Capacity(raw, true)
+	if !ok || used != 30 || total != 200 {
+		t.Fatalf("family quota %d/%d %v", used, total, ok)
+	}
+	if _, _, ok := parsePan189Capacity([]byte(`{"cloudCapacityInfo":{"usedSize":12,"totalSize":100}}`), true); ok {
+		t.Fatal("personal capacity leaked into family")
+	}
+	for _, raw := range []string{`{"cloudCapacityInfo":{"totalSize":100}}`, `{"cloudCapacityInfo":{"usedSize":-1,"totalSize":100}}`, `{"cloudCapacityInfo":{"usedSize":0,"totalSize":"9223372036854775808"}}`} {
+		if _, _, ok := parsePan189Capacity([]byte(raw), false); ok {
+			t.Fatal("invalid quota accepted")
+		}
+	}
+}
+
+func TestPan189HTTPExpiredSessionRefreshesAndRetries(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	quota, sessions := 0, 0
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/getSessionForPC.action" {
+			sessions++
+			return pan189AuthResponse(req, 200, nil, `{"sessionKey":"new-key","sessionSecret":"new-secret"}`), nil
+		}
+		quota++
+		if quota == 1 {
+			return pan189AuthResponse(req, 400, nil, `{"errorCode":"InvalidSessionKey"}`), nil
+		}
+		if req.Header.Get("SessionKey") != "new-key" {
+			t.Error("expired key reused")
+		}
+		return pan189AuthResponse(req, 200, nil, `{"userSizeInfo":{"usedSize":12,"cloudCapacityInfo":{"totalSize":100}}}`), nil
+	})
+	sess := &Session{SessionKey: "old-key", SessionSecret: "secret", AccessToken: "open-token"}
+	token := &model.TokenInfo{AccessToken: sess.SessionKey, RefreshToken: mustJSON(sess)}
+	_, err := (&Driver{}).request(t.Context(), drive.Context{Token: token}, apiURL+"/getUserInfo.action", reqOptions{})
+	if err != nil || quota != 2 || sessions != 1 || token.AccessToken != "new-key" {
+		t.Fatalf("error=%v quota=%d sessions=%d", err, quota, sessions)
+	}
+}
+
+func TestPan189SessionTransientResponseRecovers(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	requests := 0
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if requests == 1 {
+			return pan189AuthResponse(req, 503, nil, `{"errorCode":"ServiceUnavailable"}`), nil
+		}
+		return pan189AuthResponse(req, 200, nil, `{"sessionKey":"new-key","sessionSecret":"new-secret"}`), nil
+	})
+	next, err := (&Driver{}).refreshSession(t.Context(), nil, &Session{AccessToken: "open-token"})
+	if err != nil || next == nil || next.SessionKey != "new-key" || requests != 2 {
+		t.Fatalf("session=%+v error=%v requests=%d", next, err, requests)
+	}
+}
+
+func TestPan189RefreshPreservesRotatedTokensAfterSessionFailure(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	sessions, rotations := 0, 0
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/api/oauth2/refreshToken.do" {
+			rotations++
+			return pan189AuthResponse(req, 200, nil, `{"accessToken":"open-new","refreshToken":"refresh-new"}`), nil
+		}
+		sessions++
+		if sessions == 1 {
+			return pan189AuthResponse(req, 400, nil, `{"errorCode":"UserInvalidOpenToken"}`), nil
+		}
+		return pan189AuthResponse(req, 503, nil, `{"errorCode":"ServiceUnavailable"}`), nil
+	})
+	sess := &Session{SessionKey: "existing-key", SessionSecret: "existing-secret", AccessToken: "open-old", RefreshToken: "refresh-old", CloudType: CloudFamily, FamilyID: "family"}
+	token := &model.TokenInfo{AccessToken: sess.SessionKey, RefreshToken: mustJSON(sess)}
+	_, err := (&Driver{}).refreshSession(t.Context(), token, sess)
+	if err == nil || !strings.Contains(err.Error(), "503") || !strings.Contains(err.Error(), "ServiceUnavailable") {
+		t.Fatalf("missing failure details: %v", err)
+	}
+	saved := ParseSession(token.RefreshToken)
+	if saved == nil || saved.AccessToken != "open-new" || saved.RefreshToken != "refresh-new" || saved.SessionKey != "existing-key" || saved.FamilyID != "family" {
+		t.Fatalf("rotated credentials lost: %+v", saved)
+	}
+	if sessions != 3 || rotations != 1 {
+		t.Fatalf("unbounded refresh: sessions=%d rotations=%d", sessions, rotations)
+	}
+	if sess.RefreshToken != "refresh-old" {
+		t.Fatal("input snapshot mutated")
+	}
+}
+
+func TestPan189RefreshDoesNotRetryRateLimitOrInvalidCredentials(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	for _, status := range []int{400, 401, 429} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			requests := 0
+			netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests++
+				return pan189AuthResponse(req, status, nil, `{"errorCode":"Rejected","errorMsg":"暂不允许续期"}`), nil
+			})
+			_, err := (&Driver{}).refreshSession(t.Context(), nil, &Session{AccessToken: "open-token"})
+			if err == nil || !strings.Contains(err.Error(), "Rejected") || !strings.Contains(err.Error(), "暂不允许续期") || requests != 1 {
+				t.Fatalf("error=%v requests=%d", err, requests)
+			}
+		})
+	}
+}
+
+func TestPan189RefreshRetryHonorsCancellation(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	requests := 0
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		cancel()
+		return pan189AuthResponse(req, 503, nil, `{}`), nil
+	})
+	_, err := (&Driver{}).refreshSession(ctx, nil, &Session{AccessToken: "open-token"})
+	if !errors.Is(err, context.Canceled) || requests != 1 {
+		t.Fatalf("cancellation not honored: %v, requests=%d", err, requests)
+	}
+}
+
 type pan189AuthRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func TestPan189LoginRejectsErrorRedirect(t *testing.T) {
+	hc := netx.NewClient(time.Second)
+	hc.HTTP.Transport = pan189AuthRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return pan189AuthResponse(r, 200, nil, `{"result":-2,"msg":"刷新页面后 重试","toUrl":"https://m.cloud.189.cn/error"}`), nil
+	})
+	_, err := loginSubmit(context.Background(), &pan189LoginState{Client: hc}, "")
+	if !errors.Is(err, errPan189LoginPageExpired) {
+		t.Fatalf("error redirect accepted or expiry lost: %v", err)
+	}
+}
+
+func TestPan189ExpiredPageCodeDoesNotDependOnMessage(t *testing.T) {
+	hc := netx.NewClient(time.Second)
+	hc.HTTP.Transport = pan189AuthRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return pan189AuthResponse(r, 200, nil, `{"result":-20000,"msg":"页面参数无效"}`), nil
+	})
+	_, err := loginSubmit(context.Background(), &pan189LoginState{Client: hc}, "")
+	if !errors.Is(err, errPan189LoginPageExpired) || !strings.Contains(err.Error(), "-20000") {
+		t.Fatalf("expiry code lost: %v", err)
+	}
+}
 
 func TestPan189SMSRefreshRotatesTokensAndIsBounded(t *testing.T) {
 	for _, rejected := range []bool{false, true} {
@@ -237,6 +406,9 @@ func TestPan189SessionHTTPErrorPreservesServiceCode(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HTTP 400") || !strings.Contains(err.Error(), "LoginRespIsNull") {
 		t.Fatalf("session error = %v, want HTTP status and service code", err)
 	}
+	if !errors.Is(err, errPan189LoginPageExpired) {
+		t.Fatalf("expired ticket cannot trigger bounded re-login: %v", err)
+	}
 }
 
 func TestPan189RefreshPageRebuildsLoginOnlyOnce(t *testing.T) {
@@ -251,7 +423,8 @@ func TestPan189RefreshPageRebuildsLoginOnlyOnce(t *testing.T) {
 	pub := base64.StdEncoding.EncodeToString(der)
 	old := netx.TestTransportHook
 	t.Cleanup(func() { netx.TestTransportHook = old })
-	for _, alwaysExpired := range []bool{false, true} {
+	for _, scenario := range []struct{ sessionFailure, alwaysExpired bool }{{false, false}, {false, true}, {true, false}, {true, true}} {
+		alwaysExpired := scenario.alwaysExpired
 		initializations, submits := 0, 0
 		netx.TestTransportHook = pan189AuthRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 			body := ""
@@ -266,10 +439,13 @@ func TestPan189RefreshPageRebuildsLoginOnlyOnce(t *testing.T) {
 			case "/api/logbox/oauth2/loginSubmit.do":
 				submits++
 				body = `{"toUrl":"https://cloud.189.cn/login?ticket=test"}`
-				if submits == 1 || alwaysExpired {
+				if !scenario.sessionFailure && (submits == 1 || alwaysExpired) {
 					body = `{"msg":"刷新页面后重试"}`
 				}
 			case "/getSessionForPC.action":
+				if scenario.sessionFailure && (submits == 1 || alwaysExpired) {
+					return pan189AuthResponse(r, 400, nil, `{"res_code":"LoginRespIsNull"}`), nil
+				}
 				body = `{"sessionKey":"key","sessionSecret":"secret"}`
 			default:
 				return nil, fmt.Errorf("unexpected path %s", r.URL.Path)
@@ -280,6 +456,38 @@ func TestPan189RefreshPageRebuildsLoginOnlyOnce(t *testing.T) {
 		if initializations != 2 || submits != 2 || (err != nil) != alwaysExpired || (!alwaysExpired && session.SessionKey != "key") {
 			t.Fatalf("inits=%d submits=%d session=%v err=%v", initializations, submits, session, err)
 		}
+	}
+}
+
+func TestPan189SMSSessionRetryDoesNotReplayCode(t *testing.T) {
+	const user = "13800138000"
+	old := pan189SMSLogins
+	t.Cleanup(func() { pan189SMSLogins = old })
+	hc := netx.NewClient(time.Second)
+	calls := 0
+	hc.HTTP.Transport = pan189AuthRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/getSessionForPC.action" {
+			t.Fatalf("one-time SMS was replayed: %s", r.URL.Path)
+		}
+		calls++
+		if calls == 1 {
+			return pan189AuthResponse(r, 503, nil, "temporarily unavailable"), nil
+		}
+		return pan189AuthResponse(r, 200, nil, `{"sessionKey":"key","sessionSecret":"secret"}`), nil
+	})
+	pan189SMSLogins = map[string]*pan189SMSState{user: {
+		Login: &pan189LoginState{Client: hc, CreatedAt: time.Now()}, LastSent: time.Now(),
+		RedirectURL: "https://cloud.189.cn/login?ticket=test",
+	}}
+	if _, err := loginPan189BySMS(context.Background(), user, "123456"); err == nil {
+		t.Fatal("expected transient session error")
+	}
+	if pan189SMSLogins[user] == nil {
+		t.Fatal("accepted SMS session discarded before ticket exchange")
+	}
+	session, err := loginPan189BySMS(context.Background(), user, "123456")
+	if err != nil || session.SessionKey != "key" || calls != 2 || pan189SMSLogins[user] != nil {
+		t.Fatalf("session retry failed: calls=%d err=%v", calls, err)
 	}
 }
 
@@ -322,6 +530,16 @@ func TestPan189SMSLoginUsesCaptchaSessionAndNeverStoresOTP(t *testing.T) {
 	inits, sends := 0, 0
 	netx.TestTransportHook = pan189AuthRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body := ""
+		if strings.HasPrefix(r.URL.Path, "/api/logbox/") && r.Method == http.MethodPost {
+			if r.Header.Get("Origin") != authURL || r.Header.Get("Referer") == "" || r.Header.Get("X-Requested-With") != "XMLHttpRequest" {
+				t.Fatalf("login request lost browser page context: %s", r.URL.Path)
+			}
+			if strings.Contains(r.URL.Path, "smsNeedcaptcha") || strings.Contains(r.URL.Path, "sendSmsCode") || strings.Contains(r.URL.Path, "loginSubmit") {
+				if r.Header.Get("lt") != "0123456789abcdef" || r.Header.Get("REQID") != "req" {
+					t.Fatalf("login page identifiers not reused: %s", r.URL.Path)
+				}
+			}
+		}
 		switch r.URL.Path {
 		case "/api/portal/unifyLoginForPC.action":
 			inits++

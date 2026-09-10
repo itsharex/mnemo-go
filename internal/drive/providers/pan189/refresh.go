@@ -3,6 +3,7 @@ package pan189
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 
@@ -10,9 +11,9 @@ import (
 	"mnemo-go/internal/model"
 )
 
-// RefreshAccount renews the session and refreshes the personal-cloud quota.
-// 天翼家庭云的容量与个人云独立，现有已确认接口不能返回家庭容量；因此
-// 不以个人云容量冒充家庭云容量。
+// RefreshAccount reuses the current session, renewing only after the API
+// explicitly rejects it, and refreshes the personal-cloud quota.
+// Personal and family capacity are returned independently by the portal API.
 func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *model.TokenInfo) (*model.TokenInfo, error) {
 	if token == nil {
 		return nil, nil
@@ -21,30 +22,46 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	if err != nil {
 		return nil, err
 	}
-	next, err := d.refreshSession(ctx, token, sess)
+	cc := c
+	cc.Token = token
+	isFamily, _ := cloudInfo(sess)
+	raw, err := d.request(ctx, cc, apiURL+"/portal/getUserSizeInfo.action", reqOptions{method: "GET", family: boolPtr(false)})
 	if err != nil {
 		return nil, err
 	}
-	saveSession(token, next)
-	if isFamily, _ := cloudInfo(next); isFamily {
-		token.TotalSize = 0
-		token.UsedSize = 0
-		token.FreeSize = 0
-		return token, nil
+	usedSize, totalSize, ok := parsePan189Capacity(raw, isFamily)
+	if !ok {
+		return nil, errors.New("天翼容量接口未返回有效空间信息")
 	}
-
-	// 容量：个人云 getUserInfo。容量接口失败不影响日常文件操作，也不
-	// 清空上一次成功缓存，避免瞬时错误导致容量闪烁。
-	cc := c
-	if cc.Token == nil {
-		cc.Token = token
-	}
-	raw, err := d.request(ctx, cc, apiURL+"/getUserInfo.action", reqOptions{method: "GET", family: boolPtr(false)})
-	if err == nil {
-		usedSize, totalSize, ok := parsePan189Quota(raw)
-		applyPan189Quota(token, usedSize, totalSize, ok)
-	}
+	applyPan189Quota(token, usedSize, totalSize, ok)
 	return token, nil
+}
+
+func parsePan189Capacity(raw []byte, family bool) (used, total int64, ok bool) {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(raw, &values) != nil {
+		return
+	}
+	key := "cloudCapacityInfo"
+	if family {
+		key = "familyCapacityInfo"
+	}
+	var capacity struct {
+		Used  json.RawMessage `json:"usedSize"`
+		Total json.RawMessage `json:"totalSize"`
+	}
+	if json.Unmarshal(values[key], &capacity) == nil {
+		var usedOK, totalOK bool
+		used, usedOK = pan189QuotaInt64(capacity.Used)
+		total, totalOK = pan189QuotaInt64(capacity.Total)
+		if usedOK && totalOK && total > 0 {
+			return min(used, total), total, true
+		}
+	}
+	if !family {
+		return parsePan189Quota(raw)
+	}
+	return 0, 0, false
 }
 
 func parsePan189Quota(raw []byte) (usedSize, totalSize int64, ok bool) {

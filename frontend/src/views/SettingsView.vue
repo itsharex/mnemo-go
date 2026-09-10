@@ -28,6 +28,8 @@ const defaults = {
 
 const settings = ref({ ...defaults })
 const loaded = ref(false)
+const loadError = ref('')
+const loadingSettings = ref(false)
 const saving = ref(false)
 const clearingCache = ref(false)
 const clearingLogs = ref(false)
@@ -95,7 +97,11 @@ const sortKeyOptions = [
   { value: 'size', label: '大小' },
 ]
 
-onMounted(async () => {
+async function loadSettings() {
+  if (loadingSettings.value) return
+  loadingSettings.value = true
+  loaded.value = false
+  loadError.value = ''
   try {
     const s = (await GetSettings()) || {}
     settings.value = {
@@ -107,10 +113,15 @@ onMounted(async () => {
     }
 		settings.value.logLevel = settings.value.logLevel || 'info'
 		logPath.value = await GetLogPath().catch(() => '')
-  } catch {
-    settings.value = { ...defaults }
+    loaded.value = true
+  } catch (e) {
+    loadError.value = '设置加载失败：' + String(e?.message || e)
+  } finally {
+    loadingSettings.value = false
   }
-  loaded.value = true
+}
+onMounted(() => {
+  loadSettings()
   bodyEl.value?.addEventListener('scroll', onScroll, { passive: true })
 })
 
@@ -262,7 +273,12 @@ async function exportLogs() {
     </aside>
 
     <div class="settings-body" ref="bodyEl">
-      <div class="settings-column">
+      <div v-if="loadError" role="alert" class="sg-row">
+        <span>{{ loadError }}</span>
+        <button class="btn" @click="loadSettings">重试</button>
+      </div>
+      <div v-if="loadingSettings" role="status">正在加载设置…</div>
+      <div v-show="loaded" class="settings-column">
         <!-- 1. 基础 -->
         <section class="settings-group" id="sg-general">
           <header class="sg-heading"><h2>基础</h2></header>

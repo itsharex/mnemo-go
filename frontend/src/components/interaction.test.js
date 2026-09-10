@@ -119,6 +119,19 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('设置读取失败时禁止保存默认值，重试成功后恢复保存', async () => {
+    api.GetSettings.mockRejectedValueOnce(new Error('读取失败')).mockResolvedValue({ proxy: 'http://localhost:7890' })
+    api.GetLogPath.mockResolvedValue('')
+    api.SaveSettings.mockResolvedValue(undefined)
+    const wrapper = mountAttached(SettingsView)
+    await flushPromises()
+    await wrapper.vm.save(true)
+    expect(api.SaveSettings).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('重试')
+    await wrapper.vm.loadSettings()
+    await wrapper.vm.save(true)
+    expect(api.SaveSettings).toHaveBeenCalledWith(expect.objectContaining({ proxy: 'http://localhost:7890' }))
+  })
   it('日志路径读取失败不重置已加载的设置', async () => {
     api.GetSettings.mockResolvedValue({ proxy: 'http://localhost:7890', maxConcurrentDownloads: 7, maxDownloadSpeed: 2048 })
     api.GetLogPath.mockRejectedValue(new Error('日志路径不可用'))

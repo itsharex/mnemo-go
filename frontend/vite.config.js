@@ -12,7 +12,8 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    strictPort: true,
+    // Wails reads the actual URL from Vite output, so occupied ports may fall back.
+    strictPort: false,
   },
   test: {
     environment: 'jsdom',

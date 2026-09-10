@@ -6,11 +6,139 @@ import (
 	"mnemo-go/internal/model"
 	"mnemo-go/internal/store"
 	syncengine "mnemo-go/internal/sync"
+	"mnemo-go/internal/transfer/migrate"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"golang.org/x/net/webdav"
 )
+
+func TestMigrationMovePreservesChangesMadeDuringCopy(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		t.Run(fmtBool(directory), func(t *testing.T) {
+			source, target := t.TempDir(), t.TempDir()
+			selected := "/a.txt"
+			if directory {
+				selected = "/folder"
+				if err := os.Mkdir(filepath.Join(source, "folder"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			file := filepath.Join(source, "a.txt")
+			if directory {
+				file = filepath.Join(source, "folder", "a.txt")
+			}
+			if err := os.WriteFile(file, []byte("original"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			sourceURL, stop := startWebDAV(t, source)
+			defer stop()
+			handler := &webdav.Handler{FileSystem: webdav.Dir(target), LockSystem: webdav.NewMemLS()}
+			var once sync.Once
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut {
+					once.Do(func() {
+						changed := file
+						if directory {
+							changed = filepath.Join(source, "folder", "new.txt")
+						}
+						if err := os.WriteFile(changed, []byte("new-content-during-copy"), 0600); err != nil {
+							t.Error(err)
+						}
+					})
+				}
+				handler.ServeHTTP(w, r)
+			}))
+			defer srv.Close()
+			drive.SetTokenResolver(func(user, _ string) (*model.TokenInfo, error) {
+				endpoint := sourceURL
+				if user == "webdav_target" {
+					endpoint = srv.URL
+				}
+				return &model.TokenInfo{Conn: &model.ConnConfig{Endpoint: endpoint, RootPath: "/"}}, nil
+			})
+			defer drive.SetTokenResolver(nil)
+			job := &migrate.Job{ID: "safe-move", SrcUser: "webdav_source", SrcDrive: "webdav:source", DstUser: "webdav_target", DstDrive: "webdav:target", DstParent: "/", FileIDs: []string{selected}, Move: true}
+			if err := migrate.NewEngine(nil, nil).Run(context.Background(), job); err != nil {
+				t.Fatal(err)
+			}
+			if job.Status != "partial" {
+				t.Fatalf("move must stop source cleanup after change: %+v", job)
+			}
+			preserved := file
+			if directory {
+				preserved = filepath.Join(source, "folder", "new.txt")
+			}
+			data, err := os.ReadFile(preserved)
+			if err != nil || string(data) != "new-content-during-copy" {
+				t.Fatalf("source change lost: %q %v", data, err)
+			}
+		})
+	}
+}
+
+func TestSyncDownloadPreservesLocalEditsDuringTransfer(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmtBool(existing), func(t *testing.T) {
+			remoteDir, localDir := t.TempDir(), t.TempDir()
+			localPath := filepath.Join(localDir, "a.txt")
+			if err := os.WriteFile(filepath.Join(remoteDir, "a.txt"), []byte("remote-content"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if existing {
+				if err := os.WriteFile(localPath, []byte("old"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			handler := &webdav.Handler{FileSystem: webdav.Dir(remoteDir), LockSystem: webdav.NewMemLS()}
+			var once sync.Once
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					once.Do(func() {
+						if err := os.WriteFile(localPath, []byte("user-edit-during-download"), 0600); err != nil {
+							t.Error(err)
+						}
+					})
+				}
+				handler.ServeHTTP(w, r)
+			}))
+			defer srv.Close()
+			uid, did := model.BuildUserID("webdav", "concurrent"), model.BuildDriveID("webdav", "concurrent")
+			tok := &model.TokenInfo{TokenFrom: model.ProviderWebdav, UserID: uid, Conn: &model.ConnConfig{Endpoint: srv.URL, RootPath: "/"}}
+			drive.SetTokenResolver(func(string, string) (*model.TokenInfo, error) { return tok, nil })
+			defer drive.SetTokenResolver(nil)
+			cfg := syncengine.Config{ID: "concurrent", UserID: uid, DriveID: did, LocalDir: localDir, RemoteDir: "/", Direction: "pull"}
+			eng := syncengine.NewEngine(nil)
+			plan, err := eng.Preview(context.Background(), cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = eng.ExecutePlan(context.Background(), cfg, plan.Token, nil)
+			if err == nil || !strings.Contains(err.Error(), "变化") {
+				t.Fatalf("concurrent local edit must stop replacement: %v", err)
+			}
+			data, err := os.ReadFile(localPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != "user-edit-during-download" {
+				t.Fatalf("local edit overwritten: %q", data)
+			}
+		})
+	}
+}
+
+func fmtBool(value bool) string {
+	if value {
+		return "existing-file"
+	}
+	return "new-file"
+}
 
 func TestSyncPreviewConflictAndStalePlanAgainstWebDAV(t *testing.T) {
 	remoteDir, localDir := t.TempDir(), t.TempDir()

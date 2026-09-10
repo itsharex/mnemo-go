@@ -183,13 +183,16 @@ type MigrateJob struct {
 }
 
 type MigrateItem struct {
-	TargetID     string `json:"targetId,omitempty"`
-	IsDir        bool   `json:"isDir"`
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	ParentID     string `json:"parentId"`
-	Status       string `json:"status"`
-	Error        string `json:"error,omitempty"`
-	Verification string `json:"verification"`
-	Size         int64  `json:"size"`
+	SourceRecorded bool   `json:"sourceRecorded,omitempty"`
+	SourceTime     int64  `json:"sourceTime,omitempty"`
+	SourceHash     string `json:"sourceHash,omitempty"`
+	TargetID       string `json:"targetId,omitempty"`
+	IsDir          bool   `json:"isDir"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	ParentID       string `json:"parentId"`
+	Status         string `json:"status"`
+	Error          string `json:"error,omitempty"`
+	Verification   string `json:"verification"`
+	Size           int64  `json:"size"`
 }

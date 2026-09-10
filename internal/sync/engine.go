@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -221,6 +222,15 @@ func safeLocalPath(root, remoteName string) (string, error) {
 	}
 
 	localName := filepath.FromSlash(remoteName)
+	for _, part := range strings.Split(localName, string(filepath.Separator)) {
+		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, ".mnemo-sync-") {
+			return "", fmt.Errorf("remote path contains an ambiguous or reserved component: %q", remoteName)
+		}
+		base, _, _ := strings.Cut(part, ".")
+		if runtime.GOOS == "windows" && (!filepath.IsLocal(part) || !filepath.IsLocal(strings.TrimRight(base, " ")) || strings.ContainsAny(part, `<>:"|?*`) || strings.TrimRight(part, ". ") != part) {
+			return "", fmt.Errorf("remote path contains an invalid Windows name: %q", remoteName)
+		}
+	}
 	if strings.HasPrefix(remoteName, "/") || strings.HasPrefix(remoteName, `\`) || filepath.IsAbs(localName) || filepath.VolumeName(localName) != "" {
 		return "", fmt.Errorf("remote path must be relative: %q", remoteName)
 	}

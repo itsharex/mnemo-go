@@ -120,6 +120,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./wails.json').version")"
+          echo "MNEMO_PACKAGE_VERSION=$package_version" >> "$GITHUB_ENV"
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -163,7 +170,7 @@ jobs:
           choco install innosetup -y --no-progress
           ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
           # MSYS_NO_PATHCONV=1 防止 Git Bash 把 /D 参数误转为 Windows 路径
-          MSYS_NO_PATHCONV=1 "$ISCC" "/DMyArchSuffix=${{ matrix.artifact }}" "/DMyAppVersion=${GITHUB_REF_NAME#v}" build/windows/installer.iss
+          MSYS_NO_PATHCONV=1 "$ISCC" "/DMyArchSuffix=${{ matrix.artifact }}" "/DMyAppVersion=${MNEMO_PACKAGE_VERSION}" build/windows/installer.iss
           test -f "build/installer/${{ matrix.artifact }}-Setup.exe"
           # 拷到根目录再上传，保证 artifact 解包后文件位于顶层（publish 按 maxdepth 1 收集）
           cp "build/installer/${{ matrix.artifact }}-Setup.exe" "${{ matrix.artifact }}-Setup.exe"
@@ -207,7 +214,7 @@ jobs:
           test "$(grep -E '^Name=Mnemo$' "$package_stage/mnemo.desktop")" = 'Name=Mnemo'
 
           export NFPM_ARCH="$package_arch"
-          export NFPM_VERSION="${GITHUB_REF_NAME#v}"
+          export NFPM_VERSION="${MNEMO_PACKAGE_VERSION}"
           export NFPM_BINARY_PATH="$package_stage/Mnemo"
           export NFPM_DATA_DIR="$package_stage/data"
           export NFPM_DESKTOP_PATH="$package_stage/mnemo.desktop"

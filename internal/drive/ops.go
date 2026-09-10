@@ -438,6 +438,31 @@ func GetFileContext(ctx context.Context, userID, driveID, fileID string) (file *
 	if f, ok := fileCache.Get(userID, driveID, fileID); ok {
 		return &f, nil
 	}
+	return GetFileFreshContext(ctx, userID, driveID, fileID)
+}
+
+// GetFileFreshContext bypasses the UI snapshot cache for verification and
+// destructive-operation checks. Provider errors must never fall back to cache.
+func GetFileFreshContext(ctx context.Context, userID, driveID, fileID string) (file *model.File, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if cached, ok := fileCache.Get(userID, driveID, fileID); ok && cached.ParentFileID != "" {
+		files, err := ListDirAllContext(ctx, userID, driveID, cached.ParentFileID, nil)
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range files {
+			if candidate.FileID == fileID || candidate.IsDir && strings.TrimRight(candidate.FileID, "/") == strings.TrimRight(fileID, "/") {
+				remember(userID, driveID, fileID, &candidate)
+				return &candidate, nil
+			}
+		}
+		return nil, ErrNotFound
+	}
 	d, c, err := driverAndCtx(userID, driveID)
 	if err != nil {
 		return nil, err

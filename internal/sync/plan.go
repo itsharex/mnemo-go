@@ -99,7 +99,7 @@ func planChanges(cfg Config, local, remote, snapshot []Entry) []Change {
 			} else if !lok && rok {
 				c.Action = "download"
 				if tracked && s.Paired && cfg.DeletePropagation {
-					if r.Size == s.RemoteSize && r.ModTime == s.RemoteTime {
+					if r.Size == s.RemoteSize && r.ModTime == s.RemoteTime && r.Hash == s.Hash {
 						c.Action = "delete-remote"
 					} else {
 						c.Action = "conflict"
@@ -257,6 +257,9 @@ func (e *Engine) ExecutePlan(ctx context.Context, cfg Config, token string, choi
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := checkPlannedLocal(cfg, c.Path, c.Local); err != nil {
+			return fmt.Errorf("%s: %w", c.Path, err)
+		}
 		action := c.Action
 		if action == "conflict" {
 			policy := choices[c.Path]
@@ -286,7 +289,7 @@ func (e *Engine) ExecutePlan(ctx context.Context, cfg Config, token string, choi
 					action = "upload"
 				} else {
 					name := c.Path + ".remote-" + fmt.Sprint(time.Now().UnixNano())
-					if err := e.downloadEntry(ctx, cfg, *c.Remote, name); err != nil {
+					if err := e.downloadEntry(ctx, cfg, *c.Remote, name, nil); err != nil {
 						return err
 					}
 					localPath, err := safeLocalPath(cfg.LocalDir, name)
@@ -314,7 +317,7 @@ func (e *Engine) ExecutePlan(ctx context.Context, cfg Config, token string, choi
 		case "upload":
 			err = e.uploadPlanned(ctx, cfg, *c.Local)
 		case "download":
-			err = e.downloadEntry(ctx, cfg, *c.Remote, c.Path)
+			err = e.downloadEntry(ctx, cfg, *c.Remote, c.Path, c.Local)
 		case "delete-local":
 			err = e.propagateLocalDeletes(cfg, []Entry{*c.Local})
 		case "delete-remote":
@@ -399,7 +402,30 @@ func (e *Engine) uploadPlanned(ctx context.Context, cfg Config, entry Entry) err
 	return nil
 }
 
-func (e *Engine) downloadEntry(ctx context.Context, cfg Config, entry Entry, name string) error {
+// checkPlannedLocal also checks planned absence: a file created during a
+// transfer must not be overwritten by a previously approved download.
+func checkPlannedLocal(cfg Config, name string, expected *Entry) error {
+	path, err := safeLocalPath(cfg.LocalDir, name)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) && expected == nil {
+		return nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if expected == nil || err != nil || !info.Mode().IsRegular() || info.Size() != expected.Size || info.ModTime().Unix() != expected.ModTime || expected.ModTimeNano != 0 && info.ModTime().UnixNano() != expected.ModTimeNano {
+		return fmt.Errorf("本地文件已变化，请重新预览")
+	}
+	return nil
+}
+
+func (e *Engine) downloadEntry(ctx context.Context, cfg Config, entry Entry, name string, expected *Entry) error {
+	if err := checkPlannedLocal(cfg, name, expected); err != nil {
+		return err
+	}
 	target, err := safeLocalPath(cfg.LocalDir, name)
 	if err != nil {
 		return err
@@ -436,6 +462,12 @@ func (e *Engine) downloadEntry(ctx context.Context, cfg Config, entry Entry, nam
 	}
 	if strings.HasPrefix(filepath.Base(target), ".mnemo-sync-") {
 		return fmt.Errorf("sync reserved temporary name")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := checkPlannedLocal(cfg, name, expected); err != nil {
+		return err
 	}
 	return os.Rename(path, target)
 }

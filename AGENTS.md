@@ -72,7 +72,7 @@ OAuth client_id 等从 `config.LoadSecrets(dataDir)` 读取（`internal/config`�
 
 ## Testing
 
-`go test ./...`。现有测试覆盖：pan123/pan189/lanzou/ilanzou 单测 + e2e（dlengine/webdav/provider mock）。前端无测试框架。
+`go test ./...`、`go test -race ./...`、`go vet ./...`。现有测试覆盖网盘驱动、传输、同步、预览、存储与 e2e（dlengine/webdav/provider mock）。前端使用 Vitest + Vue Test Utils，运行 `cd frontend && npm test`；浏览器工作区验收见 `frontend/workspace.browser.cjs`。发布前需通过 `gofmt -l .` 与版本一致性检查。
 
 ## Provider checklist
 

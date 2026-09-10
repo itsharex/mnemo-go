@@ -130,7 +130,7 @@ func (a *App) VerifyMigration(id string) ([]MigrationVerification, error) {
 				out = append(out, result)
 				continue
 			}
-			target, err := drive.GetFileContext(ctx, job.DstUser, job.DstDrive, item.TargetID)
+			target, err := drive.GetFileFreshContext(ctx, job.DstUser, job.DstDrive, item.TargetID)
 			if err != nil || target == nil {
 				out = append(out, result)
 				continue

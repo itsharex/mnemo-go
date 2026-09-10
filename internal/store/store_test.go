@@ -14,14 +14,35 @@ import (
 )
 
 func TestCachedSearchKeepsAccountAndParentIdentity(t *testing.T) {
- st,err:=Open(t.TempDir());if err!=nil{t.Fatal(err)}
- file:=model.File{FileID:"same",Name:"Report.txt"}
- for _,key:=range []string{"webdav|account-a|drive-a|list|folder%2Fa|", "webdav|account-b|drive-b|list|root|"}{if err:=st.SaveDirectoryCache(key,[]model.File{file});err!=nil{t.Fatal(err)}}
- results,err:=st.SearchDirectoryCache("report");if err!=nil{t.Fatal(err)}
- if len(results)!=2{t.Fatalf("cross-account results merged: %+v",results)}
- for _,r:=range results{if r.UserID=="account-a" && r.ParentID!="folder/a"{t.Fatalf("parent identity lost: %+v",r)}}
- if err:=st.ClearCache();err!=nil{t.Fatal(err)}
- results,err=st.SearchDirectoryCache("report");if err!=nil || len(results)!=0{t.Fatalf("cleared cache is still searchable: %+v %v",results,err)}
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := model.File{FileID: "same", Name: "Report.txt"}
+	for _, key := range []string{"webdav|account-a|drive-a|list|folder%2Fa|", "webdav|account-b|drive-b|list|root|"} {
+		if err := st.SaveDirectoryCache(key, []model.File{file}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	results, err := st.SearchDirectoryCache("report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("cross-account results merged: %+v", results)
+	}
+	for _, r := range results {
+		if r.UserID == "account-a" && r.ParentID != "folder/a" {
+			t.Fatalf("parent identity lost: %+v", r)
+		}
+	}
+	if err := st.ClearCache(); err != nil {
+		t.Fatal(err)
+	}
+	results, err = st.SearchDirectoryCache("report")
+	if err != nil || len(results) != 0 {
+		t.Fatalf("cleared cache is still searchable: %+v %v", results, err)
+	}
 }
 
 func TestOpenAndSettings(t *testing.T) {

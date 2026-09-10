@@ -101,6 +101,7 @@ Object.defineProperty(globalThis, 'localStorage', {
 
 const wrappers = []
 beforeEach(() => {
+  api.openKindOf.mockImplementation(file => file.name.endsWith('.wav') ? 'audio' : 'image')
   vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
   vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
 })
@@ -128,6 +129,19 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('Markdown 代码块保留原始代码并转义 HTML', async () => {
+    api.openKindOf.mockReturnValue('text')
+    api.PinFileSnapshot.mockResolvedValue(undefined)
+    api.PreviewURL.mockResolvedValue('http://127.0.0.1/document')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, arrayBuffer: async () => new TextEncoder().encode('```html\n<img src=x onerror=alert(1)>\n```').buffer }))
+    try {
+      mountAttached(PreviewModal, { props: { file: { file_id: 'md', name: 'readme.md' }, account: { user_id: 'webdav:one', drive_id: 'drive' } } })
+      await flushPromises()
+      expect(document.querySelector('.md-code-block pre code')).not.toBeNull()
+      expect(document.querySelector('.md-code-block pre code').textContent).toBe('<img src=x onerror=alert(1)>')
+      expect(document.querySelector('.pv-markdown-view img')).toBeNull()
+    } finally { vi.unstubAllGlobals(); api.openKindOf.mockImplementation(file => file.name.endsWith('.wav') ? 'audio' : 'image') }
+  })
   it('账号右键可打开图标名称编辑页，保存后更新所有页面使用的账号', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
     api.listAccounts.mockResolvedValue([{ user_id: 'webdav:one', drive_id: 'drive' }])

@@ -732,7 +732,7 @@ function renderMarkdown(src) {
 
   // 还原代码块
   codeBlocks.forEach((block, idx) => {
-    md = md.replace(`<!--CODEBLOCK_${idx}-->`, block)
+    md = md.replace(escapeHtml(`<!--CODEBLOCK_${idx}-->`), () => block)
   })
 
   return md

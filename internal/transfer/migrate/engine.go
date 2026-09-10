@@ -15,6 +15,7 @@ import (
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/drive/driveutil"
+	"mnemo-go/internal/logging"
 	"mnemo-go/internal/model"
 	"mnemo-go/internal/netx"
 	"mnemo-go/internal/store"
@@ -98,13 +99,17 @@ func (e *Engine) releaseCancel(jobID string) {
 }
 
 // saveJob persists the job to the store (if configured).
-func (e *Engine) saveJob(job *Job) {
+func (e *Engine) saveJob(job *Job) error {
 	if e.store == nil || job == nil {
-		return
+		return nil
 	}
 	e.persistMu.Lock()
 	defer e.persistMu.Unlock()
-	_ = e.store.SaveMigrateJob(job)
+	err := e.store.SaveMigrateJob(job)
+	if err != nil {
+		logging.Warn("migration checkpoint persistence failed", "job_id", job.ID, "error", err)
+	}
+	return err
 }
 
 // RecoverUnfinished marks any persisted jobs that were still running/pending
@@ -166,7 +171,9 @@ func (e *Engine) Run(ctx context.Context, job *Job) error {
 		job.CreatedAt = time.Now().Unix()
 	}
 	job.UpdatedAt = time.Now().Unix()
-	e.saveJob(job)
+	if err := e.saveJob(job); err != nil {
+		return err
+	}
 	e.emit(job)
 	succeeded := completedTopLevel
 	partial := false
@@ -250,7 +257,12 @@ func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParen
 	if job.Items == nil {
 		job.Items = map[string]model.MigrateItem{}
 	}
+	previous := job.Items[fileID]
 	item := model.MigrateItem{ID: fileID, Name: fileID, ParentID: targetParent, Status: "running", Verification: "unverified"}
+	if job.Move && jobHasID(job.CopiedFileIDs, fileID) {
+		item = previous
+		item.ID, item.Status, item.Error = fileID, "running", ""
+	}
 	job.Items[fileID] = item
 	defer func() {
 		item.TargetID = job.Items[fileID].TargetID
@@ -275,18 +287,22 @@ func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParen
 	if srcFile == nil {
 		return errors.New("migrate: source file is empty")
 	}
-	item.Name = srcFile.Name
-	item.Size = srcFile.Size
-	item.IsDir = srcFile.IsDir
-	job.Items[fileID] = item
-	e.emit(job)
 	if job.Move && jobHasID(job.CopiedFileIDs, srcFile.FileID) {
+		if !srcFile.IsDir && (!item.SourceRecorded || item.Size != srcFile.Size || item.SourceTime != srcFile.Time || item.SourceHash != sourceHash(srcFile)) {
+			return newPartialMigrationError(errors.New("来源文件已变化或缺少原始记录，已保留来源，请核对后重新迁移"), 1)
+		}
 		if err := e.finalizeMove(ctx, job, srcFile); err != nil {
 			return err
 		}
 		e.markCompleted(job, srcFile.FileID)
 		return nil
 	}
+	item.Name = srcFile.Name
+	item.Size = srcFile.Size
+	item.IsDir = srcFile.IsDir
+	item.SourceRecorded, item.SourceTime, item.SourceHash = true, srcFile.Time, sourceHash(srcFile)
+	job.Items[fileID] = item
+	e.emit(job)
 	if srcFile.IsDir {
 		if err := e.migrateDir(ctx, job, srcFile, targetParent); err != nil {
 			return err
@@ -303,6 +319,7 @@ func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParen
 		if err == nil {
 			item.Verification = "provider-hash"
 			completeBytes(job, progressStart, srcFile.Size)
+			item.Verification = "size"
 			return e.completeResource(ctx, job, srcFile)
 		}
 		// rapid upload failed — fall through to stream/spool.
@@ -341,7 +358,9 @@ func (e *Engine) migrateOneTo(ctx context.Context, job *Job, fileID, targetParen
 // performs only the cleanup and never uploads a second destination copy.
 func (e *Engine) completeResource(ctx context.Context, job *Job, srcFile *model.File) error {
 	if job.Move {
-		e.markCopied(job, srcFile.FileID)
+		if err := e.markCopied(job, srcFile.FileID); err != nil {
+			return newPartialMigrationError(fmt.Errorf("目标已复制，但恢复记录保存失败，已保留来源: %w", err), 1)
+		}
 		if err := e.finalizeMove(ctx, job, srcFile); err != nil {
 			return err
 		}
@@ -572,6 +591,23 @@ func (e *Engine) finalizeMove(ctx context.Context, job *Job, srcFile *model.File
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	if srcFile.IsDir {
+		children, err := drive.ListDirAllContext(ctx, job.SrcUser, job.SrcDrive, srcFile.FileID, nil)
+		if err != nil {
+			return newPartialMigrationError(fmt.Errorf("清理来源前重新检查目录失败: %w", err), 1)
+		}
+		if len(children) != 0 {
+			return newPartialMigrationError(errors.New("来源目录仍有文件，已保留目录，请核对新增或未迁移内容"), 1)
+		}
+	} else {
+		current, err := drive.GetFileFreshContext(ctx, job.SrcUser, job.SrcDrive, srcFile.FileID)
+		if err != nil {
+			return newPartialMigrationError(fmt.Errorf("清理来源前重新检查文件失败: %w", err), 1)
+		}
+		if current == nil || current.IsDir || current.Size != srcFile.Size || current.Time != srcFile.Time || sourceHash(current) != sourceHash(srcFile) {
+			return newPartialMigrationError(errors.New("来源文件在复制期间变化，已保留来源，请核对后重新迁移"), 1)
+		}
+	}
 	isDir := srcFile.IsDir
 	refs := []drive.FileRef{{ID: srcFile.FileID, IsDir: &isDir}}
 	provider := drive.ProviderOf(job.SrcUser, job.SrcDrive, "")
@@ -757,15 +793,22 @@ func removeJobID(ids []string, want string) []string {
 }
 
 // markCopied persists the point at which a destination resource is durable.
-func (e *Engine) markCopied(job *Job, fileID string) {
-	if job == nil || jobHasID(job.CopiedFileIDs, fileID) {
-		return
+func (e *Engine) markCopied(job *Job, fileID string) error {
+	if job == nil {
+		return nil
 	}
-	job.CopiedFileIDs = append(job.CopiedFileIDs, fileID)
+	if !jobHasID(job.CopiedFileIDs, fileID) {
+		job.CopiedFileIDs = append(job.CopiedFileIDs, fileID)
+	}
 	job.UpdatedAt = time.Now().Unix()
-	e.saveJob(job)
+	if err := e.saveJob(job); err != nil {
+		return err
+	}
 	e.emit(job)
+	return nil
 }
+
+func sourceHash(file *model.File) string { return file.ContentHashName + ":" + file.ContentHash }
 
 // markCompleted persists a resource that no longer needs any transfer or
 // source-cleanup work. It is deliberately called for nested files too.

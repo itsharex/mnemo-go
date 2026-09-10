@@ -90,6 +90,21 @@ func TestScanLocalFilesReturnsRootError(t *testing.T) {
 	}
 }
 
+func TestSafeLocalPathRejectsAliasesAndReservedNames(t *testing.T) {
+	for _, name := range []string{"a/../b", "a//b", "./b", ".mnemo-sync-temp", "folder/.mnemo-sync-temp"} {
+		if _, err := safeLocalPath(t.TempDir(), name); err == nil {
+			t.Errorf("accepted ambiguous/reserved path %q", name)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		for _, name := range []string{"file.txt:stream", "NUL.txt", "folder/file.", "folder/file "} {
+			if _, err := safeLocalPath(t.TempDir(), name); err == nil {
+				t.Errorf("accepted Windows alias %q", name)
+			}
+		}
+	}
+}
+
 func TestPropagateLocalDeletesCannotEscapeRoot(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "sync")

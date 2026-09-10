@@ -18,10 +18,12 @@ import (
 )
 
 func TestMigrationFailureKeepsPerFileDetail(t *testing.T) {
- job:=&Job{ID:"detail",SrcUser:"missing:source",SrcDrive:"source",DstUser:"missing:target",DstDrive:"target",FileIDs:[]string{"missing-file"}}
- _=NewEngine(nil,nil).Run(context.Background(),job)
- item,ok:=job.Items["missing-file"]
- if !ok || item.Status!="failed" || item.Error=="" || item.Verification!="unverified"{t.Fatalf("missing failed detail: %+v",job.Items)}
+	job := &Job{ID: "detail", SrcUser: "missing:source", SrcDrive: "source", DstUser: "missing:target", DstDrive: "target", FileIDs: []string{"missing-file"}}
+	_ = NewEngine(nil, nil).Run(context.Background(), job)
+	item, ok := job.Items["missing-file"]
+	if !ok || item.Status != "failed" || item.Error == "" || item.Verification != "unverified" {
+		t.Fatalf("missing failed detail: %+v", job.Items)
+	}
 }
 
 func TestSpoolMigrationPreservesExistingDestination(t *testing.T) {

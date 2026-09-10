@@ -128,7 +128,7 @@ var pikpakVIPCache = struct {
 
 func newClient(accessToken, deviceID, accountID string) *client {
 	return &client{
-		http:        netx.NewClient(90 * time.Second),
+		http:        netx.NewClientWithSystemProxy(90 * time.Second),
 		accessToken: accessToken,
 		deviceID:    deviceID,
 		accountID:   strings.TrimSpace(accountID),
@@ -464,6 +464,41 @@ type File struct {
 	} `json:"links"`
 }
 
+// PikPak encodes 64-bit byte counts as strings on its live API, while some
+// endpoints return JSON numbers. Decode both without a float64 intermediate.
+type apiInt64 int64
+
+func (n *apiInt64) UnmarshalJSON(data []byte) error {
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err != nil {
+		return err
+	}
+	if string(data) == "null" {
+		*n = 0
+		return nil
+	}
+	value, err := number.Int64()
+	if err != nil {
+		return fmt.Errorf("pikpak: invalid integer: %w", err)
+	}
+	*n = apiInt64(value)
+	return nil
+}
+
+func (f *File) UnmarshalJSON(data []byte) error {
+	type plainFile File
+	var decoded struct {
+		plainFile
+		Size apiInt64 `json:"size"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*f = File(decoded.plainFile)
+	f.Size = int64(decoded.Size)
+	return nil
+}
+
 // Media is a video media stream entry.
 type Media struct {
 	MediaName      string `json:"media_name"`
@@ -471,7 +506,7 @@ type Media struct {
 	IsOrigin       bool   `json:"is_origin"`
 	Category       string `json:"category"`
 	NeedMoreQuota  bool   `json:"need_more_quota"`
-	IsVisible      bool   `json:"is_visible"`
+	IsVisible      *bool  `json:"is_visible"`
 	Priority       int    `json:"priority"`
 	Width          int    `json:"width"`
 	Height         int    `json:"height"`
@@ -627,12 +662,16 @@ func (c *client) Detail(ctx context.Context, fileID string) (*File, error) {
 func (c *client) About(ctx context.Context) (used, total int64) {
 	var resp struct {
 		Quota struct {
-			Limit int64 `json:"limit"`
-			Used  int64 `json:"used"`
+			Limit apiInt64  `json:"limit"`
+			Used  apiInt64  `json:"used"`
+			Usage *apiInt64 `json:"usage"`
 		} `json:"quota"`
 	}
 	if err := c.get(ctx, "/drive/v1/about", nil, &resp); err == nil {
-		return resp.Quota.Used, resp.Quota.Limit
+		if resp.Quota.Usage != nil {
+			return int64(*resp.Quota.Usage), int64(resp.Quota.Limit)
+		}
+		return int64(resp.Quota.Used), int64(resp.Quota.Limit)
 	}
 	return 0, 0
 }
@@ -696,14 +735,18 @@ func originMediaLink(f *File) string {
 
 // DownloadURL resolves the direct download URL.
 func (c *client) DownloadURL(ctx context.Context, fileID string) (string, int64, error) {
-	if f, err := c.Detail(ctx, fileID); err == nil {
-		if direct := bestDownloadLink(f); direct != "" {
-			return direct, f.Size, nil
-		}
+	f, err := c.Detail(ctx, fileID)
+	if err != nil {
+		// Authentication, permission and transport failures are authoritative.
+		// A secondary endpoint's 404 must not disguise them as a missing file.
+		return "", 0, err
+	}
+	if direct := bestDownloadLink(f); direct != "" {
+		return direct, f.Size, nil
 	}
 	var resp struct {
-		URL  string `json:"url"`
-		Size int64  `json:"size"`
+		URL  string   `json:"url"`
+		Size apiInt64 `json:"size"`
 	}
 	if err := c.get(ctx, "/drive/v1/files/"+url.PathEscape(fileID)+"/download?redirect=false", nil, &resp); err != nil {
 		// fall back to detail web_content_link
@@ -722,7 +765,7 @@ func (c *client) DownloadURL(ctx context.Context, fileID string) (string, int64,
 	if resp.URL == "" {
 		return "", 0, errors.New("pikpak: no download url")
 	}
-	return resp.URL, resp.Size, nil
+	return resp.URL, int64(resp.Size), nil
 }
 
 // VipInfo returns whether the account has a VIP.
@@ -750,6 +793,10 @@ func (c *client) VipInfo(ctx context.Context) bool {
 
 // PlayInfo resolves video transcode qualities.
 func (c *client) PlayInfo(ctx context.Context, fileID string) (*model.VideoPreview, error) {
+	f, err := c.Detail(ctx, fileID)
+	if err != nil {
+		return nil, err
+	}
 	q := url.Values{}
 	q.Set("file_id", fileID)
 	q.Set("_", strconv.FormatInt(time.Now().UnixMilli(), 10))
@@ -770,15 +817,47 @@ func (c *client) PlayInfo(ctx context.Context, fileID string) (*model.VideoPrevi
 			} `json:"transcode_list"`
 		} `json:"media_play_info"`
 	}
-	if err := c.get(ctx, "/drive/v1/files/"+url.PathEscape(fileID)+"/video/play_info", q, &resp); err != nil {
-		return nil, err
+	// The detail response is the primary playback source, as in the legacy
+	// client. A missing secondary endpoint must not hide valid media links.
+	hasTranscode := false
+	for _, media := range f.Medias {
+		if media.Link != nil && media.Link.URL != "" && !media.IsOrigin && media.Category != "category_origin" && (media.IsVisible == nil || *media.IsVisible) {
+			hasTranscode = true
+			break
+		}
 	}
-	f, err := c.Detail(ctx, fileID)
-	if err != nil {
-		return nil, err
+	if !hasTranscode {
+		_ = c.get(ctx, "/drive/v1/files/"+url.PathEscape(fileID)+"/video/play_info", q, &resp)
 	}
 	isVip := c.VipInfo(ctx)
 	preview := &model.VideoPreview{FileID: fileID, Size: f.Size, Duration: fileDurationSeconds(f)}
+	for _, media := range f.Medias {
+		if media.Link == nil || media.Link.URL == "" || media.IsVisible != nil && !*media.IsVisible || media.IsOrigin || media.Category == "category_origin" {
+			continue
+		}
+		height, width := media.Height, media.Width
+		kind := media.Link.Type
+		if media.Video != nil {
+			if height == 0 {
+				height = media.Video.Height
+			}
+			if width == 0 {
+				width = media.Video.Width
+			}
+			if kind == "" {
+				kind = media.Video.VideoType
+			}
+		}
+		height = resolutionHeight(height, media.ResolutionName, media.MediaName)
+		if !isVip && (media.NeedMoreQuota || height > 720) {
+			continue
+		}
+		tier := qualityTier(height)
+		preview.Qualities = append(preview.Qualities, model.VideoQuality{
+			HTML: tier.html, Quality: tier.quality, Label: tier.html, Value: tier.quality,
+			Height: height, Width: width, URL: media.Link.URL, Type: streamType(media.Link.URL, kind),
+		})
+	}
 	if resp.MediaPlayInfo != nil {
 		for _, tc := range resp.MediaPlayInfo.TranscodeList {
 			if tc.URL == "" || tc.Status != "" && tc.Status != "success" {

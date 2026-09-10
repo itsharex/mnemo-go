@@ -46,6 +46,106 @@ func dropboxAPIPath(r *http.Request) string {
 	return strings.TrimPrefix(r.URL.Path, "/2")
 }
 
+func TestDropboxListRefreshesExpiredAccessToken(t *testing.T) {
+	tokenCalls, listCalls := 0, 0
+	withDropboxTransport(t, dropboxRoundTripper(func(r *http.Request) (*http.Response, error) {
+		switch dropboxAPIPath(r) {
+		case "/oauth2/token":
+			tokenCalls++
+			if err := r.ParseForm(); err != nil {
+				return nil, err
+			}
+			if r.Form.Get("refresh_token") != "refresh-old" || r.Form.Get("grant_type") != "refresh_token" {
+				t.Errorf("unexpected refresh form")
+			}
+			return dropboxResponse(r, 200, `{"access_token":"access-new","refresh_token":"refresh-new","expires_in":14400}`), nil
+		case "/files/list_folder":
+			listCalls++
+			if r.Header.Get("Authorization") == "Bearer access-old" {
+				return dropboxResponse(r, 401, `{"error_summary":"expired_access_token/","error":{".tag":"expired_access_token"}}`), nil
+			}
+			if r.Header.Get("Authorization") != "Bearer access-new" {
+				t.Errorf("wrong refreshed authorization")
+			}
+			return dropboxResponse(r, 200, `{"entries":[{".tag":"file","id":"id:one","name":"one.txt","path_display":"/one.txt"}],"has_more":false}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected endpoint %s", r.URL.Path)
+		}
+	}))
+	tok := &model.TokenInfo{AccessToken: "access-old", RefreshToken: "refresh-old", DeviceID: builtinAppKey, UserID: "stable-user"}
+	files, err := (&Driver{}).List(context.Background(), drive.Context{Token: tok}, RootID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Name != "one.txt" || tokenCalls != 1 || listCalls != 2 {
+		t.Fatalf("files=%v refresh=%d list=%d", files, tokenCalls, listCalls)
+	}
+	if tok.AccessToken != "access-new" || tok.RefreshToken != "refresh-new" || tok.ExpireTime == "" || tok.UserID != "stable-user" {
+		t.Fatal("refreshed session not retained for persistence")
+	}
+}
+
+func TestDropboxUploadChunkRefreshesTokenAndReplaysBytes(t *testing.T) {
+	refreshes, uploads := 0, 0
+	withDropboxTransport(t, dropboxRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/oauth2/token" {
+			refreshes++
+			return dropboxResponse(r, 200, `{"access_token":"new","expires_in":14400}`), nil
+		}
+		uploads++
+		data, err := io.ReadAll(r.Body)
+		if err != nil || string(data) != "chunk-data" {
+			t.Errorf("replayed chunk = %q, error = %v", data, err)
+		}
+		if r.Header.Get("Authorization") == "Bearer old" {
+			return dropboxResponse(r, 401, `{"error_summary":"expired_access_token/"}`), nil
+		}
+		return dropboxResponse(r, 200, `{"session_id":"session"}`), nil
+	}))
+	cl, err := clientOf(drive.Context{Token: &model.TokenInfo{AccessToken: "old", RefreshToken: "refresh", DeviceID: builtinAppKey}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := cl.sessionStart(context.Background(), []byte("chunk-data"))
+	if err != nil || id != "session" || refreshes != 1 || uploads != 2 {
+		t.Fatalf("id=%s error=%v refreshes=%d uploads=%d", id, err, refreshes, uploads)
+	}
+}
+
+func TestDropboxAuthRecoveryIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name, summary, refresh              string
+		refreshStatus, wantRPC, wantRefresh int
+	}{
+		{"still expired", "expired_access_token/", "refresh", 200, 2, 1},
+		{"missing scope", "missing_scope/", "refresh", 200, 1, 0},
+		{"no refresh token", "expired_access_token/", "", 200, 1, 0},
+		{"revoked refresh token", "expired_access_token/", "refresh", 400, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rpcs, refreshes := 0, 0
+			withDropboxTransport(t, dropboxRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/oauth2/token" {
+					refreshes++
+					return dropboxResponse(r, tc.refreshStatus, `{"access_token":"new","error":"invalid_grant"}`), nil
+				}
+				rpcs++
+				return dropboxResponse(r, 401, `{"error_summary":"`+tc.summary+`"}`), nil
+			}))
+			cl, err := clientOf(drive.Context{Token: &model.TokenInfo{AccessToken: "old", RefreshToken: tc.refresh, DeviceID: builtinAppKey}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cl.rpc(context.Background(), "/files/list_folder", nil, nil); err == nil {
+				t.Fatal("expected auth failure")
+			}
+			if rpcs != tc.wantRPC || refreshes != tc.wantRefresh {
+				t.Fatalf("rpc=%d refresh=%d", rpcs, refreshes)
+			}
+		})
+	}
+}
+
 func TestCreateShareUsesDropboxSharingAPI(t *testing.T) {
 	withDropboxTransport(t, dropboxRoundTripper(func(req *http.Request) (*http.Response, error) {
 		if req.Method != http.MethodPost || req.URL.Host != "api.dropboxapi.com" || dropboxAPIPath(req) != "/sharing/create_shared_link_with_settings" {

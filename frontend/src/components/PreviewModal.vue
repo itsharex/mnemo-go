@@ -76,7 +76,7 @@ const liveTransform = computed(
 function computeFit() {
   const el = stageEl.value, n = natural.value
   if (!el || !n.w || !n.h) { fitScale.value = 1; return }
-  fitScale.value = Math.min(1, (el.clientWidth - 24) / n.w, (el.clientHeight - 24) / n.h)
+  fitScale.value = Math.min(1, (el.clientWidth - 24) / n.w, Math.max(1, el.clientHeight - 100) / n.h)
 }
 
 function resetImageTransform() {
@@ -87,7 +87,7 @@ function resetImageTransform() {
 
 function stagePoint(e) {
   const r = stageEl.value.getBoundingClientRect()
-  return { x: e.clientX - r.left - r.width / 2, y: e.clientY - r.top - r.height / 2 }
+  return { x: e.clientX - r.left - r.width / 2, y: e.clientY - r.top - (r.height - 76) / 2 }
 }
 
 // 缩放（origin 存在且未旋转时锚定光标位置）
@@ -143,7 +143,7 @@ function onPointerDown(e) {
 function pokeUI() {
   uiHidden.value = false
   clearTimeout(idleTimer)
-  idleTimer = setTimeout(() => { if (!isDragging.value) uiHidden.value = true }, 2400)
+  idleTimer = setTimeout(() => { if (!isDragging.value && !stageEl.value?.querySelector('.pv-ctl:hover, .pv-ctl:focus-within, .pv-filmstrip:hover, .pv-filmstrip:focus-within')) uiHidden.value = true }, 2400)
 }
 
 function switchImage(step) {
@@ -786,6 +786,7 @@ watch(() => props.file, (f) => { if (f) activeFile.value = f })
 watch(() => activeFile.value.file_id, loadPreview)
 
 function onKey(e) {
+  if (isImmersive.value && (e.ctrlKey || e.metaKey || e.altKey || e.target?.closest?.('input, textarea, select, button, [contenteditable="true"]'))) return
   if (textMode.value === 'edit') return
   if (kind.value === 'image') {
     if (e.key === 'ArrowLeft') switchImage(-1)
@@ -1011,6 +1012,19 @@ function decodeText(buf) {
       <button class="btn-circle sm" title="关闭查找" @click="toggleSearch"><UiIcon name="close" :size="12" /></button>
     </div>
 
+    <header v-if="isImmersive" class="pv-topbar">
+      <div class="pv-topbar-meta">
+        <UiIcon :name="kind === 'image' ? 'image' : 'audio'" :size="20" />
+        <span class="pv-topbar-name" :title="activeFile.name">{{ activeFile.name }}</span>
+        <span class="pv-topbar-sub">{{ formatBytes(activeFile.size) }}<template v-if="kind === 'image' && natural.w"> · {{ natural.w }} × {{ natural.h }}</template></span>
+      </div>
+      <div class="pv-topbar-actions" aria-label="窗口控制">
+        <button type="button" class="pv-ctl-btn pv-window-btn" title="最小化" aria-label="最小化窗口" @click="winMinimise"><UiIcon name="window-minimize" :size="14" /></button>
+        <button type="button" class="pv-ctl-btn pv-window-btn" :title="winMax ? '还原窗口' : '最大化窗口'" :aria-label="winMax ? '还原窗口' : '最大化窗口'" @click="winToggleMax"><UiIcon :name="winMax ? 'window-restore' : 'window-maximize'" :size="14" /></button>
+        <button type="button" class="pv-ctl-btn pv-window-btn pv-window-close" title="关闭 (Esc)" aria-label="关闭预览" @click="handleCloseRequest"><UiIcon name="close" :size="14" /></button>
+      </div>
+    </header>
+
     <!-- 主展示区 -->
     <div v-if="loading" class="empty pv-center"><span class="spin"></span><span>加载内容中…</span></div>
     <div v-else-if="error" class="empty pv-center">
@@ -1031,8 +1045,6 @@ function decodeText(buf) {
         @pointermove="pokeUI"
         @dblclick="onDblClick"
       >
-        <!-- 氛围背景：当前图放大模糊填充，消除黑场单调感 -->
-        <div v-if="layers.length" class="pv-amb" :style="{ backgroundImage: 'url(' + layers[layers.length - 1].url + ')' }"></div>
         <div
           v-for="layer in layers"
           :key="layer.key"
@@ -1050,27 +1062,14 @@ function decodeText(buf) {
         <div v-if="imgSwitching && layers.length" class="pv-stage-busy"><span class="spin"></span></div>
 
         <template v-if="imageList.length > 1">
-          <button class="pv-edge left" title="上一张 (←)" @click.stop="switchImage(-1)"><UiIcon name="back" :size="17" /></button>
-          <button class="pv-edge right" title="下一张 (→)" @click.stop="switchImage(1)"><UiIcon name="forward" :size="17" /></button>
+          <button class="pv-edge left" title="上一张 (←)" @click.stop="switchImage(-1)"><UiIcon name="chevron-left" :size="18" /></button>
+          <button class="pv-edge right" title="下一张 (→)" @click.stop="switchImage(1)"><UiIcon name="chevron-right" :size="18" /></button>
         </template>
-
-        <!-- 顶部浮动栏：渐变遮罩，无实体条（播放器语言） -->
-        <div class="pv-topbar" @pointerdown.stop @dblclick.stop>
-          <div class="pv-topbar-meta">
-            <UiIcon :name="iconOf(activeFile)" :size="15" />
-            <span class="pv-topbar-name">{{ activeFile.name }}</span>
-            <span class="pv-topbar-sub">{{ formatBytes(activeFile.size) }}<template v-if="natural.w"> · {{ natural.w }}×{{ natural.h }}</template><template v-if="imageList.length > 1"> · {{ currentImageIdx + 1 }} / {{ imageList.length }}</template></span>
-          </div>
-          <div class="pv-topbar-actions">
-            <button class="pv-ctl-btn pv-window-btn" title="最小化" aria-label="最小化窗口" @click="winMinimise"><UiIcon name="window-minimize" :size="14" /></button>
-            <button class="pv-ctl-btn pv-window-btn" :title="winMax ? '还原窗口' : '最大化窗口'" :aria-label="winMax ? '还原窗口' : '最大化窗口'" @click="winToggleMax"><UiIcon :name="winMax ? 'window-restore' : 'window-maximize'" :size="14" /></button>
-            <button class="pv-ctl-btn pv-window-btn pv-window-close" title="关闭 (Esc)" aria-label="关闭预览" @click="handleCloseRequest"><UiIcon name="close" :size="15" /></button>
-          </div>
-        </div>
 
         <!-- 胶卷缩略图条（控制条切换） -->
         <div v-if="showFilm && imageList.length > 1" class="pv-filmstrip" @pointerdown.stop @dblclick.stop>
-          <div
+          <button
+            type="button"
             v-for="img in imageList"
             :key="img.file_id"
             class="pv-film-thumb"
@@ -1078,23 +1077,23 @@ function decodeText(buf) {
             :title="img.name"
             @click="selectImage(img)"
           >
-            <img v-if="img.thumbnail" :src="img.thumbnail" alt="" draggable="false" />
+            <img v-if="img.thumbnail" :src="img.thumbnail" alt="" draggable="false" loading="lazy" />
             <UiIcon v-else name="image" :size="16" />
-          </div>
+          </button>
         </div>
 
         <!-- 浮动控制条 -->
         <div class="pv-ctl" @pointerdown.stop @dblclick.stop>
-          <button class="pv-ctl-btn" :disabled="imageList.length <= 1" title="上一张 (←)" @click="switchImage(-1)"><UiIcon name="back" :size="15" /></button>
+          <button class="pv-ctl-btn" :disabled="imageList.length <= 1" title="上一张 (←)" @click="switchImage(-1)"><UiIcon name="chevron-left" :size="18" /></button>
           <span class="pv-ctl-counter">{{ currentImageIdx + 1 }} / {{ imageList.length }}</span>
-          <button class="pv-ctl-btn" :disabled="imageList.length <= 1" title="下一张 (→)" @click="switchImage(1)"><UiIcon name="forward" :size="15" /></button>
+          <button class="pv-ctl-btn" :disabled="imageList.length <= 1" title="下一张 (→)" @click="switchImage(1)"><UiIcon name="chevron-right" :size="18" /></button>
           <span class="pv-ctl-sep"></span>
           <button class="pv-ctl-btn pv-ctl-text" title="缩小 (-)" @click="zoomByFactor(1 / 1.25)">−</button>
           <button type="button" class="pv-ctl-zoom" title="点击复原（适配窗口）" @click="resetImageTransform">{{ Math.round(fitScale * zoom * 100) }}%</button>
           <button class="pv-ctl-btn" title="放大 (+)" @click="zoomByFactor(1.25)"><UiIcon name="plus" :size="13" /></button>
-          <button class="pv-ctl-btn" title="适配窗口 (0)" @click="resetImageTransform"><UiIcon name="size" :size="14" /></button>
+          <button class="pv-ctl-btn" title="适配窗口 (0)" @click="resetImageTransform"><UiIcon name="maximize" :size="18" /></button>
           <button class="pv-ctl-btn pv-ctl-text pv-ctl-ratio" :class="{ active: isOneToOne }" title="实际大小 (双击百分比)" @click="zoomToOne">1:1</button>
-          <button class="pv-ctl-btn" title="顺时针旋转 90° (R)" @click="rotateBy(90)"><UiIcon name="refresh" :size="13" /></button>
+          <button class="pv-ctl-btn" title="顺时针旋转 90° (R)" @click="rotateBy(90)"><UiIcon name="rotate-right" :size="18" /></button>
           <span class="pv-ctl-sep"></span>
           <button v-if="imageList.length > 1" class="pv-ctl-btn" :class="{ active: slideshow }" :title="slideshow ? '暂停幻灯片' : '幻灯片放映（3 秒/张）'" @click="toggleSlideshow"><UiIcon :name="slideshow ? 'pause' : 'play'" :size="14" /></button>
           <button class="pv-ctl-btn" :class="{ active: showFilm }" :disabled="imageList.length <= 1" title="缩略图" @click="showFilm = !showFilm"><UiIcon name="grid" :size="14" /></button>
@@ -1103,38 +1102,24 @@ function decodeText(buf) {
 
       <!-- 2. 音频播放（沉浸式播放器） -->
       <div v-else-if="kind === 'audio'" class="pv-audio-stage" @pointerdown="audioMenu && (audioMenu = '')">
-        <!-- 氛围背景：封面放大模糊 / 品牌辉光 -->
-        <div class="pv-audio-amb" :style="audioCover ? { backgroundImage: 'url(' + audioCover + ')' } : {}"></div>
-        <div class="pv-audio-veil"></div>
-
-        <!-- 顶部浮动栏 -->
-        <div class="pv-topbar" @pointerdown.stop>
-          <div class="pv-topbar-meta">
-            <UiIcon name="audio" :size="15" />
-            <span class="pv-topbar-name">{{ activeFile.name }}</span>
-            <span class="pv-topbar-sub">{{ formatBytes(activeFile.size) }}<template v-if="audioList.length > 1"> · {{ audioIdx + 1 }} / {{ audioList.length }}</template></span>
-          </div>
-          <div class="pv-topbar-actions">
-            <button class="pv-ctl-btn pv-window-btn" title="最小化" aria-label="最小化窗口" @click="winMinimise"><UiIcon name="window-minimize" :size="14" /></button>
-            <button class="pv-ctl-btn pv-window-btn" :title="winMax ? '还原窗口' : '最大化窗口'" :aria-label="winMax ? '还原窗口' : '最大化窗口'" @click="winToggleMax"><UiIcon :name="winMax ? 'window-restore' : 'window-maximize'" :size="14" /></button>
-            <button class="pv-ctl-btn pv-window-btn pv-window-close" title="关闭 (Esc)" aria-label="关闭预览" @click="handleCloseRequest"><UiIcon name="close" :size="15" /></button>
-          </div>
-        </div>
 
         <!-- 中部：唱片 + 曲目信息 -->
         <div class="pv-audio-center">
-          <div class="pv-disc" :class="{ spin: audioPlaying, empty: !audioCover }">
+          <div class="pv-disc" :class="{ empty: !audioCover }">
             <img v-if="audioCover" :src="audioCover" alt="" draggable="false" />
             <UiIcon v-else name="audio" :size="46" />
           </div>
-          <div class="pv-audio-title" :title="activeFile.name">{{ activeFile.name }}</div>
-          <div class="pv-audio-sub">
-            <span>{{ audioExt }}</span><i>·</i><span>{{ formatBytes(activeFile.size) }}</span>
-            <template v-if="audioList.length > 1"><i>·</i><span>{{ audioIdx + 1 }} / {{ audioList.length }}</span></template>
+          <div class="pv-audio-details">
+            <span class="pv-audio-eyebrow">{{ audioPlaying ? '正在播放' : '音频预览' }}</span>
+            <div class="pv-audio-title" :title="activeFile.name">{{ activeFile.name }}</div>
+            <div class="pv-audio-sub">
+              <span>{{ audioExt }}</span><i>·</i><span>{{ formatBytes(activeFile.size) }}</span>
+              <template v-if="audioList.length > 1"><i>·</i><span>{{ audioIdx + 1 }} / {{ audioList.length }}</span></template>
+            </div>
           </div>
         </div>
 
-        <!-- 底部玻璃控制条 -->
+        <!-- 底部播放工具栏 -->
         <div class="pv-audio-dock" @pointerdown.stop @dblclick.stop>
           <div class="pv-audio-progress">
             <div class="pv-audio-track">
@@ -1150,10 +1135,10 @@ function decodeText(buf) {
           <div class="pv-audio-controls">
             <div class="pv-audio-group">
               <button v-if="audioList.length > 1" class="pv-abtn" :class="{ active: audioMenu === 'playlist' }" title="播放列表" @click.stop="audioMenu = audioMenu === 'playlist' ? '' : 'playlist'"><UiIcon name="list" :size="17" /></button>
-              <button v-if="audioList.length > 1" class="pv-abtn" title="上一曲" @click="switchAudio(-1)"><UiIcon name="rewind" :size="18" /></button>
+              <button v-if="audioList.length > 1" class="pv-abtn" title="上一曲" @click="switchAudio(-1)"><UiIcon name="skip-back" :size="20" /></button>
               <button class="pv-abtn pv-abtn-main" :title="audioPlaying ? '暂停 (空格)' : '播放 (空格)'" @click="toggleAudioPlay"><UiIcon :name="audioPlaying ? 'pause' : 'play'" :size="22" /></button>
-              <button v-if="audioList.length > 1" class="pv-abtn" title="下一曲" @click="switchAudio(1)"><UiIcon name="forward" :size="18" /></button>
-              <button class="pv-abtn" :class="{ active: audioLoop }" title="单曲循环 (L)" @click="audioLoop = !audioLoop"><UiIcon name="refresh" :size="16" /></button>
+              <button v-if="audioList.length > 1" class="pv-abtn" title="下一曲" @click="switchAudio(1)"><UiIcon name="skip-forward" :size="20" /></button>
+              <button class="pv-abtn" :class="{ active: audioLoop }" title="单曲循环 (L)" @click="audioLoop = !audioLoop"><UiIcon name="repeat" :size="18" /></button>
             </div>
             <div class="pv-audio-group pv-audio-right">
               <button class="pv-abtn pv-abtn-text" :class="{ active: audioMenu === 'speed' }" title="播放速度" @click.stop="audioMenu = audioMenu === 'speed' ? '' : 'speed'">{{ audioSpeed }}x</button>
@@ -1298,47 +1283,25 @@ function decodeText(buf) {
 </template>
 
 <style scoped>
-/* 沉浸式媒体的控件始终以实体表面与画面分离。浅色主题使用亮面+深色图标，
-   深色主题反转为深面+浅色图标；无论封面/图片本身明暗如何都保持可读。 */
+/* 媒体预览与应用共享主题；窗口控制不受内容加载和隐藏计时影响。 */
 :global(.modal.preview-modal.immersive) {
-  --pv-media-surface: rgba(255, 255, 255, .96);
-  --pv-media-surface-hover: #ffffff;
-  --pv-media-fg: #182235;
-  --pv-media-muted: #667085;
-  --pv-media-border: rgba(15, 23, 42, .28);
-  --pv-media-shadow: 0 10px 28px rgba(15, 23, 42, .28);
-  --pv-media-dock: rgba(255, 255, 255, .94);
-  --pv-media-dock-border: rgba(15, 23, 42, .18);
-  --pv-media-active: #6d28d9;
-  --pv-media-active-fg: #ffffff;
-  --pv-audio-base: #e9edf5;
-  --pv-audio-fg: #172033;
-  --pv-audio-muted: #5f6f86;
-  --pv-audio-veil: linear-gradient(180deg, rgba(255, 255, 255, .44), rgba(232, 237, 246, .88));
-  overflow: hidden;
-  background: var(--pv-audio-base);
+  --pv-media-surface: var(--bg-surface);
+  --pv-media-surface-hover: var(--bg-hover);
+  --pv-media-fg: var(--text-primary);
+  --pv-media-muted: var(--text-secondary);
+  --pv-media-border: var(--border-light);
+  --pv-media-shadow: var(--shadow-md);
+  --pv-media-dock: var(--bg-elevated);
+  --pv-media-dock-border: var(--border-light);
+  --pv-media-active: var(--color-primary);
+  --pv-media-active-fg: #fff;
+  --pv-audio-base: var(--bg-base);
+  --pv-audio-fg: var(--text-primary);
+  --pv-audio-muted: var(--text-secondary);
+  position: fixed; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none;
+  margin: 0; border: 0; border-radius: 0; overflow: hidden; background: var(--bg-base);
 }
-:global(html.dark .modal.preview-modal.immersive) {
-  --pv-media-surface: rgba(22, 20, 32, .94);
-  --pv-media-surface-hover: #2d293d;
-  --pv-media-fg: #f8f7ff;
-  --pv-media-muted: #b6b0cb;
-  --pv-media-border: rgba(255, 255, 255, .28);
-  --pv-media-shadow: 0 12px 32px rgba(0, 0, 0, .52);
-  --pv-media-dock: rgba(17, 15, 26, .95);
-  --pv-media-dock-border: rgba(255, 255, 255, .16);
-  --pv-media-active: #a78bfa;
-  --pv-media-active-fg: #17121f;
-  --pv-audio-base: #0d0b13;
-  --pv-audio-fg: #f7f5ff;
-  --pv-audio-muted: #b5afc8;
-  --pv-audio-veil: linear-gradient(180deg, rgba(8, 7, 13, .28), rgba(8, 7, 13, .82));
-}
-:global(.modal.preview-modal.immersive .preview-body) {
-  border-radius: inherit;
-  background: transparent;
-}
-
+:global(.modal.preview-modal.immersive .preview-body) { border-radius: 0; background: var(--bg-base); }
 /* 弹窗头部自适应高级排布 */
 .pv-head-custom {
   display: flex;
@@ -1688,21 +1651,13 @@ function decodeText(buf) {
   .pv-sb-section { gap: 8px; }
 }
 
-/* 图片查看器：沉浸式黑场舞台 */
+/* 图片画布与变换层 */
 .pv-stage {
   flex: 1; min-height: 0; position: relative; overflow: hidden;
   background: #050507;
   user-select: none; touch-action: none; cursor: grab;
 }
 .pv-stage.grabbing { cursor: grabbing; }
-/* 氛围背景：当前图放大模糊填充 */
-.pv-amb {
-  position: absolute; inset: -48px; z-index: 0;
-  background-size: cover; background-position: center;
-  filter: blur(64px) saturate(1.25) brightness(.5);
-  transform: scale(1.2); opacity: .42;
-  transition: background-image .3s ease;
-}
 .pv-img-layer {
   position: absolute; inset: 0; z-index: 1;
   display: flex; align-items: center; justify-content: center;
@@ -1722,7 +1677,7 @@ function decodeText(buf) {
 .pv-stage.grabbing .pv-img-layer img { transition: none; }
 .pv-stage-busy { position: absolute; z-index: 10; top: 12px; right: 14px; color: rgba(255,255,255,.7); }
 
-/* 顶部浮动栏：渐变遮罩，无实体条（播放器语言） */
+/* 媒体标题栏 */
 .pv-topbar {
   position: absolute; top: 0; left: 0; right: 0; z-index: 8;
   display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
@@ -1837,30 +1792,14 @@ function decodeText(buf) {
 .pv-stage.ui-hidden .pv-ctl { transform: translateX(-50%) translateY(8px); }
 .pv-stage.ui-hidden .pv-topbar { transform: translateY(-8px); }
 
-/* ---------- 音频沉浸式播放器（对齐 PlayerPanel 暗场语言） ---------- */
+/* 音频预览 */
 .pv-audio-stage {
   flex: 1; min-height: 0; position: relative; overflow: hidden;
   background: var(--pv-audio-base);
   color: var(--pv-audio-fg); user-select: none;
 }
-.pv-audio-amb {
-  position: absolute; z-index: 0; inset: -60px;
-  background-size: cover; background-position: center;
-  filter: blur(72px) saturate(1.15) brightness(.72);
-  transform: scale(1.25);
-  opacity: .4;
-}
-.pv-audio-stage .pv-audio-amb:not([style]) {
-  background: radial-gradient(ellipse at 30% 20%, rgba(124, 58, 237, .38), transparent 55%),
-              radial-gradient(ellipse at 75% 80%, rgba(16, 185, 129, .2), transparent 50%);
-  filter: none; transform: none; opacity: 1;
-}
-.pv-audio-veil {
-  position: absolute; z-index: 1; inset: 0;
-  background: var(--pv-audio-veil);
-}
 
-/* 曲目封面：播放时仅做轻微弹性呼吸，避免干扰内容。 */
+/* 曲目封面与信息 */
 .pv-audio-center {
   position: absolute; z-index: 2; inset: 0 0 164px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -1873,17 +1812,13 @@ function decodeText(buf) {
   background: var(--pv-media-surface);
   border: 1px solid var(--pv-media-border);
   box-shadow: 0 20px 48px rgba(15, 23, 42, .28);
-  animation: pv-cover-breathe 2.6s var(--motion-spring) infinite;
-  animation-play-state: paused;
 }
-.pv-disc.spin { animation-play-state: running; }
 .pv-disc img { width: 100%; height: 100%; object-fit: cover; }
 .pv-disc.empty {
   background:
     linear-gradient(135deg, color-mix(in srgb, var(--pv-media-active) 88%, #1e1740), color-mix(in srgb, var(--pv-media-active) 42%, #15203b));
   color: var(--pv-media-active-fg);
 }
-@keyframes pv-cover-breathe { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-3px) scale(1.018); } }
 .pv-audio-title {
   max-width: min(640px, 82%); color: var(--pv-audio-fg); font-size: 18px; font-weight: 720; letter-spacing: .01em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -2018,5 +1953,68 @@ function decodeText(buf) {
   .pv-audio-vol-val { display: none; }
   .pv-audio-title { max-width: calc(100% - 32px); font-size: 16px; }
   .pv-disc { width: 132px; height: 132px; border-radius: 22px; }
+}
+
+/* 图片与音频共用48px标题栏，右上角窗口按钮无外侧留白。 */
+.pv-topbar { position: relative; flex: 0 0 48px; align-items: center; gap: 12px; padding: 0 0 0 18px; background: var(--bg-surface); border-bottom: 1px solid var(--border-light); }
+.pv-topbar-meta { flex: 1; min-width: 0; gap: 12px; padding: 0; color: var(--text-primary); }
+.pv-topbar-meta > :deep(svg) { color: var(--color-primary); }
+.pv-topbar-name { font-size: 13px; font-weight: 600; text-shadow: none; }
+.pv-topbar-sub { color: var(--text-secondary); font-size: 11px; }
+.pv-topbar-actions { align-self: stretch; border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+.pv-window-btn { width: 46px; height: 100%; border: 0; border-radius: 0; }
+.pv-window-btn:active:not(:disabled) { transform: none; }
+.pv-stage { background: var(--bg-base); }
+.pv-img-layer { bottom: 76px; }
+.pv-img-layer img { box-shadow: var(--shadow-sm); }
+.pv-edge { width: 36px; height: 48px; border-radius: var(--radius-md); box-shadow: var(--shadow-sm); }
+.pv-stage-busy { top: 16px; right: 18px; color: var(--color-primary); }
+.pv-ctl { bottom: 20px; gap: 4px; padding: 6px 10px; border-radius: var(--radius-md); box-shadow: var(--shadow-md); }
+.pv-ctl-btn { width: 36px; height: 36px; border-radius: var(--radius-sm); }
+.pv-ctl-btn.pv-window-btn { width: 46px; height: 100%; border-radius: 0; }
+.pv-ctl-btn:hover:not(:disabled) { border-color: transparent; }
+.pv-ctl-btn.active { color: var(--color-primary); background: var(--listselectbg); }
+.pv-ctl-btn :deep(svg) { width: 18px; height: 18px; }
+.pv-window-btn :deep(svg) { width: 14px; height: 14px; }
+.pv-filmstrip { bottom: 82px; padding: 8px; gap: 8px; max-width: calc(100% - 120px); }
+.pv-film-thumb { width: 64px; height: 48px; }
+.pv-stage.ui-hidden .pv-ctl:focus-within, .pv-stage.ui-hidden .pv-filmstrip:focus-within { opacity: 1; pointer-events: auto; }
+.pv-stage.ui-hidden .pv-ctl:focus-within { transform: translateX(-50%); }
+.pv-audio-center { inset: 0 0 150px; flex-direction: row; gap: 40px; padding: 40px max(32px, 10vw); }
+.pv-disc { width: clamp(160px, 28vw, 300px); height: auto; aspect-ratio: 1; border-radius: var(--radius-xl); background: var(--bg-surface); border: 1px solid var(--border-light); box-shadow: var(--shadow-lg); animation: none; }
+.pv-disc.empty { background: var(--bg-subtle); color: var(--color-primary); }
+.pv-disc.empty :deep(svg) { width: 64px; height: 64px; stroke-width: 1.25; }
+.pv-audio-details { flex: 1; min-width: 0; max-width: 460px; display: flex; flex-direction: column; align-items: flex-start; gap: 16px; }
+.pv-audio-eyebrow { color: var(--color-primary); font-size: 12px; font-weight: 600; }
+.pv-audio-title { max-width: 100%; font-size: clamp(20px, 2.5vw, 32px); font-weight: 600; line-height: 1.45; letter-spacing: -.02em; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.pv-audio-sub { color: var(--text-secondary); font-size: 12px; flex-wrap: wrap; }
+.pv-audio-dock { width: min(800px, calc(100% - 64px)); bottom: 32px; padding: 16px 24px; border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); backdrop-filter: none; }
+.pv-abtn { border: 0; background: transparent; border-radius: var(--radius-sm); }
+.pv-abtn.active { background: var(--listselectbg); color: var(--color-primary); }
+.pv-abtn-main { width: 44px; height: 44px; border-radius: 50%; box-shadow: none; background: var(--color-primary); color: #fff; }
+.pv-audio-controls { margin-top: 8px; }
+.pv-audio-group { gap: 8px; }
+.pv-audio-pop { max-height: min(45vh, 320px); border-radius: var(--radius-md); backdrop-filter: none; }
+.pv-audio-pop-item.on { background: var(--listselectbg); color: var(--color-primary); border-color: transparent; }
+.pv-audio-pop-item:hover { border-color: transparent; }
+.pv-audio-thumb { background: var(--color-primary); box-shadow: none; }
+.pv-audio-err { max-width: calc(100% - 48px); color: var(--color-error); }
+@media (max-width: 700px) {
+  .pv-topbar-sub { display: none; }
+  .pv-audio-center { flex-direction: column; gap: 24px; padding: 24px; bottom: 164px; }
+  .pv-audio-details { flex: 0; align-items: center; text-align: center; gap: 10px; max-width: 90%; }
+  .pv-audio-sub { justify-content: center; }
+  .pv-disc { width: clamp(120px, 24vh, 220px); }
+  .pv-audio-title { font-size: 20px; -webkit-line-clamp: 2; }
+  .pv-audio-dock { width: calc(100% - 32px); bottom: 16px; padding: 12px 16px; }
+  .pv-audio-group { gap: 2px; }
+  .pv-audio-vol-range { width: 54px; }
+}
+@media (max-height: 520px) {
+  .pv-audio-center { flex-direction: row; bottom: 132px; padding: 20px 32px; gap: 24px; }
+  .pv-disc { width: min(22vh, 140px); }
+  .pv-audio-details { align-items: flex-start; text-align: left; flex: 1; }
+  .pv-audio-title { font-size: 18px; }
+  .pv-audio-dock { bottom: 12px; padding: 8px 16px; }
 }
 </style>

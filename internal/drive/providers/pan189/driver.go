@@ -38,8 +38,10 @@ func init() {
 		}),
 		Auth: login189,
 		Login: drive.LoginConfig{Fields: []drive.LoginField{
+			{Key: "login_mode", Type: "select", Label: "登录方式", Required: true, Options: []drive.LoginOption{{Value: "password", Label: "账号密码"}, {Value: "sms", Label: "短信验证码"}}},
 			{Key: "username", Type: "text", Label: "手机号/邮箱", Required: true},
 			{Key: "password", Type: "password", Label: "密码", Required: true},
+			{Key: "sms_code", Type: "text", Label: "短信验证码", Required: false},
 			{Key: "cloud_type", Type: "select", Label: "云空间", Required: false, Options: []drive.LoginOption{
 				{Value: CloudPersonal, Label: "个人云"},
 				{Value: CloudFamily, Label: "家庭云"},

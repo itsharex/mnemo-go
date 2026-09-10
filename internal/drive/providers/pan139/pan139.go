@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -284,7 +285,10 @@ func decodeAuthorization(authorization string) (raw, account, tokenPart, splits0
 	if len(strs) < 4 {
 		return "", "", "", "", 0, errors.New("pan139: authorization token 无效")
 	}
-	if _, err := fmt.Sscanf(strs[len(strs)-1], "%d", &expiration); err != nil || expiration <= 0 {
+	// Cloud SSO tokens can append metadata after the fourth field.
+	// The expiration stays at index 3 (the provider's reference client contract).
+	expiration, err = strconv.ParseInt(strs[3], 10, 64)
+	if err != nil || expiration <= 0 {
 		return "", "", "", "", 0, errors.New("pan139: authorization expiration 无效")
 	}
 	return authorization, account, tokenPart, splits[0], expiration, nil
@@ -346,6 +350,12 @@ func loadCred(hc *netx.Client, tok *model.TokenInfo) (*cred, error) {
 		PersonalCloudHost string `json:"personalCloudHost"`
 	}
 	_ = json.Unmarshal([]byte(tok.RefreshToken), &stored)
+	// Preserve login fallback fields and future metadata when updating routing.
+	storedFields := map[string]json.RawMessage{}
+	_ = json.Unmarshal([]byte(tok.RefreshToken), &storedFields)
+	if storedFields == nil {
+		storedFields = map[string]json.RawMessage{}
+	}
 	if auth == "" {
 		auth = normalizeAuthorization(stored.Authorization)
 	}
@@ -354,7 +364,7 @@ func loadCred(hc *netx.Client, tok *model.TokenInfo) (*cred, error) {
 	}
 	account := stored.Account
 	authChanged := false
-	_, _, acc, _, _, err := decodeAuthorization(auth)
+	_, acc, _, _, _, err := decodeAuthorization(auth)
 	if err != nil {
 		return nil, err
 	}
@@ -375,13 +385,15 @@ func loadCred(hc *netx.Client, tok *model.TokenInfo) (*cred, error) {
 			return nil, err
 		}
 		host = h
-		stored.PersonalCloudHost = host
 	}
 	if authChanged || stored.Authorization != auth || stored.Account != account || stored.PersonalCloudHost != host {
 		stored.Authorization = auth
 		stored.Account = account
 		stored.PersonalCloudHost = host
-		tok.RefreshToken = mustJSON(stored)
+		storedFields["authorization"] = json.RawMessage(mustJSON(auth))
+		storedFields["account"] = json.RawMessage(mustJSON(account))
+		storedFields["personalCloudHost"] = json.RawMessage(mustJSON(host))
+		tok.RefreshToken = mustJSON(storedFields)
 	}
 	return &cred{authorization: auth, account: account, host: host}, nil
 }
@@ -813,10 +825,11 @@ func (d *Driver) DownloadInfo(ctx context.Context, c drive.Context, fileID strin
 		return "", 0, err
 	}
 	var res struct {
-		CDNURL   string          `json:"cdnUrl"`
-		URL      string          `json:"url"`
-		FileName string          `json:"fileName"`
-		Size     pan139FlexInt64 `json:"size"`
+		CDNURL    string          `json:"cdnUrl"`
+		CDNSwitch *bool           `json:"cdnSwitch"`
+		URL       string          `json:"url"`
+		FileName  string          `json:"fileName"`
+		Size      pan139FlexInt64 `json:"size"`
 	}
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return "", 0, fmt.Errorf("pan139: 下载地址响应无效: %w", err)
@@ -824,8 +837,15 @@ func (d *Driver) DownloadInfo(ctx context.Context, c drive.Context, fileID strin
 	if strings.TrimSpace(res.CDNURL) == "" && strings.TrimSpace(res.URL) == "" {
 		return "", 0, errors.New("pan139: 下载地址为空")
 	}
-	if strings.TrimSpace(res.CDNURL) != "" {
+	useCDN := res.CDNSwitch != nil && *res.CDNSwitch
+	if res.CDNSwitch == nil && strings.TrimSpace(res.URL) == "" {
+		useCDN = true
+	}
+	if useCDN && strings.TrimSpace(res.CDNURL) != "" {
 		return res.CDNURL, int64(res.Size), nil
+	}
+	if strings.TrimSpace(res.URL) == "" {
+		return "", 0, errors.New("pan139: 下载地址为空（CDN 未启用）")
 	}
 	return res.URL, int64(res.Size), nil
 }
@@ -1536,6 +1556,7 @@ func (pan139SMSRequiredError) Error() string {
 
 type pan139LoginState struct {
 	Username      string
+	RiskCode      string
 	Password      string
 	MailCookies   string
 	Client        *netx.Client
@@ -1579,8 +1600,12 @@ func reservePan139SMSSend(username string) (*pan139LoginState, error) {
 	defer pan139LoginStateMu.Unlock()
 	state := pan139LoginStates[username]
 	if state == nil || time.Since(state.CreatedAt) > pan139SMSStateTTL {
-		delete(pan139LoginStates, username)
-		return nil, errors.New("139 登录会话已过期，请重新提交账号密码")
+		var err error
+		state, err = newPan139LoginState(username, "", "")
+		if err != nil {
+			return nil, err
+		}
+		pan139LoginStates[username] = state
 	}
 	if !state.LastSMSSentAt.IsZero() {
 		remaining := pan139SMSMinInterval - time.Since(state.LastSMSSentAt)
@@ -1678,6 +1703,9 @@ func authLogin(ctx context.Context, req drive.AuthRequest) (*model.TokenInfo, er
 // When the account is covered by the security upgrade, the server redirects
 // to an SMS login state; the state is retained for SendPan139SMS/loginBySMS.
 func loginByPassword(ctx context.Context, username, password, mailCookies string) (string, error) {
+	if password == "" {
+		return "", errors.New("pan139: 密码不能为空")
+	}
 	state, err := newPan139LoginState(username, password, mailCookies)
 	if err != nil {
 		return "", err
@@ -1702,8 +1730,8 @@ func loginByPassword(ctx context.Context, username, password, mailCookies string
 
 func newPan139LoginState(username, password, mailCookies string) (*pan139LoginState, error) {
 	username = strings.TrimSpace(username)
-	if username == "" || password == "" {
-		return nil, errors.New("pan139: 账号密码不能为空")
+	if username == "" {
+		return nil, errors.New("pan139: 账号不能为空")
 	}
 	hc := netx.NewClient(60 * time.Second)
 	hc.HTTP.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
@@ -1729,6 +1757,9 @@ func newPan139LoginState(username, password, mailCookies string) (*pan139LoginSt
 func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, smsCode string) (location, sid string, err error) {
 	if state == nil || state.Client == nil {
 		return "", "", errors.New("pan139: 登录会话不存在")
+	}
+	if sms && state.RiskCode != "S045" && state.RiskCode != "S046" && state.RiskCode != "" {
+		return submitPan139SMSXML(ctx, state, smsCode)
 	}
 	// The browser first opens Login.ashx. This creates the fresh JSESSIONID
 	// expected by the password endpoint and also refreshes stale login cookies.
@@ -1756,9 +1787,12 @@ func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, s
 	form.Set("authType", "2")
 	form.Set("version", "1.0")
 	if sms {
-		form.Set("passOld", smsCode)
+		// The official form clears the SMS input after computing Password.
+		// Sending both proofs can select the gateway's legacy password branch.
+		form.Set("passOld", "")
 		form.Set("Password", sha1Hex("fetion.com.cn:"+smsCode))
 		form.Set("reqFrom", "3")
+		form.Set("loginFailureUrl", mailHostURL+"/default.html?smsLogin=1")
 	} else {
 		form.Set("passOld", "")
 		form.Set("Password", sha1Hex("fetion.com.cn:"+state.Password))
@@ -1768,7 +1802,8 @@ func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, s
 	}
 	referer := fmt.Sprintf("https://mail.10086.cn/default.html?&s=1&v=0&u=%s&m=1&ec=S001&resource=indexLogin&clientid=1003&auto=on&cguid=%s&mtime=45",
 		base64.StdEncoding.EncodeToString([]byte(state.Username)), cguid)
-	resp, reqErr := state.Client.Do(ctx, http.MethodPost, mailLoginURL+"?_fv=4&cguid="+url.QueryEscape(cguid)+"&resource=indexLogin", map[string]string{
+	query := url.Values{"_fv": {"4"}, "cguid": {cguid}, "resource": {"indexLogin"}, "_": {sha1Hex(state.Username)}}
+	resp, reqErr := state.Client.Do(ctx, http.MethodPost, mailLoginURL+"?"+query.Encode(), map[string]string{
 		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 		"Content-Type":    "application/x-www-form-urlencoded",
@@ -1784,6 +1819,19 @@ func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, s
 	location = resp.Header.Get("Location")
 	state.MailCookies = mergePan139ResponseCookies(state.MailCookies, resp.Cookies())
 	syncPan139JarCookies(state)
+	if code := pan139RiskCode(location); code != "" {
+		state.RiskCode = code
+		if code == "S305" {
+			if sms {
+				return location, "", errors.New("139 登录失败：S305 短信验证码错误，请重新获取")
+			}
+			return location, "", errors.New("139 登录失败：S305 尚未设置移动认证账号密码，可切换到短信验证码登录，或在 139 邮箱官网设置密码后重试")
+		}
+		if _, ok := pan139SMSScene(code); !ok {
+			return location, "", fmt.Errorf("139 登录失败：%s", code)
+		}
+		return location, "", nil
+	}
 	sid = extractPan139SID(location, resp)
 	if sid == "" && pan139NeedsSMS(location) {
 		return location, "", nil
@@ -1795,6 +1843,7 @@ func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, s
 		// Some gateways return the redirect as a plain HTML/JSON fragment.
 		text := string(bytesTrimSpace(body))
 		if pan139NeedsSMS(text) {
+			state.RiskCode = pan139RiskCode(text)
 			return text, "", nil
 		}
 	}
@@ -1819,7 +1868,7 @@ func finishPan139Login(ctx context.Context, state *pan139LoginState, sid string)
 func loginBySMS(ctx context.Context, username, smsCode string) (string, error) {
 	state := loadPan139LoginState(username)
 	if state == nil {
-		return "", errors.New("139 登录会话已过期，请先提交账号密码并获取验证码")
+		return "", errors.New("139 登录会话已过期，请重新获取短信验证码")
 	}
 	location, sid, err := submitPan139Login(ctx, state, true, smsCode)
 	if err != nil {
@@ -1835,11 +1884,15 @@ func loginBySMS(ctx context.Context, username, smsCode string) (string, error) {
 	return finishPan139Login(ctx, state, sid)
 }
 
-// RequestPan139SMS sends the second-factor code for a pending password login.
+// RequestPan139SMS supports both direct SMS login and password risk verification.
 func RequestPan139SMS(ctx context.Context, username string) error {
 	state, err := reservePan139SMSSend(username)
 	if err != nil {
 		return err
+	}
+	scene, ok := pan139SMSScene(state.RiskCode)
+	if !ok && state.RiskCode != "" {
+		return fmt.Errorf("139 登录校验场景不支持短信：%s", state.RiskCode)
 	}
 	encodedUser, err := rsaEncryptPan139LoginName(state.Username)
 	if err != nil {
@@ -1854,10 +1907,19 @@ func RequestPan139SMS(ctx context.Context, username string) error {
 		"<string name=\"loginSuccessUrl\"></string>" +
 		"<string name=\"verifyCode\"></string>" +
 		"<string name=\"version\">1.0</string>" +
-		"<string name=\"scene\">5</string>" +
+		"<string name=\"scene\">" + strconv.Itoa(scene) + "</string>" +
 		"</object>"
+	method := "login:sendSmsCodeByScene"
+	if state.RiskCode == "" {
+		// The official SMS tab uses the standalone endpoint, not a password
+		// risk scene. Its RSA loginName uses the existing phone public key.
+		method = "login:sendSmsCode"
+		body = "<object>" + pan139XMLField("loginName", encodedUser) +
+			pan139XMLField("fv", "4") + pan139XMLField("clientId", "1003") +
+			pan139XMLField("version", "1.0") + pan139XMLField("verifyCode", "") + "</object>"
+	}
 	cguid := fmt.Sprint(time.Now().UnixMilli())
-	resp, err := state.Client.Do(ctx, http.MethodPost, mailSMSURL+"?func=login:sendSmsCodeByScene&cguid="+url.QueryEscape(cguid), map[string]string{
+	resp, err := state.Client.Do(ctx, http.MethodPost, mailSMSURL+"?func="+url.QueryEscape(method)+"&cguid="+url.QueryEscape(cguid), map[string]string{
 		"Accept":       "text/javascript",
 		"Content-Type": "application/xml",
 		"Origin":       "https://mail.10086.cn",
@@ -1869,6 +1931,8 @@ func RequestPan139SMS(ctx context.Context, username string) error {
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	state.MailCookies = mergePan139ResponseCookies(state.MailCookies, resp.Cookies())
+	syncPan139JarCookies(state)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("139 获取短信验证码失败：HTTP %d", resp.StatusCode)
 	}
@@ -1907,8 +1971,99 @@ func rsaEncryptPan139LoginName(value string) (string, error) {
 }
 
 func pan139NeedsSMS(value string) bool {
-	value = strings.ToUpper(value)
-	return strings.Contains(value, "EC=S045") || strings.Contains(value, "EC=S046") || strings.Contains(value, "S045") || strings.Contains(value, "S046")
+	_, ok := pan139SMSScene(pan139RiskCode(value))
+	return ok
+}
+
+func pan139SMSScene(code string) (int, bool) {
+	switch code {
+	case "PML401010062":
+		return 2, true
+	case "MW0016":
+		return 4, true
+	case "S025", "S035":
+		return 1, true
+	case "S045", "S046":
+		return 5, true
+	default:
+		return 0, false
+	}
+}
+
+func pan139RiskCode(value string) string {
+	value = strings.TrimSpace(value)
+	if u, err := url.Parse(value); err == nil {
+		if code := u.Query().Get("ec"); code != "" {
+			return strings.ToUpper(code)
+		}
+	}
+	if _, ok := pan139SMSScene(strings.ToUpper(value)); ok {
+		return strings.ToUpper(value)
+	}
+	if m := regexp.MustCompile(`(?i)(?:[?&]ec=|["']?code["']?\s*:\s*["'])([A-Z0-9]+)`).FindStringSubmatch(value); len(m) > 1 {
+		return strings.ToUpper(m[1])
+	}
+	return ""
+}
+
+func pan139XMLField(name, value string) string {
+	var escaped strings.Builder
+	_ = xml.EscapeText(&escaped, []byte(value))
+	return `<string name="` + name + `">` + escaped.String() + `</string>`
+}
+
+func submitPan139SMSXML(ctx context.Context, state *pan139LoginState, smsCode string) (string, string, error) {
+	encodedUser, err := rsaEncryptPan139LoginName(state.Username)
+	if err != nil {
+		return "", "", err
+	}
+	body := "<object>" + pan139XMLField("clientId", "1003") + pan139XMLField("version", "4") +
+		pan139XMLField("loginType", "0") + pan139XMLField("authType", "2") + pan139XMLField("loginName", encodedUser) +
+		pan139XMLField("eMode", "1") + pan139XMLField("loginPassword", sha1Hex("fetion.com.cn:"+smsCode)) +
+		pan139XMLField("createAutoLoginSecretKey", "1") + pan139XMLField("verifyCode", "") + pan139XMLField("verifyAgentId", "") +
+		pan139XMLField("reqFrom", "3") + pan139XMLField("needWCookie", "1")
+	if state.RiskCode == "MW0016" {
+		body += pan139XMLField("pwdType", "1")
+	}
+	body += "</object>"
+	resp, err := state.Client.Do(ctx, http.MethodPost, mailSMSURL+"?func="+url.QueryEscape("/login/inlogin.action")+"&cguid="+strconv.FormatInt(time.Now().UnixMilli(), 10), map[string]string{
+		"Content-Type": "application/xml; charset=utf-8", "User-Agent": "okhttp/4.12.0", "Origin": mailHostURL, "Referer": "https://mail.10086.cn/default.html",
+	}, strings.NewReader(body))
+	if err != nil {
+		return "", "", fmt.Errorf("139 短信验证失败: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
+	if err != nil {
+		return "", "", err
+	}
+	state.MailCookies = mergePan139ResponseCookies(state.MailCookies, resp.Cookies())
+	syncPan139JarCookies(state)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("139 短信验证失败：HTTP %d", resp.StatusCode)
+	}
+	var result struct {
+		Code    string `json:"code"`
+		Summary string `json:"summary"`
+		Var     struct {
+			URL string `json:"loginSuccessUrl"`
+		} `json:"var"`
+	}
+	if json.Unmarshal(data, &result) != nil || result.Code != "S_OK" {
+		return "", "", fmt.Errorf("139 短信验证失败：%s %s", result.Code, truncate(result.Summary, 120))
+	}
+	sid := extractPan139SID(result.Var.URL, resp)
+	if sid == "" {
+		cookies := parseCookieMap(state.MailCookies)
+		sid = cookies["Os_SSo_Sid"]
+		if sid == "" {
+			sid = cookies["sid"]
+		}
+	}
+	if sid == "" {
+		return "", "", errors.New("139 短信验证成功但未返回 sid")
+	}
+	return result.Var.URL, sid, nil
 }
 
 func extractPan139SID(location string, resp *http.Response) string {

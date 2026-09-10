@@ -29,6 +29,8 @@ const (
 	pan189LoginStateTTL = 5 * time.Minute
 )
 
+var errPan189LoginPageExpired = errors.New("189 登录页面已失效")
+
 // CaptchaError is returned when the account requires a graphical captcha.
 // The data-URL image is available in LastCaptchaImage and must be supplied back
 // via the "validate_code" login-field on the next attempt (the pending login
@@ -63,16 +65,21 @@ func CaptchaImage() string {
 // pan189LoginState mirrors the pending login parameters that must be reused
 // between fetching the captcha image and submitting the code.
 type pan189LoginState struct {
-	User          string
-	PasswordProof string
-	CaptchaToken  string
-	LT            string
-	ParamID       string
-	ReqID         string
-	RsaUsername   string
-	RsaPassword   string
-	Client        *netx.Client
-	CreatedAt     time.Time
+	User            string
+	PasswordProof   string
+	CaptchaToken    string
+	LT              string
+	ParamID         string
+	ReqID           string
+	RsaUsername     string
+	RsaPassword     string
+	PublicKey       string
+	RsaPrefix       string
+	SMSLogin        bool
+	SMSCaptchaToken string
+	PageKey         string
+	Client          *netx.Client
+	CreatedAt       time.Time
 }
 
 func pan189PasswordProof(password string) string {
@@ -130,6 +137,11 @@ func loginWithCreds(ctx context.Context, username, password, validateCode string
 		return nil, errors.New("请输入天翼云盘账号和密码")
 	}
 	session, err := doLogin(ctx, user, pass, validateCode)
+	if errors.Is(err, errPan189LoginPageExpired) && ctx.Err() == nil {
+		// A refresh invalidates the old RSA parameters, cookies and captcha.
+		// Restart once without reusing a code from the previous login page.
+		session, err = doLogin(ctx, user, pass, "")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -266,6 +278,9 @@ func prepareLoginParam(ctx context.Context, user, pass string) (*pan189LoginStat
 		CaptchaToken: captchaToken, LT: lt, ParamID: paramID, ReqID: reqID,
 		RsaUsername: conf.Data.Pre + rsaUser,
 		RsaPassword: conf.Data.Pre + rsaPass,
+		PublicKey:   conf.Data.PubKey, RsaPrefix: conf.Data.Pre,
+		SMSCaptchaToken: pickMatch(page, `(?s)id=["']j-sms-captcha["'].*?name=['"]captchaToken['"]\s*value=['"]([^'"]+)`),
+		PageKey:         firstNonEmpty(pickMatch(page, `\bpageKey\s*=\s*["']([^"']+)`), "normal"),
 	}, nil
 }
 
@@ -328,11 +343,17 @@ func loginSubmit(ctx context.Context, st *pan189LoginState, validateCode string)
 	form.Set("appKey", appID)
 	form.Set("accountType", accountType)
 	form.Set("userName", st.RsaUsername)
-	form.Set("password", st.RsaPassword)
+	form.Set("epd", st.RsaPassword)
+	form.Set("pageKey", st.PageKey)
 	form.Set("validateCode", validateCode)
 	form.Set("captchaToken", st.CaptchaToken)
 	form.Set("returnUrl", returnURL)
 	form.Set("dynamicCheck", "FALSE")
+	if st.SMSLogin {
+		form.Set("dynamicCheck", "TRUE")
+		form.Set("smsValidateCode", validateCode)
+		form.Set("validateCode", "")
+	}
 	form.Set("clientType", clientType)
 	form.Set("cb_SaveName", "1")
 	form.Set("isOauth2", "false")
@@ -360,7 +381,15 @@ func loginSubmit(ctx context.Context, st *pan189LoginState, validateCode string)
 	toURL := strVal(j, "toUrl")
 	if toURL == "" {
 		msg := firstNonEmpty(strVal(j, "msg"), strVal(j, "message"), strVal(j, "errorMsg"), strVal(j, "desc"), "189 登录失败（未返回 toUrl）")
-		if isPan189CaptchaFailure(msg) {
+		if code := strVal(j, "result"); code != "" {
+			msg += "（错误码 " + code + "）"
+		}
+		if strings.Contains(msg, "刷新页面后重试") {
+			return "", fmt.Errorf("%w：%s", errPan189LoginPageExpired, msg)
+		}
+		// SMS validation errors belong to the SMS session. The password-captcha
+		// marker would clear the wrong frontend state and discard the service code.
+		if !st.SMSLogin && isPan189CaptchaFailure(msg) {
 			return "", errors.New("captcha_retry_189\n189 图形验证码不正确，请重新登录")
 		}
 		return "", errors.New(msg)
@@ -371,6 +400,140 @@ func loginSubmit(ctx context.Context, st *pan189LoginState, validateCode string)
 func isPan189CaptchaFailure(message string) bool {
 	message = strings.ToLower(message)
 	return strings.Contains(message, "验证码") || strings.Contains(message, "captcha") || strings.Contains(message, "validatecode")
+}
+
+type pan189SMSState struct {
+	Login           *pan189LoginState
+	CaptchaRequired bool
+	ValidateCode    string
+	LastSent        time.Time
+}
+
+var pan189SMSMu sync.Mutex
+var pan189SMSLogins = map[string]*pan189SMSState{}
+
+func prunePan189SMSLogins() {
+	for user, state := range pan189SMSLogins {
+		if time.Since(state.Login.CreatedAt) > pan189LoginStateTTL {
+			delete(pan189SMSLogins, user)
+		}
+	}
+}
+
+// RequestPan189SMS returns a captcha image when one is required before sending.
+// An empty image with no error means the SMS was accepted by the service.
+func RequestPan189SMS(ctx context.Context, username, validateCode string) (string, error) {
+	username = strings.TrimSpace(username)
+	if !regexp.MustCompile(`^1\d{10}$`).MatchString(username) {
+		return "", errors.New("请输入有效的 11 位手机号")
+	}
+	pan189SMSMu.Lock()
+	defer pan189SMSMu.Unlock()
+	prunePan189SMSLogins()
+	state := pan189SMSLogins[username]
+	if state == nil {
+		login, err := prepareLoginParam(ctx, username, "")
+		if err != nil {
+			return "", err
+		}
+		login.SMSLogin = true
+		login.CaptchaToken = firstNonEmpty(login.SMSCaptchaToken, login.CaptchaToken)
+		state = &pan189SMSState{Login: login}
+		pan189SMSLogins[username] = state
+	}
+	if !state.LastSent.IsZero() && time.Since(state.LastSent) < time.Minute {
+		return "", errors.New("短信验证码已发送，请 60 秒后再试")
+	}
+	st := state.Login
+	headers := map[string]string{"Content-Type": "application/x-www-form-urlencoded", "REQID": st.ReqID, "User-Agent": ua189}
+	form := url.Values{"appKey": {appID}, "mobile": {st.RsaUsername}}
+	resp, err := st.Client.Do(ctx, http.MethodPost, authURL+"/api/logbox/oauth2/smsNeedcaptcha.do", headers, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	if readErr != nil {
+		return "", readErr
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("检查天翼短信验证码失败：HTTP %d", resp.StatusCode)
+	}
+	switch strings.TrimSpace(string(body)) {
+	case "0":
+		state.CaptchaRequired = true
+	case "1":
+		state.CaptchaRequired = false
+	default:
+		return "", errors.New("检查天翼短信验证码失败（响应异常）")
+	}
+	validateCode = strings.TrimSpace(validateCode)
+	if state.CaptchaRequired && validateCode == "" {
+		return fetchCaptchaImage(ctx, st)
+	}
+	if state.CaptchaRequired {
+		form.Set("captchaToken", st.CaptchaToken)
+		form.Set("validateCode", validateCode)
+	} else {
+		form.Set("captchaToken", "")
+		form.Set("validateCode", "")
+		validateCode = ""
+	}
+	resp, err = st.Client.Do(ctx, http.MethodPost, authURL+"/api/logbox/oauth2/web/sendSmsCode.do", headers, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var result map[string]json.RawMessage
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result); err != nil {
+		return "", fmt.Errorf("发送天翼短信验证码失败：HTTP %d（响应异常）", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK || strVal(result, "result") != "0" {
+		msg := firstNonEmpty(strVal(result, "msg"), "发送天翼短信验证码失败")
+		if code := strVal(result, "result"); code != "" {
+			msg += "（错误码 " + code + "）"
+		}
+		if strings.Contains(msg, "刷新页面后重试") {
+			// Retrying with the same invalid page parameters cannot recover.
+			// Reinitialize on the user's next send, without replaying an SMS.
+			delete(pan189SMSLogins, username)
+			return "", fmt.Errorf("%w：%s，请重新获取短信验证码", errPan189LoginPageExpired, msg)
+		}
+		return "", errors.New(msg)
+	}
+	state.LastSent = time.Now()
+	state.ValidateCode = validateCode
+	return "", nil
+}
+
+func loginPan189BySMS(ctx context.Context, username, smsCode string) (*Session, error) {
+	username, smsCode = strings.TrimSpace(username), strings.TrimSpace(smsCode)
+	if username == "" || smsCode == "" {
+		return nil, errors.New("请输入手机号和短信验证码")
+	}
+	pan189SMSMu.Lock()
+	defer pan189SMSMu.Unlock()
+	prunePan189SMSLogins()
+	state := pan189SMSLogins[username]
+	if state == nil || state.LastSent.IsZero() {
+		return nil, errors.New("短信登录会话已过期，请重新获取验证码")
+	}
+	st := *state.Login
+	encrypted, err := rsaEncrypt(st.PublicKey, smsCode)
+	if err != nil {
+		return nil, err
+	}
+	st.RsaPassword = st.RsaPrefix + encrypted
+	redirect, err := loginSubmit(ctx, &st, state.ValidateCode)
+	if err != nil {
+		if errors.Is(err, errPan189LoginPageExpired) {
+			delete(pan189SMSLogins, username)
+		}
+		return nil, err
+	}
+	delete(pan189SMSLogins, username)
+	// The one-time SMS code must never become a persisted account password.
+	return getSessionForPC(ctx, &st, redirect, username)
 }
 
 // getSessionForPC exchanges the redirect URL for the API session key/secret.
@@ -396,6 +559,17 @@ func getSessionForPC(ctx context.Context, st *pan189LoginState, toURL, loginName
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		var failure map[string]json.RawMessage
+		if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&failure) == nil {
+			code := firstNonEmpty(strVal(failure, "res_code"), strVal(failure, "errorCode"))
+			message := firstNonEmpty(strVal(failure, "res_message"), strVal(failure, "errorMsg"), strVal(failure, "message"))
+			if code == "LoginRespIsNull" {
+				message = "登录凭据未被服务端接受，请重新登录"
+			}
+			if code != "" || message != "" {
+				return nil, fmt.Errorf("获取 189 Session 失败：HTTP %d（%s）", resp.StatusCode, strings.TrimSpace(code+" "+message))
+			}
+		}
 		return nil, fmt.Errorf("获取 189 Session 失败：HTTP %d", resp.StatusCode)
 	}
 	var j map[string]json.RawMessage
@@ -445,7 +619,13 @@ func login189(ctx context.Context, req drive.AuthRequest) (*model.TokenInfo, err
 	}
 	validateCode := req.Config["validate_code"]
 
-	session, err := loginWithCreds(ctx, username, password, validateCode)
+	var session *Session
+	var err error
+	if req.Config["login_mode"] == "sms" {
+		session, err = loginPan189BySMS(ctx, username, req.Config["sms_code"])
+	} else {
+		session, err = loginWithCreds(ctx, username, password, validateCode)
+	}
 	if err != nil {
 		return nil, err
 	}

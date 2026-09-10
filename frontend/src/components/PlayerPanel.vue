@@ -69,7 +69,6 @@ const supTracks = ref([])     // SUP 图形字幕：{ label, url }
 const supActive = ref(false)
 const assTracks = ref([])     // ASS/SSA 特效字幕：{ label, url | content }
 const assActive = ref(false)
-const fsAnim = ref('') // 'in' | 'out'：全屏切换过渡动画
 const isBuffering = ref(false) // 播放过程中卡顿缓冲状态
 const loadingSpeed = ref('') // 实时缓冲网速
 let lastLoadedBytes = 0
@@ -94,7 +93,7 @@ let osdTimer = null
 let audioCtx = null
 let gainNode = null
 let supRenderer = null
-let fsAnimTimer = null
+let previousFocus = null
 let assRenderer = null
 let subtitleFetchController = null
 let localSubtitleReader = null
@@ -104,11 +103,12 @@ const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2]
 const speedOptions = SPEEDS.map((s) => ({ value: s, label: s + 'x' }))
 const UNSUPPORTED_WEB_CONTAINERS = new Set(['avi', 'flv', 'm2ts', 'mkv', 'mpg', 'mpeg', 'mts', 'rm', 'rmvb', 'ts', 'wmv'])
 const episodeFiles = computed(() => (props.files || []).filter((candidate) => !candidate?.isDir && isVideoFile(candidate)))
-const thumbnailUrl = computed(() => String(props.file?.thumbnail || props.file?.thumbnail_url || props.file?.thumb_url || '').trim())
 const episodeIndex = computed(() => episodeFiles.value.findIndex((candidate) => candidate.file_id === props.file?.file_id))
 const currentQualityLabel = computed(() => qualities.value.find((quality) => quality.value === currentQuality.value)?.label || currentQuality.value || (streamType.value || '网页播放').toUpperCase())
 
 onMounted(() => {
+  previousFocus = document.activeElement
+  containerEl.value?.focus()
   try { WindowIsMaximised().then((v) => { winMax.value = !!v }).catch(() => {}) } catch { /* browser preview */ }
   document.addEventListener('keydown', onKeyDown)
   document.addEventListener('fullscreenchange', onFullscreenChange)
@@ -139,22 +139,13 @@ onBeforeUnmount(() => {
   if (centerTimer) clearTimeout(centerTimer)
   if (osdTimer) clearTimeout(osdTimer)
   if (audioCtx) { try { audioCtx.close() } catch {}; audioCtx = null; gainNode = null }
-  if (fsAnimTimer) clearTimeout(fsAnimTimer)
   stopSup()
   destroyAss()
   document.removeEventListener('keydown', onKeyDown)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   document.removeEventListener('pointerdown', onDocumentPointerDown, true)
   window.removeEventListener('resize', onWindowResize)
-})
-
-// 全屏切换：窗口级变化比较生硬，用短暂的缩放+淡入过渡
-watch(isFullscreen, (full) => {
-  fsAnim.value = ''
-  if (containerEl.value) void containerEl.value.offsetWidth
-  fsAnim.value = full ? 'in' : 'out'
-  if (fsAnimTimer) clearTimeout(fsAnimTimer)
-  fsAnimTimer = setTimeout(() => { fsAnim.value = '' }, 360)
+  nextTick(() => { if (previousFocus?.isConnected) previousFocus.focus?.() })
 })
 
 function isVideoFile(file) {
@@ -1070,6 +1061,23 @@ async function switchQuality(quality) {
 
 // ---- keyboard ----
 function onKeyDown(e) {
+  if (e.code === 'Escape') {
+    e.preventDefault()
+    if (activeMenu.value) activeMenu.value = ''
+    else if (isFullscreen.value) toggleFullscreen()
+    else emit('close')
+    return
+  }
+  if (e.key === 'Tab') {
+    const controls = [...(containerEl.value?.querySelectorAll('button:not(:disabled), input:not([type="file"]):not(:disabled)') || [])].filter(el => el.offsetParent !== null)
+    const index = controls.indexOf(document.activeElement)
+    if (controls.length && (index < 0 || (e.shiftKey ? index === 0 : index === controls.length - 1))) {
+      e.preventDefault()
+      controls[e.shiftKey ? controls.length - 1 : 0].focus()
+    }
+    return
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey || e.target?.isContentEditable) return
   if (e.target && /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target.tagName)) return
   switch (e.code) {
     case 'Space': e.preventDefault(); togglePlay(); break
@@ -1083,11 +1091,6 @@ function onKeyDown(e) {
     case 'KeyL': toggleLoop(); break
     case 'KeyS': screenshot(); break
     case 'KeyC': toggleSubtitle(); break
-    case 'Escape':
-      if (activeMenu.value) activeMenu.value = ''
-      else if (isFullscreen.value) toggleFullscreen()
-      else if (!isFullscreen.value) emit('close')
-      break
   }
   showControls.value = true
   scheduleHideControls()
@@ -1110,7 +1113,7 @@ function scheduleHideControls() {
   if (controlsTimer) clearTimeout(controlsTimer)
   if (!playing.value) return
   controlsTimer = setTimeout(() => {
-    if (!activeMenu.value) showControls.value = false
+    if (!activeMenu.value && !containerEl.value?.querySelector('.pp-bottom:hover, .pp-bottom:focus-within, .pp-topbar:hover, .pp-topbar:focus-within')) showControls.value = false
   }, 2600)
 }
 
@@ -1120,7 +1123,7 @@ function onMouseMove() {
 }
 
 function onMouseLeave() {
-  if (playing.value && !activeMenu.value) showControls.value = false
+  if (playing.value && !activeMenu.value && !containerEl.value?.querySelector(':focus-within')) showControls.value = false
 }
 
 function onProgressPointerMove(event) {
@@ -1136,7 +1139,7 @@ function onProgressPointerMove(event) {
 function onProgressPointerLeave() { scrubVisible.value = false }
 
 function onWheel(event) {
-  if (event.target?.closest?.('.pp-pop')) return
+  if (event.target?.closest?.('.pp-pop, .pp-bottom, .pp-topbar')) return
   if (Math.abs(event.deltaY) < 1) return
   const el = containerEl.value
   const half = el ? el.getBoundingClientRect().width / 2 : window.innerWidth / 2
@@ -1174,7 +1177,11 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
     <div
       ref="containerEl"
       class="player-panel"
-      :class="{ 'cursor-hidden': !showControls && playing, fullscreen: isFullscreen, [`fs-anim-${fsAnim}`]: !!fsAnim }"
+      :class="{ 'cursor-hidden': !showControls && playing, fullscreen: isFullscreen }"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="'视频预览：' + file.name"
+      tabindex="-1"
       :style="{ '--subtitle-scale': subtitleScale }"
       @mousemove="onMouseMove"
       @mouseleave="onMouseLeave"
@@ -1258,14 +1265,13 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
         </transition>
       </div>
 
-      <header class="pp-topbar" :class="{ hidden: !showControls && playing }">
+      <header class="pp-topbar" :class="{ hidden: isFullscreen && !showControls && playing }" @focusin="onMouseMove" @focusout="scheduleHideControls">
+        <div class="pp-media-mark"><UiIcon name="video" :size="20" /></div>
         <div class="pp-file-meta pp-window-drag">
           <div class="pp-title" :title="file.name">{{ file.name }}</div>
           <div class="pp-sub">{{ currentQualityLabel }}<span v-if="episodeFiles.length > 1"> · 第 {{ episodeIndex + 1 }} 集 / 共 {{ episodeFiles.length }} 集</span></div>
         </div>
         <div class="pp-top-actions">
-          <button type="button" class="pp-btn" title="截图 (S)" @click="screenshot"><UiIcon name="camera" :size="19" /></button>
-          <button type="button" class="pp-btn" :class="{ active: pipActive }" title="画中画 (P)" @click="togglePip"><UiIcon name="picture-in-picture" :size="20" /></button>
           <div v-if="!isFullscreen" class="pp-window-controls" aria-label="窗口控制">
             <button type="button" class="pp-btn pp-win-btn" title="最小化" aria-label="最小化窗口" @click="winMinimise"><UiIcon name="window-minimize" :size="14" /></button>
             <button type="button" class="pp-btn pp-win-btn" :title="winMax ? '还原窗口' : '最大化窗口'" :aria-label="winMax ? '还原窗口' : '最大化窗口'" @click="winToggleMax"><UiIcon :name="winMax ? 'window-restore' : 'window-maximize'" :size="14" /></button>
@@ -1277,7 +1283,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
         </div>
       </header>
 
-      <section v-if="!loading && !error" class="pp-bottom" :class="{ hidden: !showControls && playing }">
+      <section v-if="!loading && !error" class="pp-bottom" :class="{ hidden: isFullscreen && !showControls && playing }" @focusin="onMouseMove" @focusout="scheduleHideControls" aria-label="播放控制">
         <div
           ref="progressEl"
           class="pp-progress"
@@ -1288,7 +1294,6 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
           <div class="pp-progress-buffer"></div>
           <div class="pp-progress-fill"><span class="pp-progress-thumb"></span></div>
           <div v-if="scrubVisible" class="pp-scrub" :style="{ left: scrubX + '%' }">
-            <img v-if="thumbnailUrl" :src="thumbnailUrl" alt="" />
             <span>{{ fmtTime(scrubTime) }}</span>
           </div>
           <input type="range" class="pp-progress-input" min="0" :max="duration || 0" step="0.1" :value="position" aria-label="播放进度" @input="onSeekInput" />
@@ -1296,11 +1301,9 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 
         <div class="pp-controls">
           <div class="pp-group">
-            <button type="button" class="pp-btn pp-skip pp-episode-nav" :disabled="episodeFiles.length <= 1 || episodeIndex <= 0" :title="episodeFiles.length <= 1 || episodeIndex <= 0 ? '没有上一集' : '上一集'" @click="switchEpisode(-1)"><UiIcon name="back" :size="19" /></button>
-            <button type="button" class="pp-btn pp-skip" :title="`快退 ${seekStep}s (←)`" @click="seek(-seekStep)"><UiIcon name="rewind" :size="21" /></button>
+            <button type="button" class="pp-btn pp-skip pp-episode-nav" :disabled="episodeFiles.length <= 1 || episodeIndex <= 0" :title="episodeFiles.length <= 1 || episodeIndex <= 0 ? '没有上一集' : '上一集'" @click="switchEpisode(-1)"><UiIcon name="skip-back" :size="20" /></button>
             <button type="button" class="pp-btn pp-play-main" :title="playing ? '暂停 (空格)' : '播放 (空格)'" @click="togglePlay"><UiIcon :name="playing ? 'pause' : 'play'" :size="24" /></button>
-            <button type="button" class="pp-btn pp-skip" :title="`快进 ${seekStep}s (→)`" @click="seek(seekStep)"><UiIcon name="fast-forward" :size="21" /></button>
-            <button type="button" class="pp-btn pp-skip pp-episode-nav" :disabled="episodeFiles.length <= 1 || episodeIndex < 0 || episodeIndex >= episodeFiles.length - 1" :title="episodeFiles.length <= 1 || episodeIndex < 0 || episodeIndex >= episodeFiles.length - 1 ? '没有下一集' : '下一集'" @click="switchEpisode(1)"><UiIcon name="forward" :size="19" /></button>
+            <button type="button" class="pp-btn pp-skip pp-episode-nav" :disabled="episodeFiles.length <= 1 || episodeIndex < 0 || episodeIndex >= episodeFiles.length - 1" :title="episodeFiles.length <= 1 || episodeIndex < 0 || episodeIndex >= episodeFiles.length - 1 ? '没有下一集' : '下一集'" @click="switchEpisode(1)"><UiIcon name="skip-forward" :size="20" /></button>
             <div class="pp-vol">
               <button type="button" class="pp-btn" :title="muted ? '取消静音 (M)' : '静音 (M)'" @click="toggleMute"><UiIcon :name="muted || volume === 0 ? 'volume-x' : 'volume'" :size="20" /></button>
               <div class="pp-vol-slider">
@@ -1379,7 +1382,18 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
               </div>
             </div>
 
-            <button type="button" class="pp-btn" :class="{ active: looping }" title="循环播放 (L)" @click="toggleLoop"><UiIcon name="refresh" :size="18" /></button>
+            <div class="pp-menu-root">
+              <button type="button" class="pp-btn" :class="{ active: activeMenu === 'more' }" title="更多播放选项" :aria-expanded="activeMenu === 'more'" @click.stop="toggleMenu('more')"><UiIcon name="more-horizontal" :size="20" /></button>
+              <div v-if="activeMenu === 'more'" class="pp-pop">
+                <div class="pp-pop-title">播放选项</div>
+                <button type="button" class="pp-pop-item" @click="screenshot(); closeMenu()"><UiIcon name="camera" :size="18" />保存截图<span class="pp-shortcut">S</span></button>
+                <button type="button" class="pp-pop-item" :class="{ on: pipActive }" @click="togglePip(); closeMenu()"><UiIcon name="picture-in-picture" :size="18" />画中画<span class="pp-shortcut">P</span></button>
+                <button type="button" class="pp-pop-item" :class="{ on: looping }" @click="toggleLoop()"><UiIcon name="repeat" :size="18" />循环播放<span class="pp-shortcut">{{ looping ? '开启' : '关闭' }}</span></button>
+                <div class="pp-pop-divider"></div>
+                <button type="button" class="pp-pop-item" @click="seek(-seekStep); closeMenu()"><UiIcon name="rewind" :size="18" />快退 {{ seekStep }} 秒<span class="pp-shortcut">←</span></button>
+                <button type="button" class="pp-pop-item" @click="seek(seekStep); closeMenu()"><UiIcon name="fast-forward" :size="18" />快进 {{ seekStep }} 秒<span class="pp-shortcut">→</span></button>
+              </div>
+            </div>
             <button type="button" class="pp-btn" :title="isFullscreen ? '退出全屏 (F)' : '全屏 (F)'" @click="toggleFullscreen"><UiIcon :name="isFullscreen ? 'minimize' : 'maximize'" :size="20" /></button>
           </div>
         </div>
@@ -1390,553 +1404,113 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 </template>
 
 <style scoped>
-/* —— Netflix / Apple TV 沉浸路线：渐变遮罩、细线进度、玻璃二级菜单 —— */
+/* 与主界面共用表面、文字与强调色；视频画布保持中性黑。 */
 .player-panel {
-  --pp-white: rgba(255, 255, 255, .92);
-  --pp-dim: rgba(255, 255, 255, .55);
-  --pp-glass: rgba(16, 16, 16, .78);
-  --pp-hover: rgba(255, 255, 255, .12);
-  --pp-control-bg: rgba(255, 255, 255, .96);
-  --pp-control-hover: #ffffff;
-  --pp-control-fg: #172033;
-  --pp-control-border: rgba(15, 23, 42, .28);
-  --pp-control-shadow: 0 8px 20px rgba(0, 0, 0, .24);
-  --pp-control-active: #6d28d9;
-  --pp-control-active-fg: #ffffff;
+  --pp-white: var(--text-primary);
+  --pp-dim: var(--text-secondary);
+  --pp-glass: var(--bg-elevated);
+  --pp-hover: var(--bg-hover);
+  --pp-control-active: var(--color-primary);
   --subtitle-scale: 1;
-  position: fixed;
-  z-index: 520;
-  inset: 0;
-  overflow: hidden;
-  isolation: isolate;
-  background: #000;
-  color: #fff;
-  font-family: inherit;
-  letter-spacing: 0;
-  user-select: none;
+  position: fixed; z-index: 520; inset: 0;
+  overflow: hidden; isolation: isolate;
+  color: var(--text-primary); background: var(--bg-surface);
+  font-family: inherit; user-select: none;
 }
-:global(html.dark) .player-panel {
-  --pp-control-bg: rgba(23, 21, 33, .95);
-  --pp-control-hover: #2d293d;
-  --pp-control-fg: #f8f7ff;
-  --pp-control-border: rgba(255, 255, 255, .28);
-  --pp-control-shadow: 0 10px 24px rgba(0, 0, 0, .42);
-  --pp-control-active: #a78bfa;
-  --pp-control-active-fg: #17121f;
-}
-.player-panel.cursor-hidden { cursor: none; }
-
-.pp-stage {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #000;
-}
-.pp-video { width: 100%; height: 100%; object-fit: contain; }
-.player-panel video::cue {
-  color: #fff;
-  background: rgba(0, 0, 0, .55);
-  text-shadow: 0 1px 4px rgba(0, 0, 0, .9);
-  font-size: calc(1em * var(--subtitle-scale));
-}
-
-/* 全屏切换过渡：进入由小放大，退出由大收小 */
-.player-panel.fs-anim-in .pp-stage { animation: pp-fs-in 340ms cubic-bezier(.22, .9, .3, 1) both; }
-.player-panel.fs-anim-out .pp-stage { animation: pp-fs-out 340ms cubic-bezier(.22, .9, .3, 1) both; }
-@keyframes pp-fs-in { from { opacity: .25; transform: scale(.93); } to { opacity: 1; transform: scale(1); } }
-@keyframes pp-fs-out { from { opacity: .25; transform: scale(1.06); } to { opacity: 1; transform: scale(1); } }
-
-/* SUP 字幕覆盖层：与视频同区，16:9 锁定由 JS 计算 */
-.pp-sup-canvas {
-  position: absolute;
-  z-index: 1;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
+.pp-stage { position: absolute; inset: 48px 0 92px; display: flex; align-items: center; justify-content: center; background: #08090c; overflow: hidden; }
+.pp-video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.pp-video::cue { color: #fff; background: rgba(0,0,0,.65); font-size: calc(1em * var(--subtitle-scale)); }
+.pp-sup-canvas { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .pp-hidden-input { display: none; }
-.pp-pop-item-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pp-pop-tag {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: 5px;
-  color: rgba(255, 255, 255, .75);
-  background: rgba(255, 255, 255, .14);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .05em;
-}
-.pp-pop-empty { padding: 8px 10px; color: var(--pp-dim); font-size: 12px; }
-
-/* 状态层 */
-.pp-state {
-  position: absolute;
-  z-index: 2;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  padding: 24px;
-  color: var(--pp-dim);
-  font-size: 14px;
-  text-align: center;
-  pointer-events: none;
-}
-.pp-buffering-state {
-  background: rgba(0, 0, 0, 0.28);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
-  transition: all 200ms ease;
-}
-.pp-loader-box {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 18px 24px;
-  background: rgba(20, 20, 26, 0.75);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 16px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
-}
-.pp-loader-text {
-  font-size: 13px;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.88);
-}
-.pp-loader-speed {
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-primary, #a78bfa);
-  font-weight: 600;
-  background: rgba(167, 139, 250, 0.15);
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(167, 139, 250, 0.3);
-}
-.pp-spinner {
-  width: 36px;
-  height: 36px;
-  border: 3px solid rgba(255, 255, 255, .15);
-  border-top-color: var(--color-primary, #a78bfa);
-  border-right-color: var(--color-primary, #a78bfa);
-  border-radius: 50%;
-  animation: pp-spin 700ms cubic-bezier(0.4, 0, 0.2, 1) infinite;
-}
-@keyframes pp-spin { to { transform: rotate(360deg); } }
-
-/* 顶栏独立窗口三件套按钮 */
-.pp-window-controls {
-  display: inline-flex;
-  overflow: hidden;
-  border: 1px solid var(--pp-control-border);
-  border-radius: 8px;
-  background: var(--pp-control-bg);
-  box-shadow: var(--pp-control-shadow);
-}
-.pp-error { color: rgba(255, 130, 130, .95); }
-.pp-error-text { max-width: 480px; line-height: 1.6; }
-.pp-retry {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 34px;
-  padding: 0 16px;
-  border: 1px solid rgba(255, 255, 255, .28);
-  border-radius: 999px;
-  color: #fff;
-  background: transparent;
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background .16s ease, border-color .16s ease;
-}
-.pp-retry:hover { background: rgba(255, 255, 255, .12); border-color: rgba(255, 255, 255, .5); }
-.pp-error-actions { display: flex; align-items: center; gap: 10px; pointer-events: auto; }
-.pp-retry-solid {
-  background: var(--color-primary-strong, #7c3aed);
-  border-color: transparent;
-  color: #fff;
-}
-.pp-retry-solid:hover { background: var(--color-primary-hover, #6d28d9); border-color: transparent; }
-
-/* 悬浮大按钮 */
-.pp-center {
-  position: absolute;
-  z-index: 2;
-  left: 50%;
-  top: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 78px;
-  height: 78px;
-  padding: 0 0 0 4px;
-  transform: translate(-50%, -50%);
-  border: 2px solid rgba(255, 255, 255, .9);
-  border-radius: 50%;
-  color: #fff;
-  background: rgba(0, 0, 0, .6);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  cursor: pointer;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, .5);
-  transition: transform .18s ease, background .18s ease;
-}
-.pp-center:hover { transform: translate(-50%, -50%) scale(1.07); background: rgba(0, 0, 0, .72); }
-.pp-center-fade-enter-active, .pp-center-fade-leave-active { transition: opacity .22s ease; }
-.pp-center-fade-enter-from, .pp-center-fade-leave-to { opacity: 0; }
-
-/* 顶栏 / 底栏：纯渐变遮罩，无实体条 */
-.pp-topbar, .pp-bottom {
-  position: absolute;
-  z-index: 3;
-  left: 0;
-  right: 0;
-  display: flex;
-  transition: opacity .3s ease, transform .3s ease;
-}
-.pp-topbar {
-  top: 0;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 20px 24px 48px;
-  background: linear-gradient(180deg, rgba(0, 0, 0, .68), rgba(0, 0, 0, .28) 55%, transparent);
-  --wails-draggable: drag;
-}
-.pp-window-drag { --wails-draggable: drag; }
-.pp-topbar button, .pp-bottom, .pp-bottom button, .pp-bottom input, .pp-pop { --wails-draggable: no-drag; }
-.pp-topbar.hidden { opacity: 0; transform: translateY(-12px); pointer-events: none; }
-.pp-bottom.hidden { opacity: 0; transform: translateY(12px); pointer-events: none; }
-
-.pp-file-meta { min-width: 0; flex: 1; padding-top: 2px; }
-.pp-title {
-  overflow: hidden;
-  color: var(--pp-white);
-  font-size: 15.5px;
-  font-weight: 600;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-shadow: 0 1px 8px rgba(0, 0, 0, .6);
-}
-.pp-sub { margin-top: 2px; color: var(--pp-dim); font-size: 12px; }
-.pp-top-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-
-/* 通用图标按钮 */
-.pp-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--pp-control-border);
-  border-radius: 10px;
-  color: var(--pp-control-fg);
-  background: var(--pp-control-bg);
-  cursor: pointer;
-  flex-shrink: 0;
-  box-shadow: var(--pp-control-shadow);
-  transition: color .15s ease, background .15s ease, border-color .15s ease, transform .15s ease;
-}
-.pp-btn:hover:not(:disabled) { color: var(--pp-control-fg); background: var(--pp-control-hover); }
-.pp-btn:active:not(:disabled) { transform: scale(.92); }
-.pp-btn:focus-visible { outline: 2px solid var(--pp-control-active); outline-offset: 2px; }
-.pp-btn:disabled { color: rgba(255, 255, 255, .32); background: rgba(0, 0, 0, .25); border-color: rgba(255, 255, 255, .13); box-shadow: none; cursor: not-allowed; }
-.pp-btn.active { color: var(--pp-control-active-fg); background: var(--pp-control-active); border-color: var(--pp-control-active); }
-.pp-btn.pp-win-btn {
-  width: 40px;
-  height: 34px;
-  border: 0;
-  border-left: 1px solid var(--pp-control-border);
-  border-radius: 0;
-  box-shadow: none;
-}
-.pp-window-controls .pp-win-btn:first-child { border-left: 0; }
-.pp-btn.pp-win-close:hover:not(:disabled) { color: #ffffff; background: #c43d4b; border-color: #c43d4b; }
-.pp-text-btn {
-  width: auto;
-  min-width: 40px;
-  padding: 0 10px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* 底栏 */
-.pp-bottom {
-  bottom: 0;
-  flex-direction: column;
-  align-items: stretch;
-  padding: 48px 24px 14px;
-  background: linear-gradient(0deg, rgba(0, 0, 0, .78), rgba(0, 0, 0, .34) 55%, transparent);
-}
-
-/* 细线进度条 */
-.pp-progress { position: relative; height: 16px; cursor: pointer; }
-.pp-progress::before, .pp-progress-buffer, .pp-progress-fill {
-  position: absolute;
-  top: 50%;
-  right: 0;
-  left: 0;
-  height: 3px;
-  transform: translateY(-50%);
-  border-radius: 999px;
-  transition: height .14s ease;
-}
-.pp-progress::before { content: ''; background: rgba(255, 255, 255, .22); }
-.pp-progress-buffer { right: auto; width: var(--buffered); background: rgba(255, 255, 255, .38); }
-.pp-progress-fill { right: auto; width: var(--played); background: #fff; }
-.pp-progress:hover::before, .pp-progress:hover .pp-progress-buffer, .pp-progress:hover .pp-progress-fill { height: 5px; }
-.pp-progress-thumb {
-  position: absolute;
-  top: 50%;
-  right: -6px;
-  width: 12px;
-  height: 12px;
-  transform: translateY(-50%) scale(0);
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 6px rgba(0, 0, 0, .5);
-  transition: transform .14s ease;
-}
-.pp-progress:hover .pp-progress-thumb { transform: translateY(-50%) scale(1); }
+.player-panel.cursor-hidden .pp-stage { cursor: none; }
+.pp-topbar { position: absolute; z-index: 3; top: 0; left: 0; right: 0; height: 48px; display: flex; align-items: center; gap: 12px; padding: 0 0 0 18px; background: var(--bg-surface); border-bottom: 1px solid var(--border-light); --wails-draggable: drag; }
+.pp-media-mark { display: flex; align-items: center; color: var(--color-primary); }
+.pp-file-meta { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 16px; }
+.pp-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; line-height: 1.5; }
+.pp-sub { flex-shrink: 0; color: var(--pp-dim); font-size: 11px; }
+.pp-top-actions { display: flex; align-self: stretch; flex-shrink: 0; }
+.pp-window-controls { display: flex; align-items: stretch; --wails-draggable: no-drag; }
+.pp-btn { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--radius-sm); color: var(--text-secondary); background: transparent; font: inherit; cursor: pointer; transition: background 140ms ease, color 140ms ease; --wails-draggable: no-drag; }
+.pp-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.pp-btn:disabled { opacity: .3; cursor: default; }
+.pp-btn.active { background: var(--listselectbg); color: var(--color-primary); }
+.pp-btn:focus-visible, .pp-tool:focus-visible, .pp-pop-item:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
+.pp-btn.pp-win-btn { width: 46px; height: 100%; border-radius: 0; }
+.pp-btn.pp-win-close:hover { background: #c43d4b; color: #fff; }
+.pp-text-btn { width: auto; min-width: 42px; padding: 0 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.pp-bottom { position: absolute; z-index: 3; bottom: 0; left: 0; right: 0; height: 92px; display: flex; flex-direction: column; justify-content: center; gap: 6px; padding: 8px 24px 12px; background: var(--bg-surface); border-top: 1px solid var(--border-light); --wails-draggable: no-drag; }
+.pp-progress { position: relative; height: 18px; flex-shrink: 0; cursor: pointer; }
+.pp-progress::before, .pp-progress-buffer, .pp-progress-fill { position: absolute; top: 50%; left: 0; right: 0; height: 3px; transform: translateY(-50%); border-radius: 8px; }
+.pp-progress::before { content: ''; background: var(--bg-subtle); }
+.pp-progress-buffer { right: auto; width: var(--buffered); background: var(--control-border); }
+.pp-progress-fill { right: auto; width: var(--played); background: var(--color-primary); }
+.pp-progress-thumb { position: absolute; top: 50%; right: -5px; width: 10px; height: 10px; transform: translateY(-50%); border-radius: 50%; background: var(--color-primary); opacity: 0; transition: opacity 140ms ease; }
+.pp-progress:hover .pp-progress-thumb, .pp-progress:focus-within .pp-progress-thumb { opacity: 1; }
+.pp-progress:focus-within { outline: 2px solid var(--border-focus); outline-offset: 2px; border-radius: 4px; }
 .pp-progress-input { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-.pp-scrub {
-  position: absolute;
-  z-index: 5;
-  bottom: 20px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 5px;
-  padding: 5px;
-  transform: translateX(-50%);
-  border: 1px solid rgba(255, 255, 255, .16);
-  border-radius: 10px;
-  background: var(--pp-glass);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  box-shadow: 0 14px 36px rgba(0, 0, 0, .5);
-  pointer-events: none;
-}
-.pp-scrub img { display: block; width: 148px; height: 83px; object-fit: cover; border-radius: 6px; }
-.pp-scrub span { color: #fff; font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
-
-/* 控制行 */
-.pp-controls { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; }
-.pp-group { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.pp-scrub { position: absolute; bottom: 24px; padding: 6px 10px; transform: translateX(-50%); color: var(--text-primary); background: var(--bg-elevated); border: 1px solid var(--border-light); border-radius: var(--radius-sm); box-shadow: var(--shadow-sm); font-size: 12px; font-variant-numeric: tabular-nums; pointer-events: none; }
+.pp-controls, .pp-group { display: flex; align-items: center; min-width: 0; }
+.pp-controls { justify-content: space-between; gap: 16px; }
+.pp-group { gap: 6px; }
 .pp-right { justify-content: flex-end; gap: 4px; }
-.pp-play-main { width: 46px; height: 46px; border-radius: 50%; color: var(--pp-control-active-fg); background: var(--pp-control-active); border-color: var(--pp-control-active); }
-.pp-play-main:hover:not(:disabled) { color: var(--pp-control-active-fg); background: var(--pp-control-active); transform: scale(1.08); }
-.pp-time {
-  margin-left: 10px;
-  color: rgba(255, 255, 255, .78);
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, .5);
-}
-.pp-time i { margin: 0 6px; color: rgba(255, 255, 255, .32); font-style: normal; }
-
-/* 音量：悬停展开横向滑杆 */
-.pp-vol { display: flex; align-items: center; }
-.pp-vol-slider {
-  width: 0;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  transition: width .2s ease;
-}
-.pp-vol:hover .pp-vol-slider, .pp-vol-slider:focus-within { width: 132px; }
-.pp-vol-slider input {
-  width: 84px;
-  margin-left: 2px;
-  height: 3px;
-  appearance: none;
-  -webkit-appearance: none;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #fff var(--vol-fill, 50%), rgba(255, 255, 255, .28) var(--vol-fill, 50%));
-  cursor: pointer;
-}
-.pp-vol-slider input::-webkit-slider-thumb {
-  width: 12px;
-  height: 12px;
-  appearance: none;
-  -webkit-appearance: none;
-  border: 0;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 5px rgba(0, 0, 0, .5);
-}
-.pp-vol-value {
-  margin-left: 8px;
-  min-width: 36px;
-  color: rgba(255, 255, 255, .85);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* 屏幕提示药丸 */
-.pp-osd {
-  position: absolute;
-  z-index: 4;
-  top: 84px;
-  left: 50%;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  height: 38px;
-  padding: 0 14px;
-  transform: translateX(-50%);
-  border: 1px solid rgba(255, 255, 255, .12);
-  border-radius: 999px;
-  color: #fff;
-  background: rgba(0, 0, 0, .6);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
-  font-size: 12.5px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  pointer-events: none;
-}
-.pp-osd-text { white-space: nowrap; }
-.pp-osd-bar {
-  width: 64px;
-  height: 3px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, .25);
-}
-.pp-osd-bar i { display: block; height: 100%; border-radius: 999px; background: #fff; transition: width .1s ease; }
-.pp-osd-enter-active, .pp-osd-leave-active { transition: opacity .22s ease, transform .22s ease; }
-.pp-osd-enter-from, .pp-osd-leave-to { opacity: 0; transform: translateX(-50%) translateY(-6px); }
-
-/* 二级弹出菜单：玻璃拟态 */
+.pp-play-main { width: 38px; height: 38px; border-radius: 50%; background: var(--color-primary); color: #fff; }
+.pp-play-main:hover:not(:disabled) { background: var(--color-primary); color: #fff; filter: brightness(1.08); }
+.pp-play-main :deep(svg) { width: 20px; height: 20px; }
+.pp-time { margin-left: 8px; color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pp-time i { margin: 0 7px; color: var(--text-tertiary); font-style: normal; }
+.pp-vol { display: flex; align-items: center; margin-left: 8px; }
+.pp-vol-slider { display: flex; align-items: center; width: 0; overflow: hidden; transition: width 160ms ease; }
+.pp-vol:hover .pp-vol-slider, .pp-vol:focus-within .pp-vol-slider { width: 112px; }
+.pp-vol-slider input { width: 64px; height: 3px; margin: 0 4px; accent-color: var(--color-primary); cursor: pointer; }
+.pp-vol-value { width: 36px; color: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+.pp-state { position: absolute; z-index: 2; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 32px; color: #d8dce5; font-size: 13px; text-align: center; pointer-events: none; }
+.pp-loader-box { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px; }
+.pp-loader-text { font-size: 13px; }
+.pp-loader-speed { color: #aeb5c4; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pp-spinner { width: 28px; height: 28px; border: 2px solid #ffffff24; border-top-color: #fff; border-radius: 50%; animation: pp-spin .8s linear infinite; }
+@keyframes pp-spin { to { transform: rotate(360deg); } }
+.pp-error-text { max-width: 520px; line-height: 1.7; overflow-wrap: anywhere; }
+.pp-error-actions { display: flex; gap: 10px; pointer-events: auto; }
+.pp-retry { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 1px solid #ffffff38; border-radius: 8px; color: #fff; background: #ffffff0c; cursor: pointer; font: inherit; }
+.pp-retry:hover { background: #ffffff20; }
+.pp-retry-solid { background: var(--color-primary); border-color: transparent; }
+.pp-center { position: absolute; z-index: 2; top: 50%; left: 50%; transform: translate(-50%,-50%); display: flex; align-items: center; justify-content: center; width: 64px; height: 64px; padding: 0; border: 1px solid #ffffff40; border-radius: 50%; color: #fff; background: #12141bcc; cursor: pointer; transition: background 160ms ease; }
+.pp-center:hover { background: #252934e8; }
+.pp-center :deep(svg) { width: 26px; height: 26px; }
+.pp-center-fade-enter-active, .pp-center-fade-leave-active { transition: opacity 160ms ease; }
+.pp-center-fade-enter-from, .pp-center-fade-leave-to { opacity: 0; }
+.pp-osd { position: absolute; z-index: 4; top: 24px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid #ffffff24; border-radius: 10px; background: #171b24ed; color: #fff; font-size: 12px; pointer-events: none; }
+.pp-osd-bar { width: 64px; height: 3px; background: #ffffff30; border-radius: 4px; overflow: hidden; }
+.pp-osd-bar i { display: block; height: 100%; background: #fff; }
+.pp-osd-enter-active, .pp-osd-leave-active { transition: opacity 160ms ease; }
+.pp-osd-enter-from, .pp-osd-leave-to { opacity: 0; }
 .pp-menu-root { position: relative; }
-.pp-pop {
-  position: absolute;
-  z-index: 20;
-  right: 0;
-  bottom: calc(100% + 14px);
-  min-width: 208px;
-  max-width: 320px;
-  max-height: min(46vh, 380px);
-  overflow-y: auto;
-  padding: 8px;
-  border: 1px solid rgba(255, 255, 255, .1);
-  border-radius: 14px;
-  background: var(--pp-glass);
-  backdrop-filter: blur(28px) saturate(150%);
-  -webkit-backdrop-filter: blur(28px) saturate(150%);
-  box-shadow: 0 20px 56px rgba(0, 0, 0, .6);
-  animation: pp-pop-in .18s cubic-bezier(.2, .9, .3, 1.2);
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, .25) transparent;
-}
-.pp-pop::-webkit-scrollbar { width: 5px; }
-.pp-pop::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(255, 255, 255, .22); }
-@keyframes pp-pop-in { from { opacity: 0; transform: translateY(8px) scale(.96); } to { opacity: 1; transform: none; } }
-.pp-pop-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px 8px;
-  color: var(--pp-dim);
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: .04em;
-}
-.pp-pop-count { font-variant-numeric: tabular-nums; }
-.pp-pop-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 36px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 9px;
-  color: rgba(255, 255, 255, .85);
-  background: transparent;
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-  transition: background .13s ease;
-}
-.pp-pop-item:hover { background: var(--pp-hover); color: #fff; }
-.pp-pop-item.on { color: #fff; font-weight: 600; }
-.pp-pop-check { display: inline-flex; width: 16px; flex-shrink: 0; color: #fff; }
-.pp-pop-divider { height: 1px; margin: 6px 4px; background: rgba(255, 255, 255, .1); }
+.pp-pop { position: absolute; z-index: 20; right: 0; bottom: calc(100% + 14px); min-width: 208px; max-width: min(320px, calc(100vw - 32px)); max-height: min(52vh, 380px); overflow-y: auto; padding: 6px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-elevated); color: var(--text-primary); box-shadow: var(--shadow-lg); scrollbar-width: thin; animation: pp-pop-in 140ms ease; }
+@keyframes pp-pop-in { from { opacity: 0; transform: translateY(4px); } }
+.pp-pop-title { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; font-size: 11px; color: var(--text-tertiary); }
+.pp-pop-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.pp-pop-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.pp-pop-item.on { background: var(--listselectbg); color: var(--color-primary); }
+.pp-pop-check { display: inline-flex; flex-shrink: 0; width: 16px; }
+.pp-pop-item-label, .pp-episode-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-pop-tag { font-size: 10px; padding: 2px 4px; background: var(--bg-subtle); border-radius: 4px; }
+.pp-pop-divider { height: 1px; margin: 5px 8px; background: var(--border-light); }
+.pp-pop-empty { padding: 10px; font-size: 12px; color: var(--text-tertiary); }
 .pp-pop-list { width: 300px; }
-.pp-episode { gap: 10px; }
-.pp-episode-no {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 22px;
-  height: 22px;
-  padding: 0 4px;
-  border-radius: 6px;
-  color: var(--pp-dim);
-  background: rgba(255, 255, 255, .08);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
-}
-.pp-pop-item.on .pp-episode-no { color: #000; background: #fff; }
-.pp-episode-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* 字幕工具行 */
-.pp-pop-tools { display: flex; align-items: center; gap: 6px; padding: 4px 10px 6px; }
-.pp-pop-tools-label { color: var(--pp-dim); font-size: 11.5px; }
-.pp-tool {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 28px;
-  height: 26px;
-  padding: 0 6px;
-  border: 1px solid rgba(255, 255, 255, .16);
-  border-radius: 7px;
-  color: rgba(255, 255, 255, .85);
-  background: rgba(255, 255, 255, .06);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background .13s ease;
-}
-.pp-tool:hover { background: rgba(255, 255, 255, .16); color: #fff; }
-.pp-tool-wide { padding: 0 10px; margin-left: 2px; }
-.pp-tool-value { min-width: 38px; color: rgba(255, 255, 255, .7); font-size: 11.5px; text-align: center; font-variant-numeric: tabular-nums; }
-
-/* 响应式 */
-@media (max-width: 760px) {
-  .pp-topbar { padding: 14px 14px 40px; }
-  .pp-bottom { padding: 40px 14px 10px; }
-  .pp-skip, .pp-vol-slider { display: none; }
-  .pp-scrub img { width: 112px; height: 63px; }
-  .pp-pop-list { width: min(300px, calc(100vw - 28px)); }
-}
-@media (max-width: 560px) {
-  .pp-sub, .pp-text-btn { display: none; }
-  .pp-time { margin-left: 6px; font-size: 11.5px; }
-  .pp-btn { width: 36px; height: 36px; }
-  .pp-play-main { width: 42px; height: 42px; }
-  .pp-center { width: 66px; height: 66px; }
-  .pp-title { font-size: 14px; }
-}
+.pp-episode-no { min-width: 22px; color: var(--text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; }
+.pp-pop-item.on .pp-episode-no { color: inherit; }
+.pp-shortcut { margin-left: auto; color: var(--text-tertiary); font-size: 11px; }
+.pp-pop-tools { display: flex; align-items: center; gap: 6px; padding: 8px; white-space: nowrap; }
+.pp-pop-tools-label, .pp-tool-value { color: var(--text-secondary); font-size: 11px; }
+.pp-tool { min-width: 26px; height: 28px; padding: 0 6px; border: 1px solid var(--border-light); border-radius: 6px; background: var(--bg-surface); color: var(--text-primary); font: inherit; font-size: 12px; cursor: pointer; }
+.pp-tool:hover { background: var(--bg-hover); }
+/* 全屏时保留画布空间，工具栏在鼠标活动或键盘聚焦时显示。 */
+.player-panel.fullscreen { --bg-surface: #12151bef; --bg-elevated: #20242e; --bg-hover: #ffffff12; --bg-subtle: #ffffff16; --text-primary: #f3f4f7; --text-secondary: #c5c9d3; --text-tertiary: #9ba2b1; --border-light: #ffffff18; --control-border: #ffffff38; --listselectbg: #ffffff18; }
+.fullscreen .pp-stage { inset: 0; }
+.fullscreen .pp-topbar, .fullscreen .pp-bottom { transition: opacity 200ms ease; }
+.fullscreen .hidden { opacity: 0; pointer-events: none; }
+.fullscreen .hidden:focus-within { opacity: 1; pointer-events: auto; }
+@media (max-width: 900px) { .pp-sub { display: none; } .pp-vol:hover .pp-vol-slider, .pp-vol:focus-within .pp-vol-slider { width: 76px; } .pp-vol-value { display: none; } }
+@media (max-width: 680px) { .pp-bottom { padding-right: 12px; padding-left: 12px; } .pp-group { gap: 2px; } .pp-controls { gap: 4px; } .pp-vol { margin-left: 0; } .pp-time { font-size: 11px; margin-left: 2px; } .pp-text-btn { padding: 0 6px; min-width: 34px; } .pp-episode-nav { display: none; } }
+@media (max-width: 480px) { .pp-bottom { height: 130px; } .pp-stage { bottom: 130px; } .pp-controls { flex-wrap: wrap; justify-content: center; gap: 4px; } .pp-right { justify-content: center; width: 100%; } .pp-title { font-size: 12px; } .pp-media-mark { display: none; } .pp-pop { position: fixed; left: 12px; right: 12px; bottom: 128px; max-width: none; width: auto; } }
 </style>

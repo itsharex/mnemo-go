@@ -1,12 +1,8 @@
 <script setup>
-import { ref, onMounted, computed, watch, nextTick, onBeforeUnmount } from 'vue'
+import { ref, onMounted, computed, watch, nextTick, onBeforeUnmount, defineAsyncComponent } from 'vue'
 import { listAccounts, listProviders, removeAccount, renameMountedAccount, onEvent, GetSettings, SaveSettings, providerOf, accountName, providerIconUrl, setAccountCustomMeta as setAccountCustomMetaBackend } from './api'
 import { applyAppearance, getLastDriveSelection, setLastDriveSelection, clearLastDriveSelection, getAccountAlias, getAccountCustomIcon, setAccountCustomMeta } from './appearance'
 import PanView from './views/PanView.vue'
-import TransferView from './views/TransferView.vue'
-import ShareView from './views/ShareView.vue'
-import SyncView from './views/SyncView.vue'
-import SettingsView from './views/SettingsView.vue'
 import AccountRail from './components/AccountRail.vue'
 import AccountAvatar from './components/AccountAvatar.vue'
 import UiIcon from './components/UiIcon.vue'
@@ -19,9 +15,31 @@ import ImageCropModal from './components/ImageCropModal.vue'
 import { CheckUpdate } from './api'
 import { debug, error, errorText, info, installGlobalErrorLogging } from './logger'
 import { WindowMinimise, WindowToggleMaximise, Quit } from '../wailsjs/runtime/runtime'
+import { createNavigationHistory, installMouseNavigation } from './navigation'
 
 const tab = ref('pan')
+const pageHistory = createNavigationHistory()
+pageHistory.reset('pan')
+let restoringPage = false
+watch(tab, value => {
+  if (!restoringPage) pageHistory.record(value)
+}, { flush: 'sync' })
+function navigateMouse(direction) {
+  if (tab.value === 'pan' && panView.value?.navigateHistory?.(direction)) return
+  const destination = pageHistory.move(direction)
+  if (!destination) return
+  restoringPage = true
+  switchTab(destination)
+  restoringPage = false
+}
+function mouseNavigationBlocked() {
+  return !!document.querySelector('[role="dialog"], [aria-modal="true"], .modal-mask, .ctx-menu, .player-panel') || document.body.classList.contains('rail-drag-active')
+}
 const tabOrder = ['pan', 'transfer', 'sync', 'share', 'settings']
+const TransferView = defineAsyncComponent(() => import('./views/TransferView.vue'))
+const ShareView = defineAsyncComponent(() => import('./views/ShareView.vue'))
+const SyncView = defineAsyncComponent(() => import('./views/SyncView.vue'))
+const SettingsView = defineAsyncComponent(() => import('./views/SettingsView.vue'))
 const prevTabIdx = ref(0)
 const pageTrans = ref('page-slide-left')
 const pageComponents = { pan: PanView, transfer: TransferView, sync: SyncView, share: ShareView, settings: SettingsView }
@@ -335,6 +353,7 @@ function onQuickAction(action) {
 }
 
 onMounted(async () => {
+	const removeMouseNavigation = installMouseNavigation(window, navigateMouse, mouseNavigationBlocked)
 	info('app', 'frontend mounted')
 	window.addEventListener('contextmenu', preventNativeContextMenu, true)
 	const removeGlobalErrorLogging = installGlobalErrorLogging()
@@ -377,6 +396,7 @@ onMounted(async () => {
   nextTick(updateGlider)
   window.addEventListener('resize', updateGlider)
 	cleanupFns = () => {
+		removeMouseNavigation()
 		removeGlobalErrorLogging()
     window.removeEventListener('resize', updateGlider)
     window.removeEventListener('keydown', onKey)

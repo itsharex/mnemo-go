@@ -386,6 +386,10 @@ export function SendPan139SMS(arg1) {
   return window['go']['app']['App']['SendPan139SMS'](arg1);
 }
 
+export function SendPan189SMS(arg1, arg2) {
+  return window['go']['app']['App']['SendPan189SMS'](arg1, arg2);
+}
+
 export function SetAccountCustomMeta(arg1, arg2, arg3) {
   return window['go']['app']['App']['SetAccountCustomMeta'](arg1, arg2, arg3);
 }
@@ -396,6 +400,10 @@ export function SetupTray(arg1) {
 
 export function ShowMainWindow() {
   return window['go']['app']['App']['ShowMainWindow']();
+}
+
+export function ShowPikPakCaptcha(arg1, arg2) {
+  return window['go']['app']['App']['ShowPikPakCaptcha'](arg1, arg2);
 }
 
 export function StartSyncScheduler() {

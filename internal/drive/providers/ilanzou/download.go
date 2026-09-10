@@ -2,10 +2,12 @@ package ilanzou
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"mnemo-go/internal/drive"
 )
@@ -103,17 +105,15 @@ func resolveILanzouDownload(ctx context.Context, fileID, accountUserID, token, u
 		return downloadInfo{Error: err.Error()}, false
 	}
 	req.Header.Set("Referer", ILANZOU_CONF.Site+"/")
-	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Origin", ILANZOU_CONF.Site)
+	req.Header.Set("User-Agent", ua)
 	resp, err := manualClient.Do(req)
 	if err != nil {
 		return downloadInfo{Error: err.Error()}, false
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		if loc := resp.Header.Get("Location"); loc != "" {
-			u = loc
-		}
-	} else if resp.StatusCode >= 400 {
+	location := resp.Header.Get("Location")
+	if resp.StatusCode >= 400 {
 		text, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		msg := truncate(string(text), 200)
 		if msg == "" {
@@ -121,8 +121,39 @@ func resolveILanzouDownload(ctx context.Context, fileID, accountUserID, token, u
 		}
 		return downloadInfo{Error: msg}, resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
 	}
+	// This endpoint resolves a URL rather than serving the file. Some gateways
+	// label its JSON as text/plain; never pass an error document to the downloader.
+	if location == "" && resp.StatusCode == http.StatusOK {
+		var result map[string]any
+		decoder := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
+		decoder.UseNumber()
+		if err := decoder.Decode(&result); err != nil {
+			return downloadInfo{Error: "下载地址响应格式错误"}, false
+		}
+		location = strOf(result["url"])
+		if data := mapVal(result, "data"); location == "" && data != nil {
+			location = strOf(data["url"])
+		}
+		if location == "" {
+			code := numOf(result["code"])
+			return downloadInfo{Error: firstNonEmpty(strOf(result["msg"]), "下载接口未返回文件地址")}, code == -1 || code == -2
+		}
+	}
+	if location != "" {
+		resolved, err := url.Parse(location)
+		if err != nil {
+			return downloadInfo{Error: "下载接口返回无效地址"}, false
+		}
+		resolved = req.URL.ResolveReference(resolved)
+		if (resolved.Scheme != "https" && resolved.Scheme != "http") || resolved.Host == "" {
+			return downloadInfo{Error: "下载接口返回无效地址"}, false
+		}
+		u = resolved.String()
+	} else if resp.StatusCode != http.StatusOK {
+		return downloadInfo{Error: "下载接口未返回文件地址"}, false
+	}
 	return downloadInfo{
 		URL:     u,
-		Headers: map[string]string{"Referer": ILANZOU_CONF.Site + "/"},
+		Headers: map[string]string{"Referer": ILANZOU_CONF.Site + "/", "User-Agent": ua},
 	}, false
 }

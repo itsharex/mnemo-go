@@ -41,6 +41,88 @@ func TestParsePan139QuotaSupportsResponseVariants(t *testing.T) {
 	}
 }
 
+func TestPan139S305ExplainsAccountPasswordRequirement(t *testing.T) {
+	hc := netx.NewClient(time.Second)
+	hc.HTTP.Transport = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return pan139Response(r, 302, http.Header{"Location": {"https://mail.10086.cn/default.html?ec=S305"}}, ""), nil
+	})
+	hc.HTTP.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	_, _, err := submitPan139Login(context.Background(), &pan139LoginState{Client: hc, Username: "test", Password: "test"}, false, "")
+	if err == nil || !strings.Contains(err.Error(), "移动认证账号密码") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestPan139AuthorizationExpirationUsesFourthTokenField(t *testing.T) {
+	expires := time.Now().Add(30 * 24 * time.Hour).UnixMilli()
+	for _, suffix := range []string{"", "|metadata", "|metadata|0"} {
+		token := fmt.Sprintf("token|a|b|%d%s", expires, suffix)
+		auth := encodeAuthorization("pc", "13800138000", token)
+		_, account, gotToken, _, gotExpiry, err := decodeAuthorization(auth)
+		if err != nil || account != "13800138000" || gotToken != token || gotExpiry != expires {
+			t.Fatalf("extended authorization decode: expiry=%d err=%v", gotExpiry, err)
+		}
+	}
+	_, _, _, _, _, err := decodeAuthorization(encodeAuthorization("pc", "13800138000", "token|a|b|123invalid"))
+	if err == nil {
+		t.Fatal("accepted malformed expiration")
+	}
+}
+
+func TestPan139StandaloneSMSSendsWithoutPasswordAndReusesCookies(t *testing.T) {
+	resetPan139LoginStatesForTest(t)
+	old := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = old })
+	sends := 0
+	netx.TestTransportHook = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/s":
+			sends++
+			if r.URL.Query().Get("func") != "login:sendSmsCode" {
+				t.Fatalf("wrong SMS endpoint: %s", r.URL)
+			}
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), "scene") || strings.Contains(string(body), "13800138000") {
+				t.Fatalf("unexpected SMS body: %s", body)
+			}
+			return pan139Response(r, 200, http.Header{"Set-Cookie": {"JSESSIONID=sms-session; Path=/; Secure"}}, `{"code":"S_OK"}`), nil
+		case "/Login/Login.ashx":
+			if r.Method != http.MethodPost {
+				t.Fatal("direct SMS must not submit a password preflight")
+			}
+			if !strings.Contains(r.Header.Get("Cookie"), "JSESSIONID=sms-session") {
+				t.Fatal("lost SMS session cookie")
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			if r.Form.Get("reqFrom") != "3" || r.Form.Get("passOld") != "" || r.Form.Get("Password") != sha1Hex("fetion.com.cn:123456") {
+				t.Fatalf("incorrect SMS submission: %v", r.Form)
+			}
+			if r.Form.Get("loginFailureUrl") != mailHostURL+"/default.html?smsLogin=1" || r.URL.Query().Get("_") != sha1Hex("13800138000") {
+				t.Fatal("SMS login must retain the official form's mode and account digest")
+			}
+			return pan139Response(r, 302, http.Header{"Location": {"https://mail.10086.cn/?sid=sms-session-id"}}, ""), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s", r.URL)
+		}
+	})
+	if err := RequestPan139SMS(context.Background(), "13800138000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequestPan139SMS(context.Background(), "13800138000"); err == nil {
+		t.Fatal("missing resend cooldown")
+	}
+	state := loadPan139LoginState("13800138000")
+	if state == nil || state.Password != "" {
+		t.Fatal("SMS requires or retains password")
+	}
+	_, sid, err := submitPan139Login(context.Background(), state, true, "123456")
+	if err != nil || sid != "sms-session-id" || sends != 1 {
+		t.Fatalf("sid=%s err=%v sends=%d", sid, err, sends)
+	}
+}
+
 func TestApplyPan139QuotaPreservesLastKnownValueOnMissingQuota(t *testing.T) {
 	token := &model.TokenInfo{UsedSize: 2, TotalSize: 10, FreeSize: 8}
 	applyPan139Quota(token, 0, 0)
@@ -79,6 +161,127 @@ func pan139Response(req *http.Request, status int, headers http.Header, body str
 		Header:     headers,
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Request:    req,
+	}
+}
+
+func TestPan139DownloadRoutesUsingAccountAndPreservesCredentials(t *testing.T) {
+	old := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = old })
+	account := "13800138000"
+	authorization := encodeAuthorization("pc", account, fmt.Sprintf("token|a|b|%d", time.Now().Add(30*24*time.Hour).UnixMilli()))
+	netx.TestTransportHook = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/user/route/qryRoutePolicy":
+			var body struct {
+				UserInfo struct {
+					AccountName string `json:"accountName"`
+				} `json:"userInfo"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				return nil, err
+			}
+			if body.UserInfo.AccountName != account {
+				return pan139Response(r, 200, nil, `{"success":false,"message":"账号不存在"}`), nil
+			}
+			return pan139Response(r, 200, nil, `{"success":true,"data":{"routePolicyList":[{"modName":"personal","httpsUrl":"https://personal.139.test"}]}}`), nil
+		case "/file/getDownloadUrl":
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				return nil, err
+			}
+			if body["fileId"] != "9007199254740993" {
+				t.Errorf("file id lost precision: %s", body["fileId"])
+			}
+			return pan139Response(r, 200, nil, `{"success":true,"data":{"cdnUrl":"https://cdn.139.test/file?sign=a%2Bb","size":"42"}}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s", r.URL)
+		}
+	})
+	tok := &model.TokenInfo{AccessToken: authorization, RefreshToken: `{"username":"13800138000","password":"test-password","mailCookies":"RMKEY=test","customField":{"keep":true}}`}
+	u, err := (&Driver{}).GetDownloadURL(context.Background(), drive.Context{Token: tok}, "9007199254740993", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.URL != "https://cdn.139.test/file?sign=a%2Bb" || u.Size != 42 {
+		t.Fatalf("download=%+v", u)
+	}
+	var saved map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(tok.RefreshToken), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if string(saved["account"]) != `"13800138000"` || string(saved["password"]) != `"test-password"` || len(saved["customField"]) == 0 {
+		t.Fatal("session update lost account identity or saved credentials")
+	}
+}
+
+func TestPan139DownloadHonorsCDNSwitch(t *testing.T) {
+	for _, tc := range []struct{ name, data, want string }{
+		{"disabled", `{"cdnSwitch":false,"cdnUrl":"https://cdn.test/stale","url":"https://origin.test/file"}`, "https://origin.test/file"},
+		{"enabled", `{"cdnSwitch":true,"cdnUrl":"https://cdn.test/file","url":"https://origin.test/file"}`, "https://cdn.test/file"},
+		{"missing flag with origin", `{"cdnUrl":"https://cdn.test/stale","url":"https://origin.test/file"}`, "https://origin.test/file"},
+		{"legacy cdn only", `{"cdnUrl":"https://cdn.test/file"}`, "https://cdn.test/file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := netx.TestTransportHook
+			t.Cleanup(func() { netx.TestTransportHook = old })
+			netx.TestTransportHook = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return pan139Response(r, 200, nil, `{"success":true,"data":`+tc.data+`}`), nil
+			})
+			tok := &model.TokenInfo{AccessToken: encodeAuthorization("pc", "13800138000", fmt.Sprintf("t|a|b|%d", time.Now().Add(30*24*time.Hour).UnixMilli())), RefreshToken: `{"personalCloudHost":"https://personal.test"}`}
+			got, _, err := (&Driver{}).DownloadInfo(context.Background(), drive.Context{Token: tok}, "file")
+			if err != nil || got != tc.want {
+				t.Fatalf("url=%s err=%v, want %s", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestPan139RiskSceneUsesSMSXMLLogin(t *testing.T) {
+	for _, tc := range []struct{ code, scene string }{{"PML401010062", "2"}, {"MW0016", "4"}, {"S025", "1"}, {"S035", "1"}} {
+		t.Run(tc.code, func(t *testing.T) {
+			resetPan139LoginStatesForTest(t)
+			old := netx.TestTransportHook
+			t.Cleanup(func() { netx.TestTransportHook = old })
+			netx.TestTransportHook = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet {
+					return pan139Response(r, 200, nil, ""), nil
+				}
+				if r.URL.Path == "/Login/Login.ashx" {
+					return pan139Response(r, 302, http.Header{"Location": []string{"https://mail.10086.cn/default.html?ec=" + tc.code}}, ""), nil
+				}
+				data, _ := io.ReadAll(r.Body)
+				switch r.URL.Query().Get("func") {
+				case "login:sendSmsCodeByScene":
+					if !strings.Contains(string(data), `name="scene">`+tc.scene+`</string>`) {
+						t.Errorf("wrong SMS scene")
+					}
+					return pan139Response(r, 200, http.Header{"Set-Cookie": []string{"RMKEY=updated; Path=/"}}, `{"code":"S_OK"}`), nil
+				case "/login/inlogin.action":
+					if !strings.Contains(string(data), `name="loginPassword">`+sha1Hex("fetion.com.cn:123456")) || strings.Contains(string(data), "123456") {
+						t.Error("wrong SMS proof")
+					}
+					if !strings.Contains(r.Header.Get("Cookie"), "RMKEY=updated") {
+						t.Error("SMS session cookie not retained")
+					}
+					return pan139Response(r, 200, nil, `{"code":"S_OK","var":{"loginSuccessUrl":"https://mail.10086.cn/main?sid=verified-sid"}}`), nil
+				default:
+					return nil, fmt.Errorf("unexpected request %s", r.URL)
+				}
+			})
+			_, err := loginByPassword(context.Background(), "13800138000", "password", "")
+			var needSMS pan139SMSRequiredError
+			if !errors.As(err, &needSMS) {
+				t.Fatalf("expected SMS challenge, got %v", err)
+			}
+			if err := RequestPan139SMS(context.Background(), "13800138000"); err != nil {
+				t.Fatal(err)
+			}
+			state := loadPan139LoginState("13800138000")
+			_, sid, err := submitPan139Login(context.Background(), state, true, "123456")
+			if err != nil || sid != "verified-sid" {
+				t.Fatalf("sid=%q err=%v", sid, err)
+			}
+		})
 	}
 }
 
@@ -176,7 +379,7 @@ func TestPan139PasswordUpgradeUsesOneCookieSessionForSMS(t *testing.T) {
 				headers.Set("Location", "https://mail.10086.cn/default.html?ec=S046")
 				return pan139Response(req, http.StatusFound, headers, ""), nil
 			case "3":
-				if values.Get("passOld") != smsCode || values.Get("Password") != sha1Hex("fetion.com.cn:"+smsCode) {
+				if values.Get("passOld") != "" || values.Get("Password") != sha1Hex("fetion.com.cn:"+smsCode) {
 					return nil, errors.New("SMS request does not contain the expected code fields")
 				}
 				headers.Set("Location", "https://mail.10086.cn/default.html?sid="+sid)
@@ -251,7 +454,7 @@ func TestCreateShareUsesPersonalOutlinkAPI(t *testing.T) {
 	previous := netx.TestTransportHook
 	t.Cleanup(func() { netx.TestTransportHook = previous })
 
-	const authorization = "dGVzdDoxMzgwMDEzODAwMDp0b2tlbnxhfGJ8Y3w0MTAyNDQ0ODAwMDAw"
+	authorization := encodeAuthorization("test", "13800138000", "token|a|b|4102444800000|metadata")
 	var requests int
 	netx.TestTransportHook = pan139RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requests++
@@ -281,7 +484,7 @@ func TestCreateShareUsesPersonalOutlinkAPI(t *testing.T) {
 	folder := true
 	token := &model.TokenInfo{
 		AccessToken:  authorization,
-		RefreshToken: `{"authorization":"dGVzdDoxMzgwMDEzODAwMDp0b2tlbnxhfGJ8Y3w0MTAyNDQ0ODAwMDAw","account":"13800138000","personalCloudHost":"https://api.139.test"}`,
+		RefreshToken: mustJSON(map[string]string{"authorization": authorization, "account": "13800138000", "personalCloudHost": "https://api.139.test"}),
 	}
 	item, err := (&Driver{}).CreateShare(context.Background(), drive.Context{UserID: "pan139:13800138000", DriveID: "pan139:13800138000", Token: token}, drive.ShareParams{
 		FileIDs:    []string{"file-1", "folder-1"},

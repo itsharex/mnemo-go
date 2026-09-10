@@ -109,6 +109,7 @@ var (
 	errResourceChanged      = errors.New("dlengine: remote resource changed")
 	errInvalidRangeResponse = errors.New("dlengine: invalid range response")
 	errShortRangeResponse   = errors.New("dlengine: server returned a shorter valid range")
+	errRangeIgnored         = errors.New("dlengine: server ignored range request")
 )
 
 // partialRangeReadError reports bytes that were safely written before the
@@ -218,10 +219,18 @@ func Download(ctx context.Context, opts Options, url, localPath string, onProgre
 		return singleStream(ctx, hc, opts, url, localPath, total, validator, onProgress)
 	}
 
-	// Resume from state if it matches.
+	// Completed chunks only exist in the accompanying preallocated part file.
+	// Validate it before ensureFile can recreate/extend it with zeroes; otherwise
+	// a stale checkpoint can turn missing bytes into a successful corrupt file.
+	partInfo, partErr := os.Stat(partPath)
+	if partErr != nil && !errors.Is(partErr, os.ErrNotExist) {
+		return partErr
+	}
+	partIntact := partErr == nil && partInfo.Mode().IsRegular() && partInfo.Size() == total
+	// Resume from state only when both the remote identity and local data match.
 	if b, err := os.ReadFile(statePath); err == nil {
 		var prev state
-		if json.Unmarshal(b, &prev) == nil && stateURLMatches(prev, url, urlHash) && prev.Total == total && prev.Chunk == opts.ChunkSize &&
+		if partIntact && json.Unmarshal(b, &prev) == nil && stateURLMatches(prev, url, urlHash) && prev.Total == total && prev.Chunk == opts.ChunkSize &&
 			resumeIdentityMatches(prev, validator) {
 			st = &prev
 		}
@@ -293,7 +302,7 @@ func Download(ctx context.Context, opts Options, url, localPath string, onProgre
 					return nil
 				}
 				lastErr = err
-				if errors.Is(err, errResourceChanged) || errors.Is(err, errInvalidRangeResponse) {
+				if errors.Is(err, errResourceChanged) || errors.Is(err, errInvalidRangeResponse) || errors.Is(err, errRangeIgnored) {
 					if resumed := remainingStart - start; resumed > 0 {
 						downloaded.Add(-resumed)
 					}
@@ -338,8 +347,10 @@ func Download(ctx context.Context, opts Options, url, localPath string, onProgre
 
 	// progress ticker
 	done := make(chan struct{})
+	progressDone := make(chan struct{})
 	speed := newSpeedEstimator(time.Now(), downloaded.Load())
 	go func() {
+		defer close(progressDone)
 		ticker := time.NewTicker(progressInterval)
 		defer ticker.Stop()
 		for {
@@ -357,6 +368,21 @@ func Download(ctx context.Context, opts Options, url, localPath string, onProgre
 
 	err = g.Wait()
 	close(done)
+	<-progressDone
+	if errors.Is(err, errRangeIgnored) && ctx.Err() == nil {
+		// No ranged body was accepted from the rejecting request. All workers
+		// are now stopped; restart as a full stream rather than retrying an
+		// unsupported range forever. If-Range identity failures stay errors.
+		if closeErr := f.Close(); closeErr != nil {
+			return closeErr
+		}
+		// singleStream truncates the part file. Its old chunk bitmap must not
+		// survive an interrupted fallback and be reused on a later attempt.
+		if removeErr := os.Remove(statePath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return removeErr
+		}
+		return singleStream(ctx, hc, opts, url, localPath, total, validator, onProgress)
+	}
 	if err != nil {
 		return err
 	}
@@ -527,7 +553,7 @@ func fetchRange(ctx context.Context, hc *http.Client, opts Options, url string, 
 		if validator.ifRange() != "" {
 			return fmt.Errorf("%w: server returned the full resource after If-Range", errResourceChanged)
 		}
-		return errors.New("dlengine: server ignored range request")
+		return errRangeIgnored
 	}
 	expectedEnd := start + length - 1
 	gotStart, gotEnd, gotTotal, ok := parseContentRange(resp.Header.Get("Content-Range"))

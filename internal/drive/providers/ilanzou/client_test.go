@@ -21,6 +21,62 @@ func withNoThrottle(t *testing.T) {
 	t.Cleanup(func() { fetchMinInterval = old })
 }
 
+func TestDownloadResolverJSONAndTokenEncoding(t *testing.T) {
+	withNoThrottle(t)
+	oldBase := ILANZOU_CONF.Base
+	t.Cleanup(func() { ILANZOU_CONF.Base = oldBase })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.RawQuery, "appToken=user:token%2B%26") || r.URL.Query().Get("enable") != "1" {
+			t.Errorf("incorrect resolver query: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"data":{"url":"/cdn/file.bin"}}`))
+	}))
+	defer srv.Close()
+	ILANZOU_CONF.Base = srv.URL
+	info, _ := resolveILanzouDownload(context.Background(), "8", "9", "user:token+&", "device")
+	if info.Error != "" || info.URL != srv.URL+"/cdn/file.bin" {
+		t.Fatalf("resolver = %+v", info)
+	}
+}
+
+func TestILanzouNumericIDsStayExact(t *testing.T) {
+	var item listItem
+	if err := json.Unmarshal([]byte(`{"fileId":9007199254740993,"folderId":9007199254740995}`), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.FileID != 9007199254740993 || item.FolderID != 9007199254740995 {
+		t.Fatalf("rounded IDs: %+v", item)
+	}
+}
+
+func TestDownloadResolverDoesNotReturnErrorDocumentAsFile(t *testing.T) {
+	withNoThrottle(t)
+	oldBase := ILANZOU_CONF.Base
+	t.Cleanup(func() { ILANZOU_CONF.Base = oldBase })
+	for _, tc := range []struct {
+		name, body        string
+		wantURL, wantAuth bool
+	}{
+		{"untyped JSON", `{"url":"/cdn/file.bin"}`, true, false},
+		{"expired session", `{"code":-1,"msg":"expired"}`, false, true},
+		{"HTML error", `<html><body>file not found</body></html>`, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			ILANZOU_CONF.Base = srv.URL
+			info, auth := resolveILanzouDownload(context.Background(), "8", "9", "token", "device")
+			if auth != tc.wantAuth || (info.Error == "") != tc.wantURL || (tc.wantURL && info.URL != srv.URL+"/cdn/file.bin") || (!tc.wantURL && info.URL != "") {
+				t.Fatalf("result=%+v auth=%v", info, auth)
+			}
+		})
+	}
+}
+
 // TestFileListPagination drives /record/file/list against a fake API and
 // verifies the offset paging loop stops at totalPage.
 func TestFileListPagination(t *testing.T) {

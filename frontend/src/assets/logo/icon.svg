@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Squircle Gradient -->
+    <linearGradient id="bg-grad-512" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FDFCF8"/>
+      <stop offset="100%" stop-color="#ECE5DC"/>
+    </linearGradient>
+
+    <!-- Origami Kite Facet Gradients -->
+    <linearGradient id="facet-tl-512" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D4DAED"/>
+      <stop offset="100%" stop-color="#DCDBEA"/>
+    </linearGradient>
+    <linearGradient id="facet-tr-512" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#C0AFD4"/>
+      <stop offset="100%" stop-color="#AEA3CB"/>
+    </linearGradient>
+    <linearGradient id="facet-ml-out-512" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#BBB5CD"/>
+      <stop offset="100%" stop-color="#AC9CC0"/>
+    </linearGradient>
+    <linearGradient id="facet-ml-in-512" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#BCBAD2"/>
+      <stop offset="100%" stop-color="#BFBADE"/>
+    </linearGradient>
+    <linearGradient id="facet-mr-out-512" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#ADBED9"/>
+      <stop offset="100%" stop-color="#B3CFDD"/>
+    </linearGradient>
+    <linearGradient id="facet-mr-in-512" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#ABAACC"/>
+      <stop offset="100%" stop-color="#9FA5CA"/>
+    </linearGradient>
+    <linearGradient id="facet-bl-out-512" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#CAB8D6"/>
+      <stop offset="100%" stop-color="#BEA8C9"/>
+    </linearGradient>
+    <linearGradient id="facet-bl-in-512" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#CFBCDB"/>
+      <stop offset="100%" stop-color="#DAC8E2"/>
+    </linearGradient>
+    <linearGradient id="facet-br-out-512" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#9F8DC2"/>
+      <stop offset="100%" stop-color="#BABADB"/>
+    </linearGradient>
+    <linearGradient id="facet-br-in-512" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#9786BD"/>
+      <stop offset="100%" stop-color="#A89CCA"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 1:1 App Icon Base Background -->
+  <rect width="512" height="512" rx="113" fill="url(#bg-grad-512)"/>
+
+  <!-- Logo Graphics (Enlarged) -->
+  <g id="origami-logo">
+    <!-- Top Left -->
+    <polygon points="256,64 195.1,176.1 256,262.7" fill="url(#facet-tl-512)"/>
+    <!-- Top Right -->
+    <polygon points="256,64 316.9,176.1 256,262.7" fill="url(#facet-tr-512)"/>
+    <!-- Mid Left Outer -->
+    <polygon points="195.1,176.1 89.6,374.3 176.1,316.9" fill="url(#facet-ml-out-512)"/>
+    <!-- Mid Left Inner -->
+    <polygon points="195.1,176.1 256,262.7 176.1,316.9" fill="url(#facet-ml-in-512)"/>
+    <!-- Mid Right Outer -->
+    <polygon points="316.9,176.1 422.4,374.3 335.9,316.9" fill="url(#facet-mr-out-512)"/>
+    <!-- Mid Right Inner -->
+    <polygon points="316.9,176.1 256,262.7 335.9,316.9" fill="url(#facet-mr-in-512)"/>
+    <!-- Bottom Left Outer -->
+    <polygon points="89.6,374.3 256,448 176.1,316.9" fill="url(#facet-bl-out-512)"/>
+    <!-- Bottom Left Inner -->
+    <polygon points="256,262.7 176.1,316.9 256,448" fill="url(#facet-bl-in-512)"/>
+    <!-- Bottom Right Outer -->
+    <polygon points="422.4,374.3 256,448 335.9,316.9" fill="url(#facet-br-out-512)"/>
+    <!-- Bottom Right Inner -->
+    <polygon points="256,262.7 335.9,316.9 256,448" fill="url(#facet-br-in-512)"/>
+  </g>
+</svg>

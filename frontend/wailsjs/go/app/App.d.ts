@@ -198,11 +198,15 @@ export function SendGuangyaSms(arg1:string):Promise<Record<string, string>>;
 
 export function SendPan139SMS(arg1:string):Promise<void>;
 
+export function SendPan189SMS(arg1:string,arg2:string):Promise<string>;
+
 export function SetAccountCustomMeta(arg1:string,arg2:string,arg3:string):Promise<model.Account>;
 
 export function SetupTray(arg1:Array<number>):Promise<void>;
 
 export function ShowMainWindow():Promise<void>;
+
+export function ShowPikPakCaptcha(arg1:string,arg2:string):Promise<boolean>;
 
 export function StartSyncScheduler():Promise<string>;
 

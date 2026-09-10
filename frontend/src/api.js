@@ -60,6 +60,11 @@ export function SendPan139SMS(username) {
   if (typeof fn !== 'function') return Promise.reject(new Error('139 短信验证暂不可用'))
   return fn(username)
 }
+export function SendPan189SMS(username, validateCode = '') {
+  const fn = App.SendPan189SMS || (typeof window !== 'undefined' && window.go?.app?.App?.SendPan189SMS)
+  if (typeof fn !== 'function') return Promise.reject(new Error('天翼短信登录暂不可用，请重启新版应用'))
+  return fn(username, validateCode)
+}
 export function saveMounted(provider, conn) { return App.SaveMountedAccount(provider, conn) }
 export function validateMountedWrite(provider, conn) { return App.ValidateMountedWrite(provider, conn) }
 export function removeAccount(userId) { return App.RemoveAccount(userId) }

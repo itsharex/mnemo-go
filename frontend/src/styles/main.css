@@ -43,7 +43,7 @@ body {
 .topbar {
   height: 42px; flex-shrink: 0;
   display: flex; align-items: center; gap: 6px;
-  padding: 0 10px 0 10px;
+  padding: 0 0 0 10px;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-light);
   --wails-draggable: drag;
@@ -447,6 +447,8 @@ body.rail-drag-active { cursor: grabbing; user-select: none; }
   background: var(--bg-elevated); border: 1px solid var(--border-light);
   border-radius: var(--radius-md); box-shadow: var(--shadow-modal);
   padding: 5px; min-width: 168px;
+  max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
+  box-sizing: border-box; overflow: auto; overscroll-behavior: contain;
   transform-origin: top left;
 }
 .ctx-item {
@@ -456,7 +458,9 @@ body.rail-drag-active { cursor: grabbing; user-select: none; }
   cursor: pointer; font: inherit; font-size: 14px; color: var(--text-primary); white-space: nowrap;
   transition: background-color var(--motion-fast) var(--motion-ease), color var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-spring);
 }
-.ctx-item:hover { background: var(--bg-hover); }
+.ctx-item:not(:disabled):hover, .ctx-item:focus-visible { background: var(--bg-hover); }
+.ctx-item:focus-visible { outline: 2px solid var(--border-focus, var(--text-secondary)); outline-offset: -2px; }
+.ctx-item > span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .ctx-item:active { transform: scale(.98); }
 .ctx-item.danger { color: var(--color-error); }
 .ctx-item.disabled { opacity: .45; cursor: not-allowed; }

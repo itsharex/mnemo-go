@@ -116,6 +116,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   bodyEl.value?.removeEventListener('scroll', onScroll)
+  if (scrollFrame) cancelAnimationFrame(scrollFrame)
 })
 
 async function scrollTo(id) {
@@ -124,7 +125,15 @@ async function scrollTo(id) {
   document.getElementById('sg-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+let scrollFrame = 0
 function onScroll() {
+  if (scrollFrame) return
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = 0
+    updateActiveSection()
+  })
+}
+function updateActiveSection() {
   const root = bodyEl.value
   if (!root) return
   let current = groups[0].id

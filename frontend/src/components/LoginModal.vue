@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { login, saveMounted, validateMountedWrite, SendGuangyaSms, SendPan139SMS, providerIconUrl, OpenBrowser, onEvent, ClosePikPakCaptcha } from '../api'
+import { login, saveMounted, validateMountedWrite, SendGuangyaSms, SendPan139SMS, SendPan189SMS, providerIconUrl, OpenBrowser, onEvent, ClosePikPakCaptcha, ShowPikPakCaptcha } from '../api'
 import UiIcon from './UiIcon.vue'
 import UiSelect from './UiSelect.vue'
 import { debug, info, warn, error, errorText as formatErrorText, configKeys } from '../logger'
@@ -11,7 +11,7 @@ const emit = defineEmits(['close', 'toast'])
 const providerId = ref(localStorage.getItem('login_provider') || 'pikpak')
 function defaultLoginForm(id) {
   if (id === 'lanzou') return { upload_tier: 'v0' }
-  if (id === 'pan189') return { cloud_type: 'personal' }
+  if (id === 'pan189') return { cloud_type: 'personal', login_mode: 'password' }
   if (id === 'pan139') return { login_mode: 'password' }
   return {}
 }
@@ -104,7 +104,7 @@ const isOAuth = computed(() => !isMounted.value && !hasAccountLogin.value && fie
 const HIDDEN_LOGIN_FIELDS = {
   aliopen: ['client_id', 'client_secret'],
   guangya: ['refresh_token'],
-  pan139: ['authorization', 'login_mode'],
+  pan139: ['authorization'],
 }
 
 const visibleFields = computed(() => {
@@ -132,13 +132,16 @@ const loginSubtitle = computed(() => {
   return '登录设置'
 })
 function isFieldRequired(field) {
+  if (['pan139', 'pan189'].includes(providerId.value) && form.value.login_mode === 'sms' && field.key === 'password') return false
   if (isPan139DirectLogin.value && (field.key === 'username' || field.key === 'password')) return false
   return field.required
 }
 function isPan139FieldVisible(field) {
-  if (providerId.value !== 'pan139') return true
-  if (field.key === 'password') return !pan139SMSRequired.value
-  if (field.key === 'sms_code') return pan139SMSRequired.value
+  if (!['pan139', 'pan189'].includes(providerId.value)) return true
+  const sms = form.value.login_mode === 'sms'
+  if (field.key === 'password') return !sms
+  if (field.key === 'sms_code') return sms
+  if (providerId.value === 'pan189' && field.key === 'validate_code') return !!pan189Captcha.value
   return true
 }
 function fieldInputType(field) {
@@ -164,11 +167,14 @@ function applyWebDAVPreset(id) {
 const captchaUrl = ref('')
 const captchaSessionId = ref('')
 const captchaFrameReady = ref(false)
+const captchaNativeWindow = ref(false)
+const captchaOpening = ref(false)
 const captchaSubmitting = ref(false)
 const pan189Captcha = ref('')
 let offPikPakCaptchaCompleted = null
 let loginModalDisposed = false
 let captchaCompletionBusy = false
+let pendingCaptchaCompletion = null
 let captchaClosePromise = Promise.resolve()
 
 function closePikPakCaptchaSession() {
@@ -190,6 +196,16 @@ watch(providerId, (v, previous) => {
   errorText.value = ''
   resetCaptcha(previous === 'pikpak')
   if (v !== 'pikpak') clearPikPakCooldown()
+})
+
+watch(() => form.value.login_mode, () => {
+  pan139SMSRequired.value = false
+  pan189Captcha.value = ''
+  delete form.value.validate_code
+  delete form.value.sms_code
+  if (smsTimer) clearInterval(smsTimer)
+  smsTimer = null
+  smsCountdown.value = 0
 })
 
 // A hidden or removed provider must not remain selected through an old
@@ -238,12 +254,17 @@ async function completePikPakCaptcha(payload) {
     !captchaSessionId.value ||
     sessionID !== captchaSessionId.value
   ) return
+	if (busy.value) {
+		pendingCaptchaCompletion = payload
+		return
+	}
 	info('captcha', 'PikPak captcha completion accepted', { session_id: sessionID, has_token: !!String(payload?.captcha_token || '').trim() })
 
   captchaCompletionBusy = true
   const token = String(payload?.captcha_token || '').trim()
   captchaSessionId.value = ''
   captchaFrameReady.value = false
+  captchaNativeWindow.value = false
   captchaUrl.value = ''
   if (token) {
     form.value.captcha_token = token
@@ -279,7 +300,28 @@ function parseCaptcha(err) {
   delete form.value.captcha_verified
   delete form.value.captcha_requires_confirmation
   captchaFrameReady.value = false
+  captchaNativeWindow.value = false
   return true
+}
+
+async function openCaptchaWindow() {
+  const sessionID = captchaSessionId.value
+  if (!sessionID || !captchaUrl.value || captchaOpening.value) return
+  captchaOpening.value = true
+  try {
+    const opened = await ShowPikPakCaptcha(sessionID, captchaUrl.value)
+    if (sessionID !== captchaSessionId.value || loginModalDisposed) return
+    captchaNativeWindow.value = opened
+    captchaFrameReady.value = opened
+    errorText.value = opened ? '请在独立窗口中完成安全验证，完成后将自动登录' : '请在下方完成安全验证'
+  } catch (e) {
+    if (sessionID === captchaSessionId.value) {
+      captchaNativeWindow.value = true
+      errorText.value = String(e)
+    }
+  } finally {
+    captchaOpening.value = false
+  }
 }
 async function reloadCaptcha() {
   if (!captchaUrl.value || busy.value) return
@@ -322,6 +364,8 @@ function parse189CaptchaRetry(err) {
 }
 
 function resetCaptcha(closeSession = false) {
+  pendingCaptchaCompletion = null
+  captchaNativeWindow.value = false
   captchaSessionId.value = ''
   captchaUrl.value = ''
   captchaFrameReady.value = false
@@ -356,16 +400,44 @@ async function sendSms() {
 }
 
 async function sendPan139Sms() {
+  if (smsBusy.value) return
   if (!String(form.value.username || '').trim()) { errorText.value = '请先填写账号'; return }
+  const username = String(form.value.username).trim()
   smsBusy.value = true
   errorText.value = ''
   try {
-    await SendPan139SMS(String(form.value.username).trim())
+    await SendPan139SMS(username)
+    if (loginModalDisposed || providerId.value !== 'pan139' || form.value.login_mode !== 'sms' || String(form.value.username || '').trim() !== username) return
     emit('toast', '验证码已发送', 'success')
     startSmsCountdown()
   } catch (e) {
     warn('login', '139 SMS verification request failed', { error: formatErrorText(e) })
     errorText.value = String(e)
+  } finally {
+    smsBusy.value = false
+  }
+}
+
+async function sendPan189Sms() {
+  if (smsBusy.value) return
+  const username = String(form.value.username || '').trim()
+  if (!username) { errorText.value = '请先填写手机号'; return }
+  const attemptProvider = providerId.value
+  smsBusy.value = true
+  errorText.value = ''
+  try {
+    const image = await SendPan189SMS(username, String(form.value.validate_code || '').trim())
+    if (loginModalDisposed || providerId.value !== attemptProvider || form.value.login_mode !== 'sms' || String(form.value.username || '').trim() !== username) return
+    if (image) {
+      pan189Captcha.value = image
+      form.value.validate_code = ''
+      errorText.value = '请填写图形验证码，再点击获取短信验证码'
+    } else {
+      startSmsCountdown()
+      errorText.value = '短信验证码已发送，请填写后登录'
+    }
+  } catch (e) {
+    if (providerId.value === attemptProvider) errorText.value = formatErrorText(e)
   } finally {
     smsBusy.value = false
   }
@@ -403,12 +475,17 @@ function validate() {
     if (!value('verification_id')) return '请先获取短信验证码'
     return ''
   }
+  if (providerId.value === 'pan189' && value('login_mode') === 'sms') {
+    if (!value('username')) return '请填写手机号'
+    if (!value('sms_code')) return '请填写短信验证码'
+    return ''
+  }
   if (providerId.value === 'pan189' && pan189Captcha.value && !value('validate_code')) {
     return '请填写图形验证码'
   }
   if (providerId.value === 'pan139') {
     if (!value('username')) return '请填写手机号/账号'
-    if (pan139SMSRequired.value) {
+    if (form.value.login_mode === 'sms') {
       if (!value('sms_code')) return '请填写短信验证码'
     } else if (!value('password')) {
       return '请填写密码'
@@ -484,7 +561,7 @@ async function submit() {
       if (attemptProvider === 'pikpak' && handlePikPakRateLimit(e)) {
         // Keep the challenge state intact while the provider cooldown runs.
       } else if (attemptProvider === 'pikpak' && parseCaptcha(e)) {
-        errorText.value = '请在登录窗口内完成安全验证'
+        await openCaptchaWindow()
       } else if (attemptProvider === 'pan189' && parse189Captcha(e)) {
         errorText.value = '请输入图片中的验证码'
       } else if (attemptProvider === 'pan189' && parse189CaptchaRetry(e)) {
@@ -505,6 +582,11 @@ async function submit() {
   } finally {
     busy.value = false
     captchaSubmitting.value = false
+    if (pendingCaptchaCompletion) {
+      const payload = pendingCaptchaCompletion
+      pendingCaptchaCompletion = null
+      void completePikPakCaptcha(payload)
+    }
   }
 }
 </script>
@@ -616,6 +698,9 @@ async function submit() {
                       <div v-if="providerId === 'pan139' && f.key === 'sms_code'" class="field-action-row">
                         <button class="btn sm" :disabled="smsBusy || smsCountdown > 0" type="button" @click="sendPan139Sms">{{ smsBusy ? '发送中…' : (smsCountdown > 0 ? smsCountdown + ' 秒后重发' : '获取验证码') }}</button>
                       </div>
+                      <div v-if="providerId === 'pan189' && f.key === 'sms_code'" class="field-action-row">
+                        <button class="btn sm" :disabled="smsBusy || smsCountdown > 0" type="button" @click="sendPan189Sms">{{ smsBusy ? '发送中…' : (smsCountdown > 0 ? smsCountdown + ' 秒后重发' : '获取验证码') }}</button>
+                      </div>
                     </div>
                   </div>
                   <div v-else class="login-empty-state">该网盘无需填写表单，直接点击登录。</div>
@@ -630,12 +715,14 @@ async function submit() {
                 <div v-if="captchaUrl" class="login-state-card captcha-box">
                   <div class="captcha-head">
                     <div>
-                      <strong>请在下方完成安全验证</strong>
+                      <strong>{{ captchaNativeWindow ? '请在独立窗口中完成安全验证' : '请完成安全验证' }}</strong>
                       <p>{{ captchaFrameReady ? '验证完成后将自动继续登录。' : '正在加载验证页面…' }}</p>
                     </div>
                     <button class="btn sm" type="button" :disabled="captchaSubmitting || pikpakCooldownSeconds > 0" @click="reloadCaptcha">重新加载</button>
+                    <button v-if="captchaNativeWindow" class="btn sm" type="button" :disabled="captchaOpening || busy" @click="openCaptchaWindow">打开验证窗口</button>
                   </div>
                   <iframe
+                    v-if="!captchaNativeWindow && !captchaOpening"
                     class="captcha-frame"
                     :src="captchaUrl"
                     title="PikPak 安全验证"

@@ -1,6 +1,6 @@
 <script setup>
 // 账号快切栏（复刻旧版 AccountRail）：默认 60px 窄图标栏，悬停展开为 220px 显示名称与用量。
-import { computed, ref, onBeforeUnmount } from 'vue'
+import { computed, ref, onBeforeUnmount, watch } from 'vue'
 import { providerOf, accountName, providerIconUrl, providerMetaOf } from '../api'
 import { getPrefs, setPref } from '../appearance'
 import ContextMenu from './ContextMenu.vue'
@@ -14,10 +14,19 @@ const props = defineProps({
 const emit = defineEmits(['select', 'add', 'remove', 'info', 'rename'])
 
 const expanded = ref(false)
+const railEl = ref(null)
 const menu = ref(null)
+let hovering = false
+let cancelDrag = null
+let clickTimer = null
 let enterTimer = null
 let leaveTimer = null
-onBeforeUnmount(() => { clearTimeout(enterTimer); clearTimeout(leaveTimer) })
+onBeforeUnmount(() => {
+  cancelDrag?.()
+  clearTimeout(enterTimer)
+  clearTimeout(leaveTimer)
+  clearTimeout(clickTimer)
+})
 
 // ---------- 手动拖拽排序（顺序存 localStorage prefs.accountOrder） ----------
 const dragIdx = ref(-1)
@@ -29,7 +38,7 @@ const orderedAccounts = computed(() => {
   if (liveList.value) return liveList.value
   const order = Array.isArray(getPrefs().accountOrder) ? getPrefs().accountOrder : []
   if (!order.length) return props.accounts
-  const known = order
+  const known = [...new Set(order)]
     .map((id) => props.accounts.find((a) => a.user_id === id))
     .filter(Boolean)
   const unknown = props.accounts.filter((a) => !order.includes(a.user_id))
@@ -38,6 +47,10 @@ const orderedAccounts = computed(() => {
 
 function onItemPointerDown(e, acc) {
   if (e.button !== 0) return
+  cancelDrag?.()
+  clearTimeout(clickTimer)
+  suppressClick = false
+  menu.value = null
   const startX = e.clientX
   const startY = e.clientY
   const listEl = e.currentTarget.closest('.rail-list')
@@ -45,6 +58,9 @@ function onItemPointerDown(e, acc) {
   let dragging = false
   let ghost = null
   let rafId = 0
+  let startRaf = 0
+  let bumpRaf = 0
+  let dropTimer = null
   let heights = null   // Map<user_id, height>，拖动起点捕获的各项静止高度
   let gapPx = 0
   let top0 = 0         // 首项静止 top
@@ -85,7 +101,8 @@ function onItemPointerDown(e, acc) {
           }
         })
         bumpMap.value = {}
-        requestAnimationFrame(() => { bumpMap.value = bumps })
+        cancelAnimationFrame(bumpRaf)
+        bumpRaf = requestAnimationFrame(() => { bumpMap.value = bumps })
       }
     }
     // 弹簧未收敛或拖动中：继续下一帧
@@ -120,6 +137,8 @@ function onItemPointerDown(e, acc) {
     ghostTop0 = r.top
     ghostY = r.top
     ghost = itemEl.cloneNode(true)
+    ghost.tabIndex = -1
+    ghost.setAttribute('aria-hidden', 'true')
     ghost.className = itemEl.className.replace('dragging', '').trim() + ' rail-ghost'
     ghost.style.width = r.width + 'px'
     ghost.style.left = r.left + 'px'
@@ -139,20 +158,23 @@ function onItemPointerDown(e, acc) {
     }
     ghost.classList.add('dropping')
     ghost.style.transform = `translate3d(0, ${targetTop - ghostTop0}px, 0) scale(1)`
-    setTimeout(() => {
+    dropTimer = setTimeout(() => {
       if (ghost) { ghost.remove(); ghost = null }
       listEl.closest('.account-rail')?.classList.remove('rail-frozen')
       liveList.value = null
       dragIdx.value = -1
       heights = null
+      cancelDrag = null
+      if (!hovering) onRailLeave()
     }, 260)
   }
 
   const onMove = (ev) => {
+    if (ev.pointerId !== undefined && e.pointerId !== undefined && ev.pointerId !== e.pointerId) return
     px = ev.clientX
     py = ev.clientY
     if (!dragging) {
-      if (Math.abs(py - startY) < 6 && Math.abs(px - startX) < 6) return
+      if (Math.abs(py - startY) < 6 || Math.abs(py - startY) < Math.abs(px - startX)) return
       dragging = true
       dragActive = true
       suppressClick = true
@@ -163,18 +185,30 @@ function onItemPointerDown(e, acc) {
       // 冻结栏宽/项高过渡（进行中的展开动画立即到位），下一帧捕获静止几何
       listEl.closest('.account-rail').classList.add('rail-frozen')
       document.body.classList.add('rail-drag-active')
-      requestAnimationFrame(startDrag)
+      startRaf = requestAnimationFrame(startDrag)
     }
   }
-  const onUp = () => {
+  const onUp = (ev) => {
+    if (ev?.pointerId !== undefined && e.pointerId !== undefined && ev.pointerId !== e.pointerId) return
+    const commit = ev?.type === 'pointerup'
     window.removeEventListener('pointermove', onMove)
     window.removeEventListener('pointerup', onUp)
     window.removeEventListener('pointercancel', onUp)
+    window.removeEventListener('blur', onUp)
+    window.removeEventListener('keydown', onDragKey)
+    cancelAnimationFrame(startRaf)
+    cancelAnimationFrame(bumpRaf)
+    clearTimeout(dropTimer)
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0 }
-    if (dragging && liveList.value) {
+    if (commit && dragging && liveList.value) {
       setPref('accountOrder', liveList.value.map((a) => a.user_id))
       // click 紧跟 pointerup 触发，延后一帧清除以吞掉这次拖拽点击
-      setTimeout(() => { suppressClick = false }, 0)
+      clickTimer = setTimeout(() => { suppressClick = false }, 0)
+    }
+    if (!commit) {
+      ghost?.remove()
+      ghost = null
+      suppressClick = false
     }
     if (ghost) dropGhost()
     else listEl.closest('.account-rail')?.classList.remove('rail-frozen')
@@ -184,16 +218,28 @@ function onItemPointerDown(e, acc) {
       liveList.value = null
       dragIdx.value = -1
       heights = null
+      cancelDrag = null
     }
     dragging = false
+    bumpMap.value = {}
   }
+  const onDragKey = (ev) => {
+    if (ev.key !== 'Escape') return
+    ev.preventDefault()
+    onUp()
+  }
+  cancelDrag = () => onUp()
   window.addEventListener('pointermove', onMove)
   window.addEventListener('pointerup', onUp)
   window.addEventListener('pointercancel', onUp)
+  window.addEventListener('blur', onUp)
+  window.addEventListener('keydown', onDragKey)
 }
 
 function onItemClick(acc) {
   if (suppressClick) { suppressClick = false; return }
+  menu.value = null
+  if (props.current?.user_id === acc.user_id) return
   emit('select', acc)
 }
 
@@ -201,15 +247,49 @@ let dragActive = false
 
 // 悬停快速平滑展开，移出后延迟收起；拖拽期间冻结展开状态，避免中途布局突变
 function onRailEnter() {
+  hovering = true
   if (dragActive) return
   clearTimeout(leaveTimer)
   clearTimeout(enterTimer)
   enterTimer = setTimeout(() => { expanded.value = true }, 220)
 }
 function onRailLeave() {
-  if (dragActive) return
+  hovering = false
+  scheduleCollapse()
+}
+function scheduleCollapse() {
+  if (dragActive || menu.value) return
   clearTimeout(enterTimer)
-  leaveTimer = setTimeout(() => { expanded.value = false }, 200)
+  clearTimeout(leaveTimer)
+  leaveTimer = setTimeout(() => {
+    if (!hovering && !menu.value && !railEl.value?.contains(document.activeElement)) expanded.value = false
+  }, 200)
+}
+
+watch(menu, (value) => {
+  if (!value && !hovering) onRailLeave()
+})
+watch(() => props.accounts.map(a => a.user_id).join('\n'), () => {
+  cancelDrag?.()
+  if (menu.value && !props.accounts.some(a => a.user_id === menu.value.acc.user_id)) menu.value = null
+})
+
+function onRailKey(e, acc) {
+  if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+    e.preventDefault()
+    onCtx(e, acc)
+    return
+  }
+  const buttons = [...railEl.value.querySelectorAll('.rail-item, .rail-add')]
+  const index = buttons.indexOf(e.currentTarget)
+  let next
+  if (e.key === 'ArrowDown') next = (index + 1) % buttons.length
+  else if (e.key === 'ArrowUp') next = (index - 1 + buttons.length) % buttons.length
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = buttons.length - 1
+  else return
+  e.preventDefault()
+  buttons[next]?.focus()
 }
 
 const groups = computed(() => {
@@ -250,7 +330,13 @@ function labelOfAcc(acc) {
 }
 
 function onCtx(e, acc) {
-  menu.value = { x: e.clientX, y: e.clientY, acc }
+  if (!acc) return
+  cancelDrag?.()
+  clearTimeout(enterTimer)
+  clearTimeout(leaveTimer)
+  e.currentTarget.focus({ preventScroll: true })
+  const rect = e.currentTarget.getBoundingClientRect()
+  menu.value = { x: e.clientX || rect.right, y: e.clientY || rect.top, acc }
 }
 
 const menuItems = computed(() => {
@@ -272,10 +358,12 @@ function onMenu(action) {
 
 <template>
   <aside
+    ref="railEl"
     class="account-rail"
     :class="{ expanded }"
     @mouseenter="onRailEnter"
     @mouseleave="onRailLeave"
+    @focusout="scheduleCollapse"
   >
     <TransitionGroup name="rail" tag="div" class="rail-list" :class="{ reordering: dragIdx >= 0 }">
       <button
@@ -286,9 +374,14 @@ function onMenu(action) {
         :class="{ active: current && current.user_id === acc.user_id, dragging: dragIdx === i, ['bump-' + (bumpMap[acc.user_id] || {}).dir]: bumpMap[acc.user_id] }"
         :style="dragIdx >= 0 && dragIdx !== i ? { transitionDelay: Math.min(Math.abs(i - dragIdx) * 35, 140) + 'ms' } : null"
         :title="`${labelOfAcc(acc)} · ${accountName(acc)}`"
+        :aria-label="`${labelOfAcc(acc)} · ${accountName(acc)}`"
+        :aria-current="current?.user_id === acc.user_id ? 'true' : undefined"
+        aria-haspopup="menu"
+        :aria-expanded="menu?.acc.user_id === acc.user_id"
         @pointerdown="onItemPointerDown($event, acc)"
         @click="onItemClick(acc)"
         @contextmenu.prevent="onCtx($event, acc)"
+        @keydown="onRailKey($event, acc)"
       >
         <span class="rail-inner" :style="bumpMap[acc.user_id] ? { animationDelay: bumpMap[acc.user_id].delay + 'ms' } : null">
           <span class="rail-icon">
@@ -308,7 +401,7 @@ function onMenu(action) {
       </div>
     </TransitionGroup>
 
-    <button type="button" class="rail-add" :title="'添加网盘账号'" @click="emit('add')">
+    <button type="button" class="rail-add" :title="'添加网盘账号'" @click="emit('add')" @keydown="onRailKey($event)">
       <UiIcon name="plus" :size="17" class="rail-add-icon" />
       <span class="rail-add-text">添加网盘</span>
     </button>

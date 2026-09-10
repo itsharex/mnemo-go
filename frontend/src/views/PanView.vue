@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
 import {
   listDir, listTrash, search, mkdir, rename, trash, remove, restore,
   move, copy, favorite, createShare, uploadFiles, validateUploadFiles, migrateFiles, download,
@@ -20,6 +20,7 @@ import PlayerPanel from '../components/PlayerPanel.vue'
 import TreeNode from '../components/TreeNode.vue'
 import DragDropZone from '../components/DragDropZone.vue'
 import { getPrefs, setPref } from '../appearance'
+import { createNavigationHistory } from '../navigation'
 
 const props = defineProps({
   account: Object,
@@ -74,6 +75,7 @@ const sideWidth = ref(initialPrefs.sideWidth || 220) // 侧边栏宽度
 const isSideResizing = ref(false)
 let sideResizing = null
 function sideDown(e) {
+  if (e.button !== 0) return
   e.preventDefault()
   sideResizing = { x: e.clientX, w: sideWidth.value }
   isSideResizing.value = true
@@ -415,7 +417,7 @@ const rowsShown = computed(() => {
     parts: kw ? namePartsOf(f.name, kw) : null,
     sizeText: f.isDir ? (f.file_count != null ? f.file_count + ' 项' : '-') : formatBytes(f.size),
     timeParts: formatTimeParts(f.time),
-    thumb: f.thumbnail && !errs[f.file_id] ? f.thumbnail : '',
+    thumb: !f.isDir && f.thumbnail && !errs[f.file_id] ? f.thumbnail : '',
   }))
 })
 
@@ -464,6 +466,38 @@ function goHome() {
   keyword.value = ''
   selected.value = []
   load(dirId.value)
+}
+
+const locationHistory = createNavigationHistory()
+let historyAccount = ''
+let restoringLocation = false
+function locationSnapshot() {
+  return { mode: mode.value, dirId: dirId.value, path: pathStack.value, keyword: mode.value === 'search' ? keyword.value : '', selected: treeSelected.value }
+}
+watch(() => [uid.value, did.value, mode.value, dirId.value, JSON.stringify(pathStack.value)], () => {
+  const account = `${uid.value}/${did.value}`
+  if (account !== historyAccount) {
+    historyAccount = account
+    locationHistory.reset(locationSnapshot())
+  } else if (!restoringLocation) locationHistory.record(locationSnapshot())
+}, { flush: 'post', immediate: true })
+function navigateHistory(direction) {
+  if (!props.account || restoringLocation) return false
+  const destination = locationHistory.move(direction)
+  if (!destination) return false
+  restoringLocation = true
+  mode.value = destination.mode
+  dirId.value = destination.dirId
+  pathStack.value = destination.path
+  keyword.value = destination.keyword
+  treeSelected.value = destination.selected
+  selected.value = []
+  focusId.value = ''
+  menu.value = null
+  suppressHoverPreview()
+  refresh()
+  nextTick(() => { restoringLocation = false })
+  return true
 }
 
 function refresh() {
@@ -1129,6 +1163,7 @@ function openPreviewItem(f) {
 
 // ---------- 快捷键 ----------
 function onKey(e) {
+  if (!pageActive || e.defaultPrevented || document.querySelector('[role="dialog"], .ctx-menu, .player-panel')) return
   const tag = (e.target.tagName || '').toLowerCase()
   if (tag === 'input' || tag === 'textarea' || tag === 'select') return
   if (!props.account || modal.value) return
@@ -1223,6 +1258,7 @@ function openUploadModal() {
 }
 
 defineExpose({
+  navigateHistory,
   refresh,
   openMkdirModal,
   openUploadModal,
@@ -1251,10 +1287,28 @@ watch(listEl, (el) => {
 }, { flush: 'post' })
 watch([listShown, viewMode], () => nextTick(() => updateVirtualMetrics()), { flush: 'post' })
 
-onMounted(() => {
+let pageActive = false
+function activatePage() {
+  if (pageActive) return
+  pageActive = true
   window.addEventListener('keydown', onKey)
   window.addEventListener('mousemove', sideMove)
   window.addEventListener('mouseup', sideUp)
+}
+function deactivatePage() {
+  pageActive = false
+  window.removeEventListener('keydown', onKey)
+  window.removeEventListener('mousemove', sideMove)
+  window.removeEventListener('mouseup', sideUp)
+  sideUp()
+  clearTimeout(hoverTimer)
+  hoverPreview.value = null
+  menu.value = null
+}
+onActivated(activatePage)
+onDeactivated(deactivatePage)
+onMounted(() => {
+  activatePage()
   if (props.account) {
     expanded.value[rootKey.value] = true
     load(rootKey.value)
@@ -1262,9 +1316,7 @@ onMounted(() => {
   }
 })
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKey)
-  window.removeEventListener('mousemove', sideMove)
-  window.removeEventListener('mouseup', sideUp)
+  deactivatePage()
   clearTimeout(filterTimer)
   clearTimeout(hoverTimer)
   listResizeObserver?.disconnect()

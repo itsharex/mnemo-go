@@ -4,7 +4,10 @@
 // qiniu multipart upload path.
 package ilanzou
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // ILANZOU_ROOT is the provider root folder id surfaced to the frontend.
 const ILANZOU_ROOT = "ilanzou_root"
@@ -46,7 +49,9 @@ type listItem struct {
 // quoted form.
 func (i *listItem) UnmarshalJSON(data []byte) error {
 	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&raw); err != nil {
 		return err
 	}
 	i.FileType = int(numOf(raw["fileType"]))

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -65,8 +66,12 @@ var apiCaptchaCache = struct {
 }{items: make(map[string]apiCaptchaCacheEntry)}
 
 // pikpakVerifiedCaptchaWait gives the provider a brief window to persist the
-// completed challenge before the single bounded confirmation request.
+// completed challenge before its first confirmation request.
 var pikpakVerifiedCaptchaWait = 1500 * time.Millisecond
+
+// Match the legacy client's bounded token exchange. A challenge URL immediately
+// after slider completion can mean its result has not propagated yet.
+var pikpakCaptchaExchangeDelays = [...]time.Duration{600 * time.Millisecond, 1200 * time.Millisecond, 2 * time.Second}
 
 // PikPak risk cooldowns are scoped to the normalized login identifier.  A
 // blocked PikPak account must not disable another PikPak account, and this
@@ -227,7 +232,7 @@ func initCaptchaWithPrev(ctx context.Context, hc *netx.Client, deviceID, usernam
 		CaptchaToken string `json:"captcha_token"`
 		URL          string `json:"url"`
 	}
-	resp, err := hc.Do(ctx, http.MethodPost, userHost+"/v1/shield/captcha/init", captchaHeaders(deviceID, ""), netx.JSONBody(body))
+	resp, err := requestCaptchaInit(ctx, hc, deviceID, "", body)
 	if err != nil {
 		return "", "", err
 	}
@@ -277,7 +282,7 @@ func initAPICaptcha(ctx context.Context, hc *netx.Client, deviceID, accountID, a
 		CaptchaToken string `json:"captcha_token"`
 		URL          string `json:"url"`
 	}
-	resp, err := hc.Do(ctx, http.MethodPost, userHost+"/v1/shield/captcha/init", captchaHeaders(deviceID, accessToken), netx.JSONBody(body))
+	resp, err := requestCaptchaInit(ctx, hc, deviceID, accessToken, body)
 	if err != nil {
 		return "", "", err
 	}
@@ -290,6 +295,29 @@ func initAPICaptcha(ctx context.Context, hc *netx.Client, deviceID, accountID, a
 		return "", "", err
 	}
 	return res.CaptchaToken, res.URL, nil
+}
+
+// Only captcha initialization is replayed here, never the sign-in request.
+// A reset can occur before HTTP headers arrive; rebuild the JSON body once.
+func requestCaptchaInit(ctx context.Context, hc *netx.Client, deviceID, token string, body any) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := hc.Do(ctx, http.MethodPost, userHost+"/v1/shield/captcha/init", captchaHeaders(deviceID, token), netx.JSONBody(body))
+		if err == nil {
+			return resp, nil
+		}
+		var networkError *net.OpError
+		transient := errors.As(err, &networkError) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+		if attempt >= 1 || !transient || ctx.Err() != nil {
+			return nil, fmt.Errorf("PikPak 验证服务连接失败，请检查应用或系统代理后重试: %w", err)
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func captchaHeaders(deviceID, token string) map[string]string {
@@ -448,6 +476,26 @@ func retryLoginCaptcha(ctx context.Context, hc *netx.Client, deviceID, username,
 	return initCaptchaWithPrev(ctx, hc, deviceID, username, action, previousToken, callbackURI)
 }
 
+func confirmVerifiedCaptcha(ctx context.Context, hc *netx.Client, deviceID, username, previousToken, callbackURI string) (string, string, error) {
+	token, challenge, err := initCaptchaWithPrev(ctx, hc, deviceID, username, "POST:/v1/auth/signin", previousToken, callbackURI)
+	for _, delay := range pikpakCaptchaExchangeDelays {
+		if err != nil || challenge == "" {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", "", ctx.Err()
+		case <-timer.C:
+		}
+		// Each exchange must carry the most recently issued token, retaining
+		// the same device identity and redirect throughout the chain.
+		token, challenge, err = initCaptchaWithPrev(ctx, hc, deviceID, username, "POST:/v1/auth/signin", token, callbackURI)
+	}
+	return token, challenge, err
+}
+
 // CaptchaRequiredError carries the visual challenge values while preserving the
 // text protocol consumed by the Wails login page.
 type CaptchaRequiredError struct {
@@ -474,7 +522,7 @@ func authSignIn(ctx context.Context, req drive.AuthRequest) (*model.TokenInfo, e
 		return nil, err
 	}
 	deviceID := getOrCreateDeviceID(username)
-	hc := netx.NewClient(60 * time.Second)
+	hc := netx.NewClientWithSystemProxy(60 * time.Second)
 	callbackURI := strings.TrimSpace(req.Config["captcha_redirect_uri"])
 
 	captchaToken := strings.TrimSpace(req.Config["captcha_token"])
@@ -498,8 +546,8 @@ func authSignIn(ctx context.Context, req drive.AuthRequest) (*model.TokenInfo, e
 	}
 	if captchaNeedsConfirmation {
 		// The callback can arrive before the provider has registered the slider
-		// result. Confirm the prior token exactly once, never in an automatic
-		// retry loop, then submit the login request.
+		// result. Exchange only after confirmed visual completion, with the
+		// legacy retry bound, then submit the login request once.
 		timer := time.NewTimer(pikpakVerifiedCaptchaWait)
 		select {
 		case <-ctx.Done():
@@ -507,7 +555,7 @@ func authSignIn(ctx context.Context, req drive.AuthRequest) (*model.TokenInfo, e
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
-		tok, urlValue, confirmErr := initCaptchaWithPrev(ctx, hc, deviceID, username, "POST:/v1/auth/signin", captchaToken, callbackURI)
+		tok, urlValue, confirmErr := confirmVerifiedCaptcha(ctx, hc, deviceID, username, captchaToken, callbackURI)
 		if confirmErr != nil {
 			rememberPikPakLoginCooldown(username, confirmErr)
 			logging.Warn("PikPak captcha completion confirmation failed", "error", confirmErr)

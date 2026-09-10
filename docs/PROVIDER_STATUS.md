@@ -87,7 +87,7 @@
 | dropbox | ✅ | redirect | ➖ | ✅(新增) | ➖ | ➖ | ✅(4h) |
 | yike | ✅ | proxy | ➖ | ➖ | ➖ | ➖ | ➖ |
 | guangya | ✅ | proxy | ➖ | ✅ | ➖ | ➖ | ➖ |
-| webdav | ✅ | redirect | ➖ | ➖ | ➖ | ➖ | ➖ |
+| webdav | ✅ | 普通连接默认 / Digest proxy | 普通连接随设置 / Digest 1 | ➖ | ➖ | ➖ | ➖ |
 | s3 | ✅ | redirect | ➖ | ✅(原画/网页播放器) | ➖ | ➖ | ✅(4h预签名) |
 
 ---
@@ -112,6 +112,10 @@
 
 > ✅ aliopen/pan123/pan189/onedrive 已持久化上传会话；Dropbox 也保存远端 session 与已确认偏移。
 > ✅ webdav/s3 的冲突策略与进度回调已实现（ConflictPolicy + ProgressReader）；S3 64MiB 以上上传自动使用 multipart，重名策略包含 `skip`。
+
+> 2026-09-10 回归：Dropbox 列表/RPC 与上传分片支持 `expired_access_token` 后续期一次再重试；ILanzou 保留大整数 ID、修正下载参数并解析 JSON 下载地址；移动云盘修正账号字段读取及 CDN 开关，并补充短信风控登录分支。上述变更通过自动回归，真实账号成功率尚待实测。天翼 Session HTTP 错误已保留业务错误码，用户报告的 HTTP 400 根因尚未确认。
+
+> 同日补充：移动与天翼均开放独立短信登录入口，不要求先提交密码。天翼按官网 PC 登录脚本使用 `epd` 提交加密凭据，短信发送前按需显示图形验证码；短信码只用于本次认证，不写入账号密码。新增前后端回归通过，仍待真实账号验证。
 
 ---
 

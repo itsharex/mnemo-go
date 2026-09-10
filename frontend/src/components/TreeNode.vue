@@ -1,5 +1,5 @@
 <script setup>
-// 递归目录树节点：单击=展开/收起，双击=跳转到该目录。懒加载子目录，选中高亮。
+// 递归目录树节点：点击目录导航，箭头独立展开/收起。懒加载子目录，选中高亮。
 // node: { file_id, name }；loadChildren(id) 由父级提供，返回目录数组（缓存于 tree map）。
 import { computed } from 'vue'
 import UiIcon from './UiIcon.vue'
@@ -16,13 +16,9 @@ const emit = defineEmits(['toggle', 'select', 'enter', 'leave', 'ctx'])
 const children = computed(() => props.tree[props.node.file_id] || null)
 const isOpen = computed(() => !!props.expanded[props.node.file_id])
 
-// 单击即导航（资源管理器标准行为，即时响应无延迟）：
-// 未展开的节点导航时自动展开；已展开的节点再次点击则收起。
-// 箭头点击只展开/收起不跳转。
+// 导航时由父组件幂等展开，已展开的目录保持展开状态。
 function onClick() {
-  const wasOpen = isOpen.value
   emit('select', props.node)
-  if (wasOpen) emit('toggle', props.node)
 }
 </script>
 

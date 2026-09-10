@@ -146,6 +146,9 @@ func TestWebDAVEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("download url: %v", err)
 	}
+	if dl.DownloadMode == "proxy" || dl.Concurrency == 1 {
+		t.Fatal("ordinary WebDAV downloads must not be forced to one connection")
+	}
 	resp, err := http.Get(dl.URL)
 	if err != nil {
 		t.Fatalf("get url: %v", err)

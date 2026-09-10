@@ -133,7 +133,7 @@ func (d *Driver) request(ctx context.Context, c drive.Context, pathName string, 
 		if proved {
 			prefix = ILANZOU_CONF.Proved
 		}
-		rawURL := ILANZOU_CONF.Base + "/" + prefix + pathName + "?" + params.Encode()
+		rawURL := ILANZOU_CONF.Base + "/" + prefix + pathName + "?" + encodeILanzouParams(params)
 		method := strings.ToUpper(opts.method)
 		if method == "" {
 			method = http.MethodGet
@@ -219,7 +219,9 @@ func ilanzouJSON(ctx context.Context, method, rawURL string, body any) (map[stri
 		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, truncate(string(text), 200))
 	}
 	var j map[string]any
-	if err := json.Unmarshal(text, &j); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(text))
+	decoder.UseNumber()
+	if err := decoder.Decode(&j); err != nil {
 		return nil, fmt.Errorf("ilanzou 响应异常: %s", truncate(string(text), 200))
 	}
 	return j, nil
@@ -287,7 +289,7 @@ func ilanzouLogin(ctx context.Context, username, password, uuid string) (*loginR
 
 	mapParams := signParams(deviceUuid, tsEnc)
 	mapParams.Set("appToken", token)
-	mapURL := ILANZOU_CONF.Base + "/" + ILANZOU_CONF.Proved + "/user/account/map?" + mapParams.Encode()
+	mapURL := ILANZOU_CONF.Base + "/" + ILANZOU_CONF.Proved + "/user/account/map?" + encodeILanzouParams(mapParams)
 	mapJSON, err := ilanzouJSON(ctx, http.MethodGet, mapURL, nil)
 	if err != nil {
 		return nil, err
@@ -320,10 +322,21 @@ func buildILanzouDownloadUrl(fileID, userID, token, uuid string) (string, error)
 	}
 	params := signParams(uuid, tsEnc)
 	params.Set("appToken", token)
-	params.Set("enable", "0")
+	params.Set("enable", "1")
 	params.Set("downloadId", downloadID)
 	params.Set("auth", auth)
-	return ILANZOU_CONF.Base + "/" + ILANZOU_CONF.Unproved + "/file/redirect?" + params.Encode(), nil
+	return ILANZOU_CONF.Base + "/" + ILANZOU_CONF.Unproved + "/file/redirect?" + encodeILanzouParams(params), nil
+}
+
+// The service requires literal colons in appToken; other reserved characters
+// must remain escaped so they cannot become query parameters.
+func encodeILanzouParams(params url.Values) string {
+	encoded := params.Encode()
+	if token := params.Get("appToken"); token != "" {
+		escaped := url.QueryEscape(token)
+		encoded = strings.Replace(encoded, "appToken="+escaped, "appToken="+strings.ReplaceAll(escaped, "%3A", ":"), 1)
+	}
+	return encoded
 }
 
 // ---- json helpers ----

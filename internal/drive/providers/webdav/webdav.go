@@ -168,17 +168,21 @@ func (d *Driver) GetDownloadURL(ctx context.Context, c drive.Context, fileID str
 	if err != nil {
 		return nil, err
 	}
+	mode, concurrency := "", 0
+	if requestAuth != nil {
+		// Digest nonce counts are request-specific. Only Digest needs ordered
+		// requests; other authentication modes use the user's concurrency.
+		mode, concurrency = "proxy", 1
+	}
 	return &model.DownloadURL{
-		DriveID:     c.DriveID,
-		FileID:      fileID,
-		URL:         downloadURL,
-		Size:        entry.Size,
-		Headers:     headers,
-		RequestAuth: requestAuth,
-		// Digest nonce counts are request-specific. Keep the transfer serial
-		// so requests arrive at stricter WebDAV servers in nonce-count order.
-		DownloadMode:        "proxy",
-		Concurrency:         1,
+		DriveID:             c.DriveID,
+		FileID:              fileID,
+		URL:                 downloadURL,
+		Size:                entry.Size,
+		Headers:             headers,
+		RequestAuth:         requestAuth,
+		DownloadMode:        mode,
+		Concurrency:         concurrency,
 		AllowPrivateNetwork: connAllowsPrivateNetwork(c),
 	}, nil
 }

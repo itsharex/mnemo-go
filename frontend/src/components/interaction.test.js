@@ -1,8 +1,13 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import Modal from './Modal.vue'
 import UiSelect from './UiSelect.vue'
+import ContextMenu from './ContextMenu.vue'
+import TreeNode from './TreeNode.vue'
+import AccountRail from './AccountRail.vue'
+import PreviewModal from './PreviewModal.vue'
+import * as appearance from '../appearance'
 
 const api = vi.hoisted(() => ({
   login: vi.fn(),
@@ -10,15 +15,27 @@ const api = vi.hoisted(() => ({
   validateMountedWrite: vi.fn(),
   SendGuangyaSms: vi.fn(),
   SendPan139SMS: vi.fn(),
+  SendPan189SMS: vi.fn(),
   providerIconUrl: vi.fn(() => ''),
   OpenBrowser: vi.fn(),
   onEvent: vi.fn(() => () => {}),
   ClosePikPakCaptcha: vi.fn(),
+  ShowPikPakCaptcha: vi.fn(),
   refreshAccount: vi.fn(),
   refreshAccountNow: vi.fn(),
   accountName: vi.fn((account) => account?.user_id || ''),
   providerMetaOf: vi.fn(() => ({ key: 'webdav', label: 'WebDAV' })),
+  providerOf: vi.fn((id) => String(id).split(':')[0]),
   formatBytes: vi.fn((value) => `${value} B`),
+  PreviewURL: vi.fn(),
+  PinFileSnapshot: vi.fn().mockResolvedValue(undefined),
+  openKindOf: vi.fn(file => file.name.endsWith('.wav') ? 'audio' : 'image'),
+  formatTime: vi.fn(() => ''),
+  saveCloudText: vi.fn(),
+  copyText: vi.fn(),
+  iconOf: vi.fn(() => 'image'),
+  getPlayCursor: vi.fn().mockResolvedValue(0),
+  savePlayCursor: vi.fn().mockResolvedValue(undefined),
 }))
 
 vi.mock('../api', () => api)
@@ -66,9 +83,196 @@ afterEach(async () => {
   localStorage.clear()
   vi.useRealTimers()
   vi.clearAllMocks()
+  vi.restoreAllMocks()
 })
 
 describe('关键交互组件', () => {
+  it.each(['image', 'audio'])('%s 预览加载中和失败后始终保留窗口关闭按钮', async (kind) => {
+    let rejectPreview
+    api.PreviewURL.mockImplementation(() => new Promise((resolve, reject) => { rejectPreview = reject }))
+    const wrapper = mountAttached(PreviewModal, { props: { account: { user_id: 'test', drive_id: 'test' }, file: { file_id: 'test', name: kind === 'audio' ? 'test.wav' : 'test.png' } } })
+    await flushPromises()
+    expect(document.querySelectorAll('.pv-window-btn')).toHaveLength(3)
+    rejectPreview(new Error('资源加载失败'))
+    await flushPromises()
+    expect(document.body.textContent).toContain('资源加载失败')
+    document.querySelector('.pv-window-close').click()
+    expect(wrapper.emitted('close')).toHaveLength(1)
+  })
+
+  it('音频滑杆保留原生方向键行为，不触发全局音量快捷键', async () => {
+    api.PinFileSnapshot.mockResolvedValue(undefined)
+    api.getPlayCursor.mockResolvedValue(0)
+    api.savePlayCursor.mockResolvedValue(undefined)
+    api.PreviewURL.mockResolvedValue('https://example.test/audio.wav')
+    const wrapper = mountAttached(PreviewModal, { props: { account: { user_id: 'test', drive_id: 'test' }, file: { file_id: 'test', name: 'test.wav' } } })
+    await flushPromises()
+    const before = wrapper.vm.audioVolume
+    expect(document.querySelector('.pv-audio-vol-range'), document.body.textContent).not.toBeNull()
+    document.querySelector('.pv-audio-vol-range').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }))
+    expect(wrapper.vm.audioVolume).toBe(before)
+  })
+
+  it('账号侧栏键盘焦点到达添加按钮后仍可返回账号', async () => {
+    const wrapper = mountAttached(AccountRail, { props: { accounts: [{ user_id: 'pikpak:one' }] } })
+    const account = wrapper.get('.rail-item')
+    account.element.focus()
+    await account.trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(wrapper.get('.rail-add').element)
+    await wrapper.get('.rail-add').trigger('keydown', { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(account.element)
+  })
+
+  it('鼠标仍在账号侧栏内时焦点移出不会收起侧栏', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountAttached(AccountRail, { props: { accounts: [{ user_id: 'pikpak:one' }] } })
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    await wrapper.get('.account-rail').trigger('mouseenter')
+    await vi.advanceTimersByTimeAsync(250)
+    wrapper.get('.rail-item').element.focus()
+    outside.focus()
+    await vi.advanceTimersByTimeAsync(250)
+    expect(wrapper.get('.account-rail').classes()).toContain('expanded')
+    await wrapper.get('.account-rail').trigger('mouseleave')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(wrapper.get('.account-rail').classes()).not.toContain('expanded')
+  })
+
+  it('账号侧栏右键菜单打开时保持宽度，不因鼠标移入菜单而收起', async () => {
+    vi.useFakeTimers()
+    const account = { user_id: 'pikpak:one' }
+    const wrapper = mountAttached(AccountRail, { props: { accounts: [account] } })
+    await wrapper.get('.account-rail').trigger('mouseenter')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(wrapper.get('.account-rail').classes()).toContain('expanded')
+    await wrapper.get('.rail-item').trigger('contextmenu', { clientX: 80, clientY: 100 })
+    await wrapper.get('.account-rail').trigger('mouseleave')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(wrapper.get('.account-rail').classes()).toContain('expanded')
+    expect(wrapper.emitted('select')).toBeUndefined()
+  })
+
+  it('账号拖拽取消或组件卸载时不保存临时顺序并清理拖动状态', async () => {
+    const save = vi.spyOn(appearance, 'setPref')
+    const accounts = [{ user_id: 'pikpak:one' }, { user_id: 'pikpak:two' }]
+    const wrapper = mountAttached(AccountRail, { props: { accounts } })
+    await wrapper.findAll('.rail-item')[0].trigger('pointerdown', { button: 0, clientX: 10, clientY: 10 })
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 10, clientY: 30 }))
+    expect(document.body.classList.contains('rail-drag-active')).toBe(true)
+    window.dispatchEvent(new MouseEvent('pointercancel'))
+    expect(save).not.toHaveBeenCalled()
+    expect(document.body.classList.contains('rail-drag-active')).toBe(false)
+    await wrapper.findAll('.rail-item')[0].trigger('pointerdown', { button: 0, clientX: 10, clientY: 10 })
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 10, clientY: 30 }))
+    wrapper.unmount()
+    wrappers.splice(wrappers.indexOf(wrapper), 1)
+    expect(document.body.classList.contains('rail-drag-active')).toBe(false)
+    window.dispatchEvent(new MouseEvent('pointerup'))
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it('目录树点击已展开目录只导航，箭头才折叠', async () => {
+    const node = { file_id: 'folder', name: '文件夹' }
+    const wrapper = mountAttached(TreeNode, { props: { node, tree: {}, expanded: { folder: true } } })
+    await wrapper.get('.tn-label').trigger('click')
+    expect(wrapper.emitted('select')).toEqual([[node]])
+    expect(wrapper.emitted('toggle')).toBeUndefined()
+    await wrapper.get('.tn-arrow').trigger('click')
+    expect(wrapper.emitted('toggle')).toEqual([[node]])
+    expect(wrapper.emitted('select')).toHaveLength(1)
+  })
+
+  it('右键菜单按实际尺寸避让窗口边缘', async () => {
+    const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      return this.classList.contains('ctx-menu') ? { width: 340, height: 120 } : { width: 0, height: 0 }
+    })
+    try {
+      mountAttached(ContextMenu, { props: { x: window.innerWidth - 10, y: window.innerHeight - 10, items: [{ label: '较长的操作名称', action: 'open' }] } })
+      await flushPromises()
+      const menu = document.querySelector('.ctx-menu')
+      expect(parseFloat(menu.style.left) + 340).toBeLessThanOrEqual(window.innerWidth - 8)
+      expect(parseFloat(menu.style.top) + 120).toBeLessThanOrEqual(window.innerHeight - 8)
+    } finally {
+      bounds.mockRestore()
+    }
+  })
+
+  it('菜单鼠标焦点与键盘确认一致，更新项目后重置选项', async () => {
+    const wrapper = mountAttached(ContextMenu, { props: { x: 10, y: 10, items: [
+      { label: '打开', action: 'open' }, { label: '删除', action: 'delete' },
+    ] } })
+    await flushPromises()
+    const buttons = document.querySelectorAll('.ctx-item')
+    buttons[1].focus()
+    buttons[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    expect(wrapper.emitted('select')).toEqual([['delete']])
+    await wrapper.setProps({ items: [{ label: '刷新', action: 'refresh' }] })
+    await flushPromises()
+    expect(document.activeElement.textContent).toContain('刷新')
+  })
+
+  it('菜单外部滚动关闭，内部滚动不关闭，Escape 恢复触发位置焦点', async () => {
+    const opener = document.createElement('button')
+    document.body.appendChild(opener)
+    opener.focus()
+    const wrapper = mountAttached(ContextMenu, { props: { x: 10, y: 10, items: [{ label: '打开', action: 'open' }] } })
+    await flushPromises()
+    const menu = document.querySelector('.ctx-menu')
+    menu.dispatchEvent(new Event('scroll'))
+    expect(wrapper.emitted('close')).toBeUndefined()
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    wrapper.unmount()
+    wrappers.splice(wrappers.indexOf(wrapper), 1)
+    expect(document.activeElement).toBe(opener)
+    const second = mountAttached(ContextMenu, { props: { x: 10, y: 10, items: [{ label: '刷新' }] } })
+    await flushPromises()
+    window.dispatchEvent(new Event('scroll'))
+    expect(second.emitted('close')).toHaveLength(1)
+  })
+
+  it('PikPak 独立窗口使用原会话，提前到达的最终 token 只自动登录一次', async () => {
+    localStorage.setItem('login_provider', 'pikpak')
+    let complete
+    api.onEvent.mockImplementation((name, callback) => {
+      if (name === 'pikpak:captcha:completed') complete = callback
+      return () => {}
+    })
+    api.login.mockReset()
+    api.login.mockRejectedValueOnce(new Error('pikpak: captcha_required\nurl=https://user.mypikpak.com/challenge\ntoken=initial-token\nsession=current-session'))
+      .mockResolvedValueOnce(undefined)
+    let opened
+    api.ShowPikPakCaptcha.mockImplementation(() => new Promise(resolve => { opened = resolve }))
+    const wrapper = mountAttached(LoginModal, {
+      props: { providers: [{ ID: 'pikpak', Meta: { label: 'PikPak' }, Login: { fields: [
+        { key: 'username', type: 'text', label: '账号', required: true },
+        { key: 'password', type: 'password', label: '密码', required: true },
+      ] } }] },
+      global: { stubs: { UiIcon: true } },
+    })
+    await nextTick()
+    const inputs = [...document.body.querySelectorAll('input')]
+    await setDomInput(inputs.find(input => input.type === 'text'), 'test@example.test')
+    await setDomInput(inputs.find(input => input.type === 'password'), 'password')
+    document.body.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(api.ShowPikPakCaptcha).toHaveBeenCalledWith('current-session', 'https://user.mypikpak.com/challenge')
+    expect(document.body.querySelector('iframe')).toBeNull()
+    complete({ session_id: 'stale-session', captcha_token: 'wrong' })
+    complete({ session_id: 'current-session', captcha_token: 'final-token' })
+    expect(api.login).toHaveBeenCalledTimes(1)
+    opened(true)
+    await flushPromises()
+    expect(api.login).toHaveBeenCalledTimes(2)
+    expect(api.login.mock.calls[1][1]).toMatchObject({ captcha_token: 'final-token', captcha_verified: 'true' })
+    complete({ session_id: 'current-session', captcha_token: 'final-token' })
+    await flushPromises()
+    expect(api.login).toHaveBeenCalledTimes(2)
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    api.onEvent.mockImplementation(() => () => {})
+  })
+
   it('弹窗声明对话框语义，并由 Escape 请求关闭和恢复焦点', async () => {
     const opener = document.createElement('button')
     document.body.appendChild(opener)
@@ -204,6 +408,48 @@ describe('关键交互组件', () => {
     const cloudType = pan189.findComponent(UiSelect)
     expect(cloudType.props('modelValue')).toBe('personal')
     expect(cloudType.props('options')).toContainEqual({ value: 'family', label: '家庭云' })
+  })
+
+  it.each(['pan139', 'pan189'])('%s 可主动选择短信登录且不要求密码', async (id) => {
+    localStorage.setItem('login_provider', id)
+    api.login.mockResolvedValue(undefined)
+    api.SendPan139SMS.mockResolvedValue(undefined)
+    api.SendPan189SMS.mockResolvedValue('')
+    if (id === 'pan189') api.SendPan189SMS.mockResolvedValueOnce('data:image/png;base64,dGVzdA==')
+    const wrapper = mountAttached(LoginModal, {
+      props: { providers: [{ ID: id, Meta: { label: id }, Login: { fields: [
+        { key: 'login_mode', type: 'select', label: '登录方式', required: true, options: [{ value: 'password', label: '账号密码' }, { value: 'sms', label: '短信验证码' }] },
+        { key: 'username', type: 'text', label: '手机号', required: true },
+        { key: 'password', type: 'password', label: '密码', required: true },
+        { key: 'sms_code', type: 'text', label: '短信验证码' },
+        { key: 'validate_code', type: 'text', label: '图形验证码' },
+      ] } }] }, global: { stubs: { UiIcon: true } },
+    })
+    const mode = wrapper.findComponent(UiSelect)
+    mode.vm.$emit('update:modelValue', 'sms')
+    await nextTick()
+    const field = (label) => [...document.body.querySelectorAll('.login-field')].find((f) => f.querySelector('label')?.textContent === label)
+    expect(field('密码').style.display).toBe('none')
+    expect(field('短信验证码').style.display).not.toBe('none')
+    await setDomInput(field('手机号').querySelector('input'), '13800138000')
+    await field('短信验证码').querySelector('button').click()
+    await flushPromises()
+    const send = id === 'pan139' ? api.SendPan139SMS : api.SendPan189SMS
+    expect(send.mock.calls[0][0]).toBe('13800138000')
+    if (id === 'pan189') {
+      expect(document.body.querySelector('.captcha-image-row img')?.getAttribute('src')).toBe('data:image/png;base64,dGVzdA==')
+      expect(field('图形验证码').style.display).not.toBe('none')
+      expect(field('短信验证码').querySelector('button').disabled).toBe(false)
+      await setDomInput(field('图形验证码').querySelector('input'), 'ABCD')
+      await field('短信验证码').querySelector('button').click()
+      await flushPromises()
+      expect(api.SendPan189SMS).toHaveBeenLastCalledWith('13800138000', 'ABCD')
+    }
+    await setDomInput(field('短信验证码').querySelector('input'), '123456')
+    document.body.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(api.login).toHaveBeenCalledWith(id, expect.objectContaining({ login_mode: 'sms', username: '13800138000', sms_code: '123456' }))
+    expect(api.login.mock.calls[0][1].password).toBeUndefined()
   })
 
   it('139 账密触发安全校验后复用登录会话完成短信验证', async () => {

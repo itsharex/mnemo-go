@@ -75,8 +75,9 @@ type Metadata struct {
 
 // client is an authenticated Dropbox session.
 type client struct {
-	http  *netx.Client
-	token string
+	http    *netx.Client
+	token   string
+	session *model.TokenInfo
 }
 
 func newClient(token string) *client {
@@ -87,11 +88,41 @@ func clientOf(c drive.Context) (*client, error) {
 	if c.Token == nil || c.Token.AccessToken == "" {
 		return nil, drive.ErrUnauthorized
 	}
-	return newClient(c.Token.AccessToken), nil
+	cl := newClient(c.Token.AccessToken)
+	cl.session = c.Token
+	return cl, nil
+}
+
+func (c *client) renew(ctx context.Context) error {
+	if c.session == nil || strings.TrimSpace(c.session.RefreshToken) == "" {
+		return fmt.Errorf("%w: Dropbox 授权已过期，请重新授权此账号", drive.ErrUnauthorized)
+	}
+	if err := renewDropboxSession(ctx, c.session); err != nil {
+		return err
+	}
+	c.token = c.session.AccessToken
+	return nil
+}
+
+func expiredDropboxAccessToken(status int, body []byte) bool {
+	if status != http.StatusUnauthorized {
+		return false
+	}
+	var result struct {
+		Summary string `json:"error_summary"`
+		Error   struct {
+			Tag string `json:".tag"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &result) != nil {
+		return false
+	}
+	return result.Error.Tag == "expired_access_token" || strings.TrimSuffix(result.Summary, "/") == "expired_access_token"
 }
 
 // rpc posts a JSON body to an RPC endpoint and decodes the JSON response.
 func (c *client) rpc(ctx context.Context, endpoint string, body any, out any) error {
+	refreshed := false
 	headers := map[string]string{
 		"Authorization": "Bearer " + c.token,
 		"Content-Type":  "application/json",
@@ -122,6 +153,15 @@ func (c *client) rpc(ctx context.Context, endpoint string, body any, out any) er
 		}
 
 		apiErr := newDropboxRPCError(endpoint, status, requestID, data)
+		if !refreshed && expiredDropboxAccessToken(status, data) {
+			refreshed = true
+			if err := c.renew(ctx); err != nil {
+				return errors.Join(apiErr, err)
+			}
+			headers["Authorization"] = "Bearer " + c.token
+			attempt-- // Authentication recovery has its own one-retry budget.
+			continue
+		}
 		if !retryableDropboxStatus(status) || attempt == rpcRetryAttempts-1 {
 			return apiErr
 		}
@@ -677,6 +717,7 @@ func (c *client) sessionFinish(ctx context.Context, sessID string, offset int64,
 }
 
 func (c *client) contentJSON(ctx context.Context, endpoint string, apiArg []byte, chunk []byte, out any) error {
+	refreshed := false
 	headers := map[string]string{
 		"Authorization": "Bearer " + c.token,
 		"Content-Type":  "application/octet-stream",
@@ -689,15 +730,27 @@ func (c *client) contentJSON(ctx context.Context, endpoint string, apiArg []byte
 		if err != nil {
 			return err
 		}
-		data, _ := io.ReadAll(resp.Body)
+		data, readErr := io.ReadAll(resp.Body)
 		status := resp.StatusCode
 		delay := retryAfter(resp, attempt)
 		resp.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("dropbox: %s response read failed: %w", endpoint, readErr)
+		}
 		if status < 400 {
 			if out != nil {
 				return json.Unmarshal(data, out)
 			}
 			return nil
+		}
+		if !refreshed && expiredDropboxAccessToken(status, data) {
+			refreshed = true
+			if err := c.renew(ctx); err != nil {
+				return err
+			}
+			headers["Authorization"] = "Bearer " + c.token
+			attempt--
+			continue
 		}
 		if !retryableDropboxStatus(status) || attempt == 2 {
 			return fmt.Errorf("dropbox: %s http %d: %s", endpoint, status, strings.TrimSpace(string(data)))
@@ -931,12 +984,23 @@ func fetchDropboxProfile(ctx context.Context, accessToken string, tok *model.Tok
 // refresh_token, then fetches account profile and space usage to update the
 // token metadata.
 func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *model.TokenInfo) (*model.TokenInfo, error) {
+	if err := renewDropboxSession(ctx, token); err != nil {
+		return nil, err
+	}
+	fetchDropboxProfile(ctx, token.AccessToken, token)
+	applyDropboxIdentity(token)
+	return token, nil
+}
+
+// Renew only OAuth fields during ordinary file operations. Profile/quota RPCs
+// belong to explicit account refreshes, and must not recurse into auth recovery.
+func renewDropboxSession(ctx context.Context, token *model.TokenInfo) error {
 	if token == nil {
-		return nil, errors.New("Dropbox 未登录")
+		return errors.New("Dropbox 未登录")
 	}
 	refreshToken := strings.TrimSpace(token.RefreshToken)
 	if refreshToken == "" {
-		return nil, errors.New("dropbox: missing refresh_token")
+		return errors.New("dropbox: missing refresh_token")
 	}
 	configuredKey := strings.TrimSpace(drive.Secret("dropbox_app_key"))
 	appKey := strings.TrimSpace(token.DeviceID)
@@ -947,7 +1011,7 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 
 	fresh, err := refreshDropboxToken(ctx, appKey, appSecret, refreshToken)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// preserve fields not returned by the token endpoint
@@ -970,11 +1034,7 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	token.TokenFrom = providerID
 	token.DeviceID = appKey
 
-	// update account info + quota (non-blocking on error)
-	fetchDropboxProfile(ctx, token.AccessToken, token)
-	applyDropboxIdentity(token)
-
-	return token, nil
+	return nil
 }
 
 // ResolveTransferHash returns Dropbox's content hash from metadata. Dropbox

@@ -149,6 +149,10 @@ func strVal(m map[string]json.RawMessage, key string) string {
 		if json.Unmarshal(v, &s) == nil {
 			return s
 		}
+		var n json.Number
+		if string(v) != "null" && json.Unmarshal(v, &n) == nil {
+			return n.String()
+		}
 	}
 	return ""
 }
@@ -349,6 +353,10 @@ func jsonEscape(s string) string {
 // back to a silent re-login when the open token is invalid or credentials are
 // stored (mirrors legacy refreshPan189Session).
 func (d *Driver) refreshSession(ctx context.Context, tok *model.TokenInfo, sess *Session) (*Session, error) {
+	return d.refreshSessionOnce(ctx, sess, true)
+}
+
+func (d *Driver) refreshSessionOnce(ctx context.Context, sess *Session, allowRefresh bool) (*Session, error) {
 	relogin := func() (*Session, error) {
 		if sess.Username == "" || sess.Password == "" {
 			return nil, errors.New("无法刷新 189 Session")
@@ -384,7 +392,10 @@ func (d *Driver) refreshSession(ctx context.Context, tok *model.TokenInfo, sess 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	var j map[string]json.RawMessage
 	if err := json.Unmarshal(body, &j); err != nil {
 		return nil, fmt.Errorf("刷新 189 Session 失败: %s", truncateStr(string(body), 160))
@@ -392,6 +403,15 @@ func (d *Driver) refreshSession(ctx context.Context, tok *model.TokenInfo, sess 
 	code := strVal(j, "errorCode")
 	resCode := strVal(j, "res_code")
 	if code == "UserInvalidOpenToken" || resCode == "UserInvalidOpenToken" {
+		if allowRefresh && sess.RefreshToken != "" {
+			next, refreshErr := refreshPan189OpenToken(ctx, sess)
+			if refreshErr == nil {
+				return d.refreshSessionOnce(ctx, next, false)
+			}
+			if sess.Username == "" || sess.Password == "" {
+				return nil, refreshErr
+			}
+		}
 		if sess.Username != "" && sess.Password != "" {
 			return relogin()
 		}
@@ -415,6 +435,36 @@ func (d *Driver) refreshSession(ctx context.Context, tok *model.TokenInfo, sess 
 		return relogin()
 	}
 	return nil, errors.New(firstNonEmpty(strVal(j, "res_message"), strVal(j, "message"), "刷新 189 Session 失败"))
+}
+
+func refreshPan189OpenToken(ctx context.Context, sess *Session) (*Session, error) {
+	form := url.Values{"clientId": {appID}, "refreshToken": {sess.RefreshToken}, "grantType": {"refresh_token"}, "format": {"json"}}
+	hc := netx.NewClient(60 * time.Second)
+	resp, err := hc.Do(ctx, http.MethodPost, "https://open.e.189.cn/api/oauth2/refreshToken.do", map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json", "User-Agent": ua189,
+	}, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return nil, err
+	}
+	var j map[string]json.RawMessage
+	if err := json.Unmarshal(body, &j); err != nil {
+		return nil, errors.New("189 令牌续期响应无效，请重新登录")
+	}
+	access := strVal(j, "accessToken")
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || access == "" {
+		return nil, errors.New("189 令牌续期失败，请重新登录")
+	}
+	next := *sess
+	next.AccessToken = access
+	if refresh := strVal(j, "refreshToken"); refresh != "" {
+		next.RefreshToken = refresh
+	}
+	return &next, nil
 }
 
 // getFamilyList resolves the family cloud list for a freshly logged-in session

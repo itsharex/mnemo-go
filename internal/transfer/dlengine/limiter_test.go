@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -165,6 +166,91 @@ func TestDownloadContinuesAfterShortRangeResponse(t *testing.T) {
 	}
 	if len(rangeStarts) != 2 || rangeStarts[0] != 0 || rangeStarts[1] != 1024 {
 		t.Fatalf("range starts = %v, want [0 1024]", rangeStarts)
+	}
+}
+
+func TestDownloadResumeRequiresIntactPartFile(t *testing.T) {
+	payload := bytes.Repeat([]byte("resume-data"), 1024)
+	for _, mode := range []string{"missing", "truncated", "oversized", "intact"} {
+		t.Run(mode, func(t *testing.T) {
+			var requests atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				start, end, ok := parseTestRange(r.Header.Get("Range"))
+				if !ok || end >= int64(len(payload)) {
+					http.Error(w, "invalid range", http.StatusBadRequest)
+					return
+				}
+				if end != 0 {
+					requests.Add(1)
+				}
+				w.Header().Set("ETag", `"resume-v1"`)
+				writeTestRange(w, start, end, int64(len(payload)), payload[start:end+1])
+			}))
+			defer server.Close()
+			path := filepath.Join(t.TempDir(), "resume.bin")
+			part := append([]byte(nil), payload...)
+			switch mode {
+			case "truncated":
+				part = part[:len(part)/2]
+			case "oversized":
+				part = append(part, 'x')
+			}
+			if mode != "missing" {
+				if err := os.WriteFile(path+".part", part, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			st := &state{URLHash: urlFingerprint(server.URL), Total: int64(len(payload)),
+				Chunk: int64(len(payload) / 2), Done: []bool{true, true}, ETag: `"resume-v1"`}
+			if err := persistState(path+".state.json", st); err != nil {
+				t.Fatal(err)
+			}
+			if err := Download(context.Background(), Options{Concurrency: 2, ChunkSize: st.Chunk, MinSize: 1}, server.URL, path, nil); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatal("download reported success with corrupt resumed contents")
+			}
+			wantRequests := int64(2)
+			if mode == "intact" {
+				wantRequests = 0
+			}
+			if requests.Load() != wantRequests {
+				t.Fatalf("chunk requests = %d, want %d", requests.Load(), wantRequests)
+			}
+		})
+	}
+}
+
+func TestDownloadFallsBackWhenServerStopsHonoringRanges(t *testing.T) {
+	payload := bytes.Repeat([]byte("range-fallback"), 1024)
+	var fullRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") == "bytes=0-0" {
+			writeTestRange(w, 0, 0, int64(len(payload)), payload[:1])
+			return
+		}
+		if r.Header.Get("Range") == "" {
+			fullRequests.Add(1)
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "fallback.bin")
+	if err := Download(context.Background(), Options{Concurrency: 2, ChunkSize: 1024, MinSize: 1}, server.URL, path, nil); err != nil {
+		t.Fatalf("range rejection should fall back to a full request: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) || fullRequests.Load() != 1 {
+		t.Fatalf("incorrect fallback contents or full request count: %d", fullRequests.Load())
 	}
 }
 

@@ -514,7 +514,9 @@ func mapFile(item *File, driveID, parentID string) model.File {
 		}
 	}
 	f := driveutil.NewFile(driveID, item.ID, parentID, item.Name, isDir, item.Size, timeUnix)
-	f.Thumbnail = item.Thumbnail
+	if !isDir {
+		f.Thumbnail = item.Thumbnail
+	}
 	f.Starred = item.Starred
 	f.Ext = item.FileExtension
 	f.Category = driveutil.GuessCategory(item.Name)

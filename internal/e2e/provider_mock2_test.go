@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1254,8 +1255,8 @@ func (r guangyaAuthRewriteRT) RoundTrip(req *http.Request) (*http.Response, erro
 // The personalCloudHost is stored in the token and points at the mocked host,
 // so /file/list is served by the same mock.
 func TestPan139ListMock(t *testing.T) {
-	// authorization = base64("user:account:tok|a|b|c|<future-ms>")
-	authorization := "Basic " + base64Std("user:account:tok|a|b|c|4102444800000")
+	// Cloud SSO expiry is field 4; metadata can follow it.
+	authorization := "Basic " + base64Std("user:account:tok|a|b|4102444800000|metadata")
 
 	mock := MockAPI(t, "api.mail.10086.cn", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/file/list" {
@@ -1298,7 +1299,7 @@ func TestPan139ListMock(t *testing.T) {
 // TestPan139UploadMock verifies the newer SHA-256 precreate upload protocol:
 // create -> presigned PUT -> complete.
 func TestPan139UploadMock(t *testing.T) {
-	authorization := "Basic " + base64Std("user:account:tok|a|b|c|4102444800000")
+	authorization := "Basic " + base64Std("user:account:tok|a|b|4102444800000|metadata")
 	var paths []string
 	var createBody map[string]any
 	mock := MockAPI(t, "api.mail.10086.cn", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1376,7 +1377,7 @@ func TestPan139UploadMock(t *testing.T) {
 // by listing, detail, download, folder and batch management operations.
 func TestPan139FileOperationsMock(t *testing.T) {
 	drive.ClearFileMetaCache()
-	authorization := "Basic " + base64Std("user:account:tok|a|b|c|4102444800000")
+	authorization := "Basic " + base64Std("user:account:tok|a|b|4102444800000|metadata")
 	var paths []string
 	mock := MockAPI(t, "api.mail.10086.cn", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
@@ -1758,34 +1759,7 @@ func TestS3CopyEncodesSpecialObjectName(t *testing.T) {
 }
 
 func base64Std(s string) string {
-	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	buf := []byte(s)
-	var out []byte
-	for i := 0; i < len(buf); i += 3 {
-		var b [3]byte
-		rem := 0
-		for k := 0; k < 3 && i+k < len(buf); k++ {
-			b[k] = buf[i+k]
-			rem = k + 1
-		}
-		out = append(out, chars[(b[0]&0xFC)>>2])
-		if rem >= 2 {
-			out = append(out, chars[((b[0]&0x03)<<4)|((b[1]&0xF0)>>4)])
-		} else {
-			out = append(out, '=')
-		}
-		if rem >= 3 {
-			out = append(out, chars[((b[1]&0x0F)<<2)|((b[2]&0xC0)>>6)])
-		} else {
-			out = append(out, '=')
-		}
-		if rem >= 3 {
-			out = append(out, chars[b[2]&0x3F])
-		} else {
-			out = append(out, '=')
-		}
-	}
-	return string(out)
+	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
 var _ = drive.ErrNotFound

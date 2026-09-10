@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,7 +137,6 @@ func TestPikPakCaptchaCallbackCompletesCurrentSession(t *testing.T) {
 		token string
 	}{
 		{name: "with-final-token", token: "verified-captcha-token-123456"},
-		{name: "redirect-only"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -179,6 +180,68 @@ func TestPikPakCaptchaCallbackCompletesCurrentSession(t *testing.T) {
 	}
 }
 
+func TestPikPakCaptchaFragmentCallback(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required to execute the browser callback script")
+	}
+	for _, key := range []string{"captcha_token", "captchaToken", "token", ""} {
+		t.Run("fragment-"+key, func(t *testing.T) {
+			defer captcha.Close()
+			done := make(chan string, 2)
+			session, err := captcha.Start(func(_ captcha.Session, token string) { done <- token })
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ""
+			callbackURL := session.CallbackURL
+			if key != "" {
+				want = "verified-fragment-token-123456"
+				callbackURL += "#" + key + "=" + want
+			}
+			// Real HTTP strips the fragment. The landing page must wait for its
+			// browser script instead of completing with an empty token on GET.
+			resp, err := http.Get(callbackURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case token := <-done:
+				t.Fatalf("callback completed before browser forwarded fragment: %q", token)
+			case <-time.After(50 * time.Millisecond):
+			}
+			// Execute the actual landing-page JavaScript with browser URL state;
+			// fetch still uses real HTTP against the callback server.
+			script := `const vm = require('node:vm');
+const page = process.argv[1], location = new URL(process.argv[2]);
+const script = page.match(/<script>([\s\S]*?)<\/script>/)[1];
+const document = {getElementById: () => ({textContent: ''})};
+Promise.resolve(vm.runInNewContext(script, {
+ location, URLSearchParams, document,
+ history: {replaceState() {}},
+ fetch: (path, opts) => fetch(new URL(path, location), opts),
+ setTimeout() {}, window: {close() {}}
+})).catch(err => {console.error(err); process.exitCode = 1});`
+			if output, err := exec.Command(node, "-e", script, string(page), callbackURL).CombinedOutput(); err != nil {
+				t.Fatalf("callback script: %v\n%s", err, output)
+			}
+			select {
+			case got := <-done:
+				if got != want {
+					t.Fatalf("callback token = %q, want %q", got, want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("browser callback did not complete")
+			}
+		})
+	}
+}
+
 func TestPikPakCaptchaDelayedCloseKeepsNewSessionAlive(t *testing.T) {
 	defer captcha.Close()
 	oldCompleted := make(chan captcha.Session, 1)
@@ -188,7 +251,7 @@ func TestPikPakCaptchaDelayedCloseKeepsNewSessionAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start old captcha session: %v", err)
 	}
-	oldResponse, err := http.Get(oldSession.CallbackURL)
+	oldResponse, err := http.PostForm(oldSession.CallbackURL, url.Values{})
 	if err != nil {
 		t.Fatalf("complete old captcha session: %v", err)
 	}
@@ -212,7 +275,7 @@ func TestPikPakCaptchaDelayedCloseKeepsNewSessionAlive(t *testing.T) {
 	// The first session schedules a delayed cleanup. It must compare session IDs
 	// instead of closing the current session after a reload has created a new one.
 	time.Sleep(2200 * time.Millisecond)
-	newResponse, err := http.Get(newSession.CallbackURL)
+	newResponse, err := http.PostForm(newSession.CallbackURL, url.Values{})
 	if err != nil {
 		t.Fatalf("new captcha callback after delayed cleanup: %v", err)
 	}
@@ -1078,6 +1141,30 @@ func TestPikPakDownloadURL(t *testing.T) {
 	}
 }
 
+func TestPikPakDownloadPreservesFileDetailFailure(t *testing.T) {
+	var fallbackCalls int
+	MockAPI(t, "api-drive.mypikpak.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/drive/v1/files/permission-file":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":"permission_denied","error_description":"file access is forbidden"}`)
+		case "/drive/v1/files/permission-file/download":
+			fallbackCalls++
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":"not_found"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	ctx := drive.Context{UserID: "pikpak_permission_test", TokenFrom: "pikpak", Token: &model.TokenInfo{
+		AccessToken: "test-token", DeviceID: "test-device", ProviderAccountID: "test-account",
+	}}
+	_, err := drive.New("pikpak").GetDownloadURL(context.Background(), ctx, "permission-file", 3600)
+	if err == nil || !strings.Contains(err.Error(), "forbidden") || fallbackCalls != 0 {
+		t.Fatalf("detail permission error must not become fallback not_found: err=%v fallbackCalls=%d", err, fallbackCalls)
+	}
+}
+
 func TestOneDriveListMock(t *testing.T) {
 	mock := MockAPI(t, "graph.microsoft.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1.0/me/drive/root/children" {
@@ -1128,6 +1215,46 @@ func TestOneDriveDownloadURL(t *testing.T) {
 	}
 	if dl.URL == "" {
 		t.Fatal("empty download URL")
+	}
+}
+
+func TestDropboxExpiredTokenIsRefreshedAndPersisted(t *testing.T) {
+	refreshes := 0
+	MockAPI(t, "api.dropboxapi.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth2/token" {
+			refreshes++
+			_, _ = io.WriteString(w, `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":14400}`)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer new-access" {
+			w.WriteHeader(401)
+			_, _ = io.WriteString(w, `{"error_summary":"expired_access_token/"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"entries":[{".tag":"file","id":"id:one","name":"one.txt"}],"has_more":false}`)
+	}))
+	uid, did, st := SeedAccount(t, "dropbox", &model.TokenInfo{TokenFrom: "dropbox", AccessToken: "old-access", RefreshToken: "old-refresh"})
+	drive.SetTokenUpdater(func(userID, driveID string, token *model.TokenInfo) error {
+		account, err := st.GetAccount(userID)
+		if err != nil {
+			return err
+		}
+		account.Token = token
+		return st.SaveAccount(account)
+	})
+	t.Cleanup(func() { drive.SetTokenUpdater(nil) })
+	for i := 0; i < 2; i++ {
+		files, err := drive.ListDir(uid, did, "dropbox_root", nil)
+		if err != nil || len(files) != 1 {
+			t.Fatalf("listing %d: %v, %v", i, files, err)
+		}
+	}
+	account, err := st.GetAccount(uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshes != 1 || account.Token.AccessToken != "new-access" || account.Token.RefreshToken != "new-refresh" || account.Token.ExpireTime == "" {
+		t.Fatal("next operation did not reuse persisted refreshed token")
 	}
 }
 

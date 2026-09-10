@@ -498,7 +498,12 @@ func (a *App) OpenPikPakCaptcha(url string) error {
 	})
 }
 
-// ClosePikPakCaptcha closes the temporary challenge window, if any.
+// ShowPikPakCaptcha opens the challenge using the existing login session.
+func (a *App) ShowPikPakCaptcha(sessionID, url string) (bool, error) {
+	return captcha.Show(sessionID, url, filepath.Join(a.dataDirectory(), "pikpak-captcha"))
+}
+
+// ClosePikPakCaptcha closes both the challenge window and its callback session.
 func (a *App) ClosePikPakCaptcha() {
 	logging.Debug("closing PikPak captcha session")
 	captcha.Close()
@@ -542,9 +547,14 @@ func (a *App) GetPan189Captcha() string {
 	return pan189.CaptchaImage()
 }
 
-// SendPan139SMS sends the second-factor code for a pending 139 password login.
+// SendPan139SMS sends a direct-login or password-verification SMS code.
 func (a *App) SendPan139SMS(username string) error {
 	return pan139.RequestPan139SMS(context.Background(), username)
+}
+
+// SendPan189SMS returns a captcha image, or an empty string after sending.
+func (a *App) SendPan189SMS(username, validateCode string) (string, error) {
+	return pan189.RequestPan189SMS(context.Background(), username, validateCode)
 }
 
 // ProviderLogin performs a login for a provider with form config.
@@ -577,7 +587,7 @@ func (a *App) ProviderLogin(provider string, config map[string]string) (*model.A
 		captchaSession = session
 		// The callback must be set before PikPak issues its challenge URL; adding
 		// it to an already-issued URL cannot change the provider-side redirect.
-		config["captcha_redirect_uri"] = session.CallbackURL
+		config["captcha_redirect_uri"] = captcha.RedirectURI(*session)
 	}
 	secrets := a.secretsSnapshot()
 	if secrets.OnedriveClientID != "" {

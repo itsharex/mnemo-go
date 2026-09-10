@@ -134,6 +134,7 @@ async function save() {
 
 async function toggle(job) {
   if (running.value.has(job.id)) return
+  syncStateVersion++
   running.value = new Set([...running.value, job.id])
   const next = { ...job, enabled: !job.enabled }
   try {
@@ -141,12 +142,14 @@ async function toggle(job) {
     job.enabled = next.enabled
   } catch (e) { emit('toast', String(e), 'error') }
   finally {
+    syncStateVersion++
     const s = new Set(running.value); s.delete(job.id); running.value = s
   }
 }
 
 async function run(job) {
   if (running.value.has(job.id)) return
+  syncStateVersion++
   running.value = new Set([...running.value, job.id])
   emit('toast', `开始同步「${job.name}」…`, 'success')
   try {
@@ -157,6 +160,7 @@ async function run(job) {
     if (/cancel|取消|停止/i.test(message)) emit('toast', `「${job.name}」已停止`, 'info')
     else emit('toast', message, 'error')
   }
+  syncStateVersion++
   const s = new Set(running.value)
   s.delete(job.id)
   running.value = s

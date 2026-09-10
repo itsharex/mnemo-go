@@ -111,6 +111,20 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('同步初始化的旧运行列表不能清除刚启动的任务', async () => {
+    api.ListSyncConfigs.mockResolvedValue([])
+    let resolveInitial, resolveRun
+    api.ListRunningSyncIDs.mockImplementation(() => new Promise(resolve => { resolveInitial = resolve }))
+    api.RunSync.mockImplementation(() => new Promise(resolve => { resolveRun = resolve }))
+    const wrapper = mountAttached(SyncView)
+    const task = wrapper.vm.run({ id: 'sync-new', name: '任务' })
+    resolveInitial([])
+    await flushPromises()
+    expect(wrapper.vm.running.has('sync-new')).toBe(true)
+    resolveRun()
+    await task
+    expect(wrapper.vm.running.has('sync-new')).toBe(false)
+  })
   it('同步任务刷新乱序时保留最新列表', async () => {
     const pending = []
     api.ListSyncConfigs.mockImplementation(() => new Promise(resolve => pending.push(resolve)))

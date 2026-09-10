@@ -41,8 +41,15 @@ function emptyForm() {
   return { name: '', local_dir: '', user_id: '', drive_id: '', remote_dir: 'root', remote_name: '根目录', direction: 'two-way', intervalMin: 0, deletePropagation: false }
 }
 
-function refresh() {
-  ListSyncConfigs().then((j) => { jobs.value = j || [] }).catch((e) => emit('toast', String(e), 'error'))
+let refreshSeq = 0
+async function refresh() {
+  const seq = ++refreshSeq
+  try {
+    const list = await ListSyncConfigs()
+    if (seq === refreshSeq) jobs.value = list || []
+  } catch (e) {
+    if (seq === refreshSeq) emit('toast', String(e), 'error')
+  }
 }
 
 function accountOf(job) {
@@ -215,7 +222,11 @@ onMounted(() => {
     if (syncStateVersion === requestedAtVersion) running.value = new Set(ids || [])
   }).catch(() => {})
 })
-onBeforeUnmount(() => offs.forEach((off) => off && off()))
+onBeforeUnmount(() => {
+  ++refreshSeq
+  ++syncStateVersion
+  offs.forEach((off) => off && off())
+})
 </script>
 
 <template>

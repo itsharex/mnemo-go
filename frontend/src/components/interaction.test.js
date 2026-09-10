@@ -9,11 +9,19 @@ import AccountRail from './AccountRail.vue'
 import PreviewModal from './PreviewModal.vue'
 import PlayerPanel from './PlayerPanel.vue'
 import ShareView from '../views/ShareView.vue'
+import SyncView from '../views/SyncView.vue'
 import * as appearance from '../appearance'
 
 const api = vi.hoisted(() => ({
   login: vi.fn(),
   ListShareHistory: vi.fn(),
+  ListSyncConfigs: vi.fn(),
+  ListRunningSyncIDs: vi.fn(),
+  SaveSyncConfig: vi.fn(),
+  DeleteSyncConfig: vi.fn(),
+  RunSync: vi.fn(),
+  CancelSync: vi.fn(),
+  PickDirectory: vi.fn(),
   capsOf: vi.fn(),
   importShare: vi.fn(),
   saveImportedShare: vi.fn(),
@@ -103,6 +111,18 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('同步任务刷新乱序时保留最新列表', async () => {
+    const pending = []
+    api.ListSyncConfigs.mockImplementation(() => new Promise(resolve => pending.push(resolve)))
+    api.ListRunningSyncIDs.mockResolvedValue([])
+    const wrapper = mountAttached(SyncView)
+    wrapper.vm.refresh()
+    pending[1]([{ id: 'new', name: '新任务' }])
+    await flushPromises()
+    pending[0]([{ id: 'old', name: '旧任务' }])
+    await flushPromises()
+    expect(wrapper.vm.jobs.map(job => job.id)).toEqual(['new'])
+  })
   it('分享解析期间目标账号被移除时丢弃旧会话', async () => {
     api.ListShareHistory.mockResolvedValue([])
     api.capsOf.mockReturnValue({ importShare: true })

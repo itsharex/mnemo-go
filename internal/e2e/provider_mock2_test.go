@@ -1460,7 +1460,7 @@ func TestPan139FileOperationsMock(t *testing.T) {
 }
 
 // TestS3ListMock exercises the s3 driver against a mock S3-compatible server.
-func TestS3ValidateFallsBackToPrefixListWhenHeadBucketIsForbidden(t *testing.T) {
+func TestS3ValidatePrefixSkipsUnnecessaryHeadBucket(t *testing.T) {
 	var methods []string
 	mock := MockAPI(t, "s3-validate.example.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		methods = append(methods, r.Method)
@@ -1490,8 +1490,8 @@ func TestS3ValidateFallsBackToPrefixListWhenHeadBucketIsForbidden(t *testing.T) 
 	if err != nil {
 		t.Fatalf("S3 prefix-scoped validation: %v", err)
 	}
-	if strings.Join(methods, ",") != "HEAD,GET" {
-		t.Fatalf("validation methods = %v, want HEAD then GET", methods)
+	if strings.Join(methods, ",") != "GET" {
+		t.Fatalf("validation methods = %v, want one prefix GET", methods)
 	}
 }
 

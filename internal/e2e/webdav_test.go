@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -224,6 +225,12 @@ func TestWebDAVConnectionKeepsCollectionSlashAndReportsQuota(t *testing.T) {
 	var requests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
+		if requests == 1 {
+			body, _ := io.ReadAll(r.Body)
+			if r.Header.Get("Depth") != "0" || strings.Contains(string(body), "allprop") || !strings.Contains(string(body), "resourcetype") {
+				t.Errorf("validation must request only collection type, depth=0: %s", body)
+			}
+		}
 		if r.Method != "PROPFIND" || r.URL.Path != "/dav/" {
 			http.Error(w, "WebDAV collection URL must end with a slash", 530)
 			return

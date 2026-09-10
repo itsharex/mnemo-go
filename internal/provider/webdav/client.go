@@ -104,7 +104,7 @@ func New(conn *model.ConnConfig, timeout time.Duration) (*Client, error) {
 		digest = state.(*digestState)
 	}
 	return &Client{
-		HTTP:     netx.NewClient(timeout).HTTP,
+		HTTP:     netx.NewClientWithSystemProxy(timeout).HTTP,
 		Endpoint: base.String(),
 		Username: conn.Username,
 		Password: conn.Password,
@@ -909,7 +909,24 @@ func (c *Client) List(ctx context.Context, href string) ([]Entry, error) {
 
 // Stat PROPFINDs a single resource (depth 0).
 func (c *Client) Stat(ctx context.Context, href string) (*Entry, error) {
-	req, err := c.newReq(ctx, "PROPFIND", href, strings.NewReader(propfindAllBody), map[string]string{
+	return c.stat(ctx, href, propfindAllBody)
+}
+
+// CheckCollection requests only the property needed for connection validation.
+// allprop may trigger expensive quota or metadata computation on gateways.
+func (c *Client) CheckCollection(ctx context.Context) error {
+	entry, err := c.stat(ctx, "/", `<D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>`)
+	if err != nil {
+		return err
+	}
+	if !entry.IsDir {
+		return errors.New("webdav: 挂载路径不是目录或服务器未返回目录属性")
+	}
+	return nil
+}
+
+func (c *Client) stat(ctx context.Context, href, properties string) (*Entry, error) {
+	req, err := c.newReq(ctx, "PROPFIND", href, strings.NewReader(properties), map[string]string{
 		"Depth":        "0",
 		"Content-Type": "application/xml",
 	})

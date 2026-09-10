@@ -44,12 +44,13 @@ func (d *Driver) Capabilities() drive.Capabilities { return drive.RegistryCaps(p
 func (d *Driver) RootID() string                   { return "/" }
 
 func (d *Driver) ValidateConnection(ctx context.Context, conn *model.ConnConfig) error {
-	client, err := wc.New(conn, 20*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	client, err := wc.New(conn, 60*time.Second)
 	if err != nil {
 		return err
 	}
-	_, err = client.Stat(ctx, "/")
-	return err
+	return client.CheckCollection(ctx)
 }
 
 func connAllowsPrivateNetwork(c drive.Context) bool {

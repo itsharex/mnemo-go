@@ -18,6 +18,8 @@ UploadMode: direct
 
 ## 1. 连接配置（webdav.go / account.go）
 
+新增连接仅执行 `PROPFIND Depth:0`，只请求 `resourcetype` 验证挂载目录；不扫描子目录、不查容量、不试写。总校验时间限制为 60 秒（包含认证协商），与日常请求超时一致。网络客户端优先使用应用显式代理，否则复用 Windows 手动系统代理适配；PAC/WPAD 不在该适配范围。
+
 | 子功能 | 状态 | Go 证据 | 差距 |
 |--------|:----:|---------|------|
 | URL + 账密 / Bearer Token | ✅ | `webdav.go:43-49` clientOf 从 c.Token.Conn 取 Endpoint、账号、密码/令牌 | Basic、Digest、Bearer；客户端证书、NTLM 和网页登录流程不支持 |

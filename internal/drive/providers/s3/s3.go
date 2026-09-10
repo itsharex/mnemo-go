@@ -68,11 +68,19 @@ func (d *Driver) Capabilities() drive.Capabilities { return drive.RegistryCaps(p
 func (d *Driver) RootID() string                   { return "/" }
 
 func (d *Driver) ValidateConnection(ctx context.Context, cfg *model.ConnConfig) error {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 	if cfg == nil {
 		return errors.New("s3: 连接配置为空")
 	}
 	c, err := connOf(drive.Context{Token: &model.TokenInfo{Conn: cfg}})
 	if err != nil {
+		return err
+	}
+	if c.prefix != "" {
+		_, err := c.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket: aws.String(c.bucket), Prefix: aws.String(c.prefix), Delimiter: aws.String("/"), MaxKeys: aws.Int32(1),
+		})
 		return err
 	}
 	_, headErr := c.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(c.bucket)})
@@ -150,7 +158,7 @@ func httpClientForS3() *http.Client {
 	if TransportOverride != nil {
 		return &http.Client{Transport: TransportOverride, Timeout: timeout}
 	}
-	return netx.NewClient(timeout).HTTP
+	return netx.NewClientWithSystemProxy(timeout).HTTP
 }
 
 func canFallbackFromHeadBucket(err error) bool {

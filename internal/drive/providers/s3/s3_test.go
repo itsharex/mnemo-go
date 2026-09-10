@@ -56,7 +56,9 @@ func TestValidateConnectionUsesOneRequestOnSuccess(t *testing.T) {
 	TransportOverride = transport
 	defer func() { TransportOverride = previous }()
 
-	if err := (&Driver{}).ValidateConnection(context.Background(), testS3Config()); err != nil {
+	cfg := testS3Config()
+	cfg.BasePath = ""
+	if err := (&Driver{}).ValidateConnection(context.Background(), cfg); err != nil {
 		t.Fatalf("ValidateConnection: %v", err)
 	}
 	methods := transport.snapshot()

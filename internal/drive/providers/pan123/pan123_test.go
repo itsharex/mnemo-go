@@ -1046,6 +1046,31 @@ func TestPan123UploadInstantReuse(t *testing.T) {
 	}
 }
 
+func TestPan123UploadRejectsMissingTargetFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.txt")
+	if err := os.WriteFile(path, []byte("payload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	for _, data := range []string{`{}`, `{"Reuse":true}`, `{"Reuse":true,"FileId":0}`, `{"Key":"object","UploadId":"upload-1"}`} {
+		t.Run(data, func(t *testing.T) {
+			netx.TestTransportHook = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if !strings.HasSuffix(req.URL.Path, "/file/upload_request") {
+					t.Errorf("unexpected request after invalid initialization: %s", req.URL.Path)
+				}
+				return pan123JSONResponse(`{"code":0,"data":`+data+`}`, req), nil
+			})
+			ui := &model.UploadingUI{Info: model.UploadInfo{LocalFilePath: path, Name: "missing.txt"}}
+			c := drive.Context{Token: &model.TokenInfo{AccessToken: "test-token"}}
+			err := (&Driver{}).UploadOneFile(context.Background(), c, ui)
+			if err == nil || ui.Upload.IsCompleted {
+				t.Fatalf("missing destination accepted: error=%v completed=%v", err, ui.Upload.IsCompleted)
+			}
+		})
+	}
+}
+
 func TestPan123UploadRequestUsesConflictPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.txt")
 	content := []byte("conflict policy")

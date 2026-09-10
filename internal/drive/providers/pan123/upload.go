@@ -380,6 +380,11 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 				return reqErr
 			}
 			data = parseUploadRequestData(parseMap(reqResp.Data))
+			if strings.TrimSpace(data.FileID) == "" || data.FileID == "0" {
+				err := errors.New("123: 上传初始化未返回有效 fileId")
+				mark(false, true, err.Error())
+				return err
+			}
 			if data.Reuse || data.Key == "" {
 				// 本地 MD5 命中秒传
 				ui.Upload.FileID = data.FileID

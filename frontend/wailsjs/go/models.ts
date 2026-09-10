@@ -65,6 +65,7 @@ export namespace drive {
 	    provider: string;
 	    mountedStorage: boolean;
 	    download: boolean;
+	    cloudVideoPreview: boolean;
 	    offlineDownload: boolean;
 	    search: boolean;
 	    upload: boolean;
@@ -111,6 +112,7 @@ export namespace drive {
 	        this.provider = source["provider"];
 	        this.mountedStorage = source["mountedStorage"];
 	        this.download = source["download"];
+	        this.cloudVideoPreview = source["cloudVideoPreview"];
 	        this.offlineDownload = source["offlineDownload"];
 	        this.search = source["search"];
 	        this.upload = source["upload"];

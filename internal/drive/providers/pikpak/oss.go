@@ -82,7 +82,7 @@ func ossPut(ctx context.Context, c drive.Context, localPath string, params *pikp
 	}
 
 	// Use netx so proxy and test transports apply to the OSS leg as well.
-	hc := netx.NewClient(600 * time.Second)
+	hc := netx.NewClientWithSystemProxy(600 * time.Second)
 	req, err := hc.Req(ctx, http.MethodPut, url, body)
 	if err != nil {
 		return err

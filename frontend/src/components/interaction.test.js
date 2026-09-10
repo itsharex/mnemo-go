@@ -7,6 +7,7 @@ import ContextMenu from './ContextMenu.vue'
 import TreeNode from './TreeNode.vue'
 import AccountRail from './AccountRail.vue'
 import PreviewModal from './PreviewModal.vue'
+import PlayerPanel from './PlayerPanel.vue'
 import * as appearance from '../appearance'
 
 const api = vi.hoisted(() => ({
@@ -36,7 +37,16 @@ const api = vi.hoisted(() => ({
   iconOf: vi.fn(() => 'image'),
   getPlayCursor: vi.fn().mockResolvedValue(0),
   savePlayCursor: vi.fn().mockResolvedValue(undefined),
+  playVideo: vi.fn(),
+  playVideoQuality: vi.fn(),
+  pinFileSnapshot: vi.fn(),
+  getSettings: vi.fn(),
+  previewUrl: vi.fn(),
+  download: vi.fn(),
 }))
+
+const tsMock = vi.hoisted(() => ({ createPlayer: vi.fn(), isSupported: vi.fn(() => true), Events: { ERROR: 'error' }, ErrorTypes: { NETWORK_ERROR: 'network' } }))
+vi.mock('mpegts.js', () => ({ default: tsMock }))
 
 vi.mock('../api', () => api)
 vi.mock('../logger', () => ({
@@ -87,6 +97,29 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('TS 转码流进入 MSE、阻止未缓冲跳转并在关闭时释放播放器', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    api.pinFileSnapshot.mockResolvedValue(undefined)
+    api.getSettings.mockResolvedValue({ playbackResume: false })
+    api.playVideo.mockResolvedValue({ url: 'http://127.0.0.1/stream/test', stream_type: 'ts', duration: 120, qualities: [] })
+    const player = { on: vi.fn(), attachMediaElement: vi.fn(), load: vi.fn(), destroy: vi.fn() }
+    tsMock.createPlayer.mockReturnValue(player)
+    const wrapper = mountAttached(PlayerPanel, { props: { account: { user_id: 'test', drive_id: 'test' }, file: { file_id: 'video', name: 'video.mkv' } } })
+    await flushPromises()
+    const video = document.querySelector('video')
+    expect(video).not.toBeNull()
+    expect(player.attachMediaElement).toHaveBeenCalledWith(video)
+    expect(player.load).toHaveBeenCalledOnce()
+    const progress = document.querySelector('.pp-progress input')
+    expect(progress).not.toBeNull()
+    await setDomInput(progress, 90)
+    expect(video.currentTime).toBe(0)
+    expect(wrapper.emitted('toast')?.[0]?.[0]).toContain('已缓冲')
+    wrapper.unmount()
+    expect(player.destroy).toHaveBeenCalledOnce()
+  })
   it.each(['image', 'audio'])('%s 预览加载中和失败后始终保留窗口关闭按钮', async (kind) => {
     let rejectPreview
     api.PreviewURL.mockImplementation(() => new Promise((resolve, reject) => { rejectPreview = reject }))

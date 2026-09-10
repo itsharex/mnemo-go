@@ -51,6 +51,15 @@ func GlobalProxy() string {
 	return v.(string)
 }
 
+// EffectiveProxyURL keeps API requests and media transfers on the same route:
+// an explicit application proxy takes precedence over the OS manual proxy.
+func EffectiveProxyURL() string {
+	if proxy := GlobalProxy(); proxy != "" {
+		return proxy
+	}
+	return systemProxyURL()
+}
+
 // globalUploadRate is the application-wide upload speed cap (bytes/s, 0=unlimited).
 // Accessed atomically because SaveSettings writes it while upload goroutines
 // read it via GlobalUploadRate.

@@ -87,6 +87,9 @@ func TestPikPakPreviewUsesDetailMedias(t *testing.T) {
 	c.http.HTTP.Transport = pikpakRoundTripper(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {
 		case "/drive/v1/files/video":
+			if r.URL.Query().Get("usage") != "CACHE" || r.URL.Query().Get("_magic") != "2021" {
+				return pikpakResponse(r, 200, `{"id":"video","size":"42"}`), nil
+			}
 			return pikpakResponse(r, 200, `{"id":"video","size":"42","medias":[{"media_name":"720p","is_visible":true,"link":{"url":"https://example.test/video.m3u8"},"video":{"height":720,"width":1280}},{"is_visible":false,"link":{"url":"https://example.test/hidden.m3u8"}}]}`), nil
 		case "/drive/v1/privilege/vip":
 			return pikpakResponse(r, 200, `{"vip":{"identity":0}}`), nil
@@ -100,6 +103,58 @@ func TestPikPakPreviewUsesDetailMedias(t *testing.T) {
 	}
 	if preview.Size != 42 || len(preview.Qualities) != 1 || preview.Qualities[0].URL != "https://example.test/video.m3u8" {
 		t.Fatalf("preview=%+v", preview)
+	}
+}
+
+func TestPikPakVIPResponseUsesDataEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		status, kind string
+		want         bool
+	}{{"ok", "platinum", true}, {"invalid", "platinum", false}, {"ok", "novip", false}} {
+		t.Run(tc.status+tc.kind, func(t *testing.T) {
+			c := newClient("token", "vip-schema", tc.status+tc.kind)
+			c.http.HTTP.Transport = pikpakRoundTripper(func(r *http.Request) (*http.Response, error) {
+				return pikpakResponse(r, 200, fmt.Sprintf(`{"data":{"status":%q,"type":%q}}`, tc.status, tc.kind)), nil
+			})
+			if got := c.VipInfo(context.Background()); got != tc.want {
+				t.Fatalf("VIP=%t want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPikPakPlaybackAndDownloadDetailsAreSeparate(t *testing.T) {
+	c := newClient("token", "separate-usage", "separate-usage")
+	calls := map[string]int{}
+	c.http.HTTP.Transport = pikpakRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/drive/v1/privilege/vip" {
+			return pikpakResponse(r, 200, `{"data":{"status":"ok","type":"platinum"}}`), nil
+		}
+		usage := r.URL.Query().Get("usage")
+		calls[usage]++
+		if usage == "FETCH" {
+			return pikpakResponse(r, 200, `{"id":"separate","mime_type":"video/x-matroska","web_content_link":"https://cdn.example/original","size":"42"}`), nil
+		}
+		return pikpakResponse(r, 200, `{"id":"separate","mime_type":"video/x-matroska","web_content_link":"https://cdn.example/original","medias":[{"video":{"height":1080,"video_type":"mpegts"},"link":{"url":"https://cdn.example/transcode"}}]}`), nil
+	})
+	if _, _, err := c.DownloadURL(context.Background(), "separate"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.PlayInfo(context.Background(), "separate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Qualities) != 2 || p.CurrentQuality != "FHD" {
+		t.Fatalf("unexpected qualities/default: %+v", p)
+	}
+	if p.Qualities[0].Type != "mkv" || p.Qualities[1].Type != "ts" {
+		t.Fatal("containers misidentified")
+	}
+	if _, _, err := c.DownloadURL(context.Background(), "separate"); err != nil {
+		t.Fatal(err)
+	}
+	if calls["FETCH"] != 1 || calls["CACHE"] != 1 {
+		t.Fatalf("cache usage mixed: %v", calls)
 	}
 }
 

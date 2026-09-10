@@ -582,9 +582,10 @@ func (c *client) detailCacheKey(fileID string) string {
 	return strings.Join([]string{c.deviceID, c.accountID, md5hex(c.accessToken), fileID}, "\x00")
 }
 
-func (c *client) detailOnce(ctx context.Context, fileID string) (*File, error) {
+func (c *client) detailOnce(ctx context.Context, fileID, usage string) (*File, error) {
 	var f File
-	if err := c.get(ctx, "/drive/v1/files/"+url.PathEscape(fileID), nil, &f); err != nil {
+	q := url.Values{"_magic": {"2021"}, "usage": {usage}, "thumbnail_size": {"SIZE_LARGE"}}
+	if err := c.get(ctx, "/drive/v1/files/"+url.PathEscape(fileID), q, &f); err != nil {
 		return nil, err
 	}
 	return &f, nil
@@ -622,7 +623,11 @@ func linksExpireSoon(f *File) bool {
 // key includes the access token so a refreshed session cannot reuse an old
 // account's links.
 func (c *client) Detail(ctx context.Context, fileID string) (*File, error) {
-	key := c.detailCacheKey(fileID)
+	return c.detailWithUsage(ctx, fileID, "FETCH")
+}
+
+func (c *client) detailWithUsage(ctx context.Context, fileID, usage string) (*File, error) {
+	key := c.detailCacheKey(fileID) + "\x00" + usage
 	now := time.Now()
 	pikpakFileDetailCache.Lock()
 	entry, ok := pikpakFileDetailCache.items[key]
@@ -636,7 +641,7 @@ func (c *client) Detail(ctx context.Context, fileID string) (*File, error) {
 	}
 	pikpakFileDetailCache.Unlock()
 
-	item, err := c.detailOnce(ctx, fileID)
+	item, err := c.detailOnce(ctx, fileID, usage)
 	if err != nil {
 		return nil, err
 	}
@@ -648,7 +653,7 @@ func (c *client) Detail(ctx context.Context, fileID string) (*File, error) {
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
-		if retry, retryErr := c.detailOnce(ctx, fileID); retryErr == nil {
+		if retry, retryErr := c.detailOnce(ctx, fileID, usage); retryErr == nil {
 			item = retry
 		}
 	}
@@ -779,12 +784,24 @@ func (c *client) VipInfo(ctx context.Context) bool {
 	}
 	pikpakVIPCache.Unlock()
 	var resp struct {
+		Data *struct {
+			Status string `json:"status"`
+			Type   string `json:"type"`
+			Expire string `json:"expire"`
+		} `json:"data"`
 		Vip struct {
 			Identity int `json:"identity"`
 		} `json:"vip"`
 	}
-	_ = c.get(ctx, "/drive/v1/privilege/vip", nil, &resp)
+	if err := c.get(ctx, "/drive/v1/privilege/vip", nil, &resp); err != nil {
+		return false
+	}
 	isVIP := resp.Vip.Identity > 0
+	if resp.Data != nil {
+		expires, _ := time.Parse(time.RFC3339, resp.Data.Expire)
+		kind := strings.ToLower(strings.TrimSpace(resp.Data.Type))
+		isVIP = strings.EqualFold(resp.Data.Status, "ok") && ((kind != "" && kind != "novip") || expires.After(now))
+	}
 	pikpakVIPCache.Lock()
 	pikpakVIPCache.items[cacheKey] = pikpakVIPCacheEntry{isVIP: isVIP, expiresAt: time.Now().Add(10 * time.Minute)}
 	pikpakVIPCache.Unlock()
@@ -793,7 +810,7 @@ func (c *client) VipInfo(ctx context.Context) bool {
 
 // PlayInfo resolves video transcode qualities.
 func (c *client) PlayInfo(ctx context.Context, fileID string) (*model.VideoPreview, error) {
-	f, err := c.Detail(ctx, fileID)
+	f, err := c.detailWithUsage(ctx, fileID, "CACHE")
 	if err != nil {
 		return nil, err
 	}
@@ -888,9 +905,12 @@ func (c *client) PlayInfo(ctx context.Context, fileID string) (*model.VideoPrevi
 		}
 	}
 	// origin
+	if len(preview.Qualities) > 0 {
+		preview.CurrentQuality = preview.Qualities[0].Value
+	}
 	origin := originMediaLink(f)
 	if origin != "" {
-		q := model.VideoQuality{HTML: "原画", Quality: "Origin", Label: "原画", Value: "Origin", URL: origin, Type: streamType(origin, ""), ForceProxy: true}
+		q := model.VideoQuality{HTML: "原画", Quality: "Origin", Label: "原画", Value: "Origin", URL: origin, Type: streamType(origin, f.MimeType), ForceProxy: true}
 		if isVip {
 			preview.Qualities = append([]model.VideoQuality{q}, preview.Qualities...)
 		} else {
@@ -899,6 +919,9 @@ func (c *client) PlayInfo(ctx context.Context, fileID string) (*model.VideoPrevi
 	}
 	if len(preview.Qualities) == 0 {
 		return nil, errors.New("pikpak: no playable quality")
+	}
+	if preview.CurrentQuality == "" {
+		preview.CurrentQuality = preview.Qualities[0].Value
 	}
 	return preview, nil
 }
@@ -1005,11 +1028,11 @@ func streamTypeHint(value string) string {
 		return "hls"
 	case "dash", "mpd", "application/dash+xml":
 		return "dash"
-	case "ts", "video/mp2t", "video/mpegts", "video/x-mpegts":
+	case "ts", "mpegts", "video/mp2t", "video/mpegts", "video/x-mpegts":
 		return "ts"
 	case "webm", "video/webm":
 		return "webm"
-	case "mkv", "matroska", "video/x-matroska":
+	case "mkv", "matroska", "matroska,webm", "video/x-matroska":
 		return "mkv"
 	case "avi", "video/x-msvideo":
 		return "avi"

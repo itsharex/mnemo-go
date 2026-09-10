@@ -1025,8 +1025,9 @@ func TestPikPakUploadHonorsConflictPolicy(t *testing.T) {
 }
 
 func TestPikPakOSSUploadProgressAndCleanup(t *testing.T) {
-	for _, failed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "success", true: "cleanup-on-failure"}[failed], func(t *testing.T) {
+	for _, mode := range []string{"success", "cleanup-on-failure", "missing-params"} {
+		t.Run(mode, func(t *testing.T) {
+			failed := mode != "success"
 			filePath := t.TempDir() + "/oss.bin"
 			content := []byte(strings.Repeat("x", 128*1024))
 			if err := os.WriteFile(filePath, content, 0o600); err != nil {
@@ -1038,12 +1039,19 @@ func TestPikPakOSSUploadProgressAndCleanup(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/drive/v1/files":
 					_ = json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{}, "next_page_token": ""})
 				case r.Method == http.MethodPost && r.URL.Path == "/drive/v1/files":
+					if mode == "missing-params" {
+						_, _ = io.WriteString(w, `{"id":"oss-file","resumable":{}}`)
+						return
+					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"id": "oss-file", "resumable": map[string]any{"params": map[string]any{
 						"access_key_id": "ak", "access_key_secret": "sk", "bucket": "bucket", "endpoint": "oss.example.test", "key": "upload/oss.bin", "security_token": "st",
 					}}})
 				case r.Method == http.MethodPut && r.URL.Path == "/upload/oss.bin":
 					putCalls++
-					_, _ = io.Copy(io.Discard, r.Body)
+					got, _ := io.ReadAll(r.Body)
+					if string(got) != string(content) {
+						t.Error("uploaded content mismatch")
+					}
 					if failed {
 						w.WriteHeader(http.StatusInternalServerError)
 						_, _ = io.WriteString(w, "oss failed")

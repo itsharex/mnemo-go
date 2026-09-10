@@ -430,10 +430,12 @@ function inPreviewWhitelist(file, extSet, mimeSet, category) {
  * `pdf` 以便界面给出“暂不支持预览，需要下载”的专门提示，其余返回
  * `download`。这也避免把浏览器不支持的容器误送到播放器后才失败。
  */
-export function openKindOf(file) {
+export function openKindOf(file, capabilities = {}) {
   if (file.isDir) return 'dir'
   const cat = String(file.category || '').toLowerCase()
   const ext = extOf(file.name)
+  const videoMime = mimeOf(file).startsWith('video/')
+  if (capabilities.cloudVideoPreview && (videoMime || VIDEO_EXTS.has(ext) && (ext !== 'ts' || cat === 'video'))) return 'video'
   if (VIDEO_PREVIEW_EXTS.has(ext) || inPreviewWhitelist(file, VIDEO_PREVIEW_EXTS, VIDEO_PREVIEW_MIMES, 'video')) return 'video'
   if (AUDIO_PREVIEW_EXTS.has(ext) || inPreviewWhitelist(file, AUDIO_PREVIEW_EXTS, AUDIO_PREVIEW_MIMES, 'audio')) return 'audio'
   if (IMAGE_PREVIEW_EXTS.has(ext) || inPreviewWhitelist(file, IMAGE_PREVIEW_EXTS, IMAGE_PREVIEW_MIMES, 'image')) return 'image'

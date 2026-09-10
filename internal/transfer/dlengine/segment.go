@@ -938,9 +938,9 @@ func (l *SharedLimiter) SetRate(rate int64) {
 var _ = filepath.Base
 
 // proxyFunc returns a proxy function that honors the netx global proxy first,
-// falling back to the environment (HTTP_PROXY/HTTPS_PROXY).
+// then the OS manual proxy and finally HTTP_PROXY/HTTPS_PROXY.
 func proxyFunc() func(*http.Request) (*url.URL, error) {
-	gp := netx.GlobalProxy()
+	gp := netx.EffectiveProxyURL()
 	if gp != "" {
 		if u, err := url.Parse(gp); err == nil && u.Scheme != "" {
 			return http.ProxyURL(u)

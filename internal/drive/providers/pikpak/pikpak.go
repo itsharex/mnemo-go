@@ -425,7 +425,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	}
 	ui.Upload.FileID = fileID
 	// No resumable params => rapid upload completed server side.
-	if res.Resumable == nil || res.Resumable.Params == nil {
+	if res.Resumable == nil {
 		markPikPakUploadComplete(ui, fileID)
 		return nil
 	}
@@ -454,7 +454,7 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	if deviceID == "" {
 		deviceID = token.UserName
 	}
-	hc := netx.NewClient(60 * time.Second)
+	hc := netx.NewClientWithSystemProxy(60 * time.Second)
 	auth, err := refreshToken(ctx, hc, deviceID, refresh)
 	if err != nil {
 		return nil, err

@@ -1420,7 +1420,7 @@ func (s *Server) isAllowedProxyHost(raw string) bool {
 }
 
 func globalProxy(_ *http.Request) (*url.URL, error) {
-	raw := strings.TrimSpace(netx.GlobalProxy())
+	raw := strings.TrimSpace(netx.EffectiveProxyURL())
 	if raw == "" {
 		return nil, nil
 	}

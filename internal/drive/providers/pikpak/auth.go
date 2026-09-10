@@ -28,6 +28,7 @@ func init() {
 		ID:   providerID,
 		Meta: drive.GetMeta(providerID),
 		Caps: drive.NewCapabilities(providerID, map[string]bool{
+			"cloudVideoPreview":   true,
 			"offlineDownload":     true,
 			"createShare":         true,
 			"shareExpiration":     true,

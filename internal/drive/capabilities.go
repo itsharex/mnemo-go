@@ -8,11 +8,12 @@ type Capabilities struct {
 
 	MountedStorage bool `json:"mountedStorage"`
 
-	Download        bool   `json:"download"`
-	OfflineDownload bool   `json:"offlineDownload"`
-	Search          bool   `json:"search"`
-	Upload          bool   `json:"upload"`
-	UploadMode      string `json:"uploadMode"` // queue | direct | none
+	Download          bool   `json:"download"`
+	CloudVideoPreview bool   `json:"cloudVideoPreview"`
+	OfflineDownload   bool   `json:"offlineDownload"`
+	Search            bool   `json:"search"`
+	Upload            bool   `json:"upload"`
+	UploadMode        string `json:"uploadMode"` // queue | direct | none
 
 	CreateFolder     bool `json:"createFolder"`
 	CreateDateFolder bool `json:"createDateFolder"`
@@ -134,6 +135,8 @@ func NewCapabilities(provider string, overrides map[string]bool, extra func(*Cap
 			caps.MountedStorage = v
 		case "download":
 			caps.Download = v
+		case "cloudVideoPreview":
+			caps.CloudVideoPreview = v
 		case "offlineDownload":
 			caps.OfflineDownload = v
 		case "search":

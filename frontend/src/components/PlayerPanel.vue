@@ -1,8 +1,8 @@
 <script setup>
 // 网页播放器只保留浏览器/WebView 可解码路径：原生 MP4/WebM/Ogg，按需加载
-// HLS.js 和 dash.js 的 MSE 流。所有远程请求都经 Go 侧本地会话代理。
+// HLS.js、dash.js 和 MPEG-TS 的 MSE 流。所有远程请求都经 Go 侧本地会话代理。
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
-import { playVideo, playVideoQuality, pinFileSnapshot, getPlayCursor, savePlayCursor, getSettings, previewUrl, download } from '../api'
+import { playVideo, playVideoQuality, pinFileSnapshot, getPlayCursor, savePlayCursor, getSettings, previewUrl, download, openKindOf } from '../api'
 import { getPrefs } from '../appearance'
 import { srtToVtt, parseSup, SupRenderer } from '../player/subtitles'
 import { WindowMinimise, WindowToggleMaximise, WindowIsMaximised } from '../../wailsjs/runtime/runtime'
@@ -12,6 +12,7 @@ const props = defineProps({
   account: { type: Object, required: true },
   file: { type: Object, required: true },
   files: { type: Array, default: () => [] },
+  capabilities: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['close', 'toast', 'select-file'])
 
@@ -84,6 +85,7 @@ let pendingAutoplay = true
 let suppressVideoErrors = false
 let hlsPlayer = null
 let dashPlayer = null
+let tsPlayer = null
 let hlsRecoveryAttempts = 0
 let dashRecoveryAttempts = 0
 let activeSourceURL = ''
@@ -149,11 +151,7 @@ onBeforeUnmount(() => {
 })
 
 function isVideoFile(file) {
-  const name = String(file?.name || '')
-  const index = name.lastIndexOf('.')
-  // 与 api.openKindOf 的播放白名单保持一致。目录中的 MKV/AVI 等文件
-  // 仍可下载，但不会被“上一集/下一集”误加入网页播放器。
-  return index > 0 && ['mp4', 'm4v', 'webm', 'ogv', 'm3u8', 'mpd'].includes(name.slice(index + 1).toLowerCase())
+  return openKindOf(file, props.capabilities) === 'video'
 }
 
 async function startPlayback() {
@@ -243,6 +241,10 @@ async function loadPlaybackSource(preview, resumeAt, autoplay, parentSeq) {
     await loadDASH(v, url, loadSeq)
     return
   }
+  if (['ts', 'mpegts', 'm2ts', 'mts'].includes(streamType.value)) {
+    await loadMPEGTS(v, url, loadSeq, preview)
+    return
+  }
   if (UNSUPPORTED_WEB_CONTAINERS.has(streamType.value)) {
     throw new Error(`网页播放器不支持 ${streamType.value.toUpperCase()} 容器，请下载后使用本地播放器打开`)
   }
@@ -255,6 +257,31 @@ async function loadNativeSource(v, url, loadSeq) {
   if (unmounted || loadSeq !== sourceSeq || videoEl.value !== v) return
   suppressVideoErrors = false
   v.load()
+}
+
+async function loadMPEGTS(v, url, loadSeq, preview) {
+  const mod = await import('mpegts.js')
+  if (unmounted || loadSeq !== sourceSeq || videoEl.value !== v) return
+  const mpegts = mod.default || mod
+  if (!mpegts.isSupported()) throw new Error('当前系统 WebView 不支持 MPEG-TS 播放')
+  const player = mpegts.createPlayer({
+    type: 'mpegts', url, isLive: false,
+    duration: Math.max(0, Number(preview?.duration) || 0) * 1000,
+  }, {
+    enableWorker: true, lazyLoad: true, lazyLoadMaxDuration: 90,
+    autoCleanupSourceBuffer: true, autoCleanupMaxBackwardDuration: 60,
+    autoCleanupMinBackwardDuration: 30,
+  })
+  tsPlayer = player
+  suppressVideoErrors = false
+  player.on(mpegts.Events.ERROR, (type) => {
+    if (unmounted || player !== tsPlayer || loadSeq !== sourceSeq) return
+    failPlayback(type === mpegts.ErrorTypes.NETWORK_ERROR
+      ? '视频流加载失败，请重新获取播放地址或检查代理设置'
+      : '视频流解析失败，请尝试切换清晰度')
+  })
+  player.attachMediaElement(v)
+  player.load()
 }
 
 async function loadHLS(v, url, loadSeq) {
@@ -343,6 +370,11 @@ function failPlayback(message) {
 }
 
 function destroyAdaptivePlayers() {
+  const ts = tsPlayer
+  tsPlayer = null
+  if (ts) {
+    try { ts.destroy() } catch {}
+  }
   const hls = hlsPlayer
   hlsPlayer = null
   if (hls) {
@@ -426,7 +458,7 @@ function onLoaded() {
   updateDuration(v)
   applyVolume()
   v.playbackRate = speed.value
-  if (pendingResume > 0 && (!Number.isFinite(v.duration) || pendingResume < v.duration)) v.currentTime = pendingResume
+  if (pendingResume > 0 && (!Number.isFinite(v.duration) || pendingResume < v.duration)) seekTo(pendingResume)
   pendingResume = 0
   const autoplay = pendingAutoplay
   pendingAutoplay = false
@@ -505,7 +537,7 @@ function onEnded() {
   }
 }
 function onError() {
-  if (loading.value || suppressVideoErrors || hlsPlayer || dashPlayer) return
+  if (loading.value || suppressVideoErrors || hlsPlayer || dashPlayer || tsPlayer) return
   const code = videoEl.value && videoEl.value.error && videoEl.value.error.code
   error.value = code === 4 ? '当前网页播放器不支持此视频的容器或编解码' : '视频加载失败，请检查网络或重新获取播放地址'
 }
@@ -533,19 +565,35 @@ function togglePlay() {
 
 function seek(delta) {
   const v = videoEl.value
-  if (!v || !Number.isFinite(v.duration)) return
-  playbackEnded = false
-  v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta))
+  if (!v) return
+  seekTo(v.currentTime + delta)
 }
 
-function onSeekInput(e) {
+function seekTo(requested) {
   const v = videoEl.value
-  if (!v) return
-  const target = Number(e.target.value)
-  if (!Number.isFinite(target)) return
+  if (!v || !Number.isFinite(requested)) return false
+  const total = Number.isFinite(v.duration) ? v.duration : duration.value
+  const target = Math.max(0, total > 0 ? Math.min(total, requested) : requested)
+  // Static MPEG-TS has no random-access index. An out-of-buffer seek would
+  // leave MSE waiting forever; keep the current position and explain it.
+  if (tsPlayer && target > 0) {
+    let bufferedTarget = false
+    for (let i = 0; i < v.buffered.length; i++) {
+      if (target >= v.buffered.start(i) && target < v.buffered.end(i)) bufferedTarget = true
+    }
+    if (!bufferedTarget) {
+      emit('toast', '当前转码流只能跳转到已缓冲的位置', 'info')
+      return false
+    }
+  }
   playbackEnded = false
   v.currentTime = target
   position.value = target
+  return true
+}
+
+function onSeekInput(e) {
+  if (!seekTo(Number(e.target.value))) e.target.value = String(position.value)
 }
 
 function onVolume(e) {

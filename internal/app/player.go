@@ -50,6 +50,9 @@ func (a *App) resolveVideoSource(userID, driveID, fileID, requestedQuality strin
 	if preview == nil || len(preview.Qualities) == 0 {
 		return nil, "", errors.New("该文件无可用播放源")
 	}
+	if requestedQuality == "" {
+		requestedQuality = preview.CurrentQuality
+	}
 	quality, err := chooseVideoQuality(preview.Qualities, requestedQuality)
 	if err != nil {
 		return nil, "", err

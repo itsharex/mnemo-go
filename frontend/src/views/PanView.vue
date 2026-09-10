@@ -742,7 +742,7 @@ function invertSel() { selected.value = listShown.value.filter((f) => !isSel(f))
 async function openFile(file) {
   if (file.isDir) { openDir(file); return }
   if (mode.value === 'trash') { emit('toast', '回收站中的文件无法打开', 'error'); return }
-  const kind = openKindOf(file)
+  const kind = openKindOf(file, caps.value)
   if (kind === 'video') {
     modalFile.value = file
     modal.value = 'player'
@@ -1759,6 +1759,7 @@ onBeforeUnmount(() => {
       :account="account"
       :file="modalFile"
       :files="listShown"
+      :capabilities="caps"
       @select-file="modalFile = $event"
       @close="modal = null"
       @toast="(m, t) => emit('toast', m, t)"

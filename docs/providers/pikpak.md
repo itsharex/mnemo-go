@@ -63,14 +63,16 @@
 
 | 子功能 | 状态 | Go 证据 | 差距 |
 |--------|:----:|---------|------|
-| 转码清晰度 | ✅ | `client.go:223-272` PlayInfo GET `/drive/v1/files/{id}/video/play_info` | 路径不同（旧版从 detail medias 解析） |
-| VIP 检测 | ✅ | `client.go:VipInfo` `/drive/v1/privilege/vip` identity>0，按账号缓存 10 分钟 | 无 |
+| 转码清晰度 | ✅ | `PlayInfo` 使用详情 `usage=CACHE&_magic=2021` 返回的 medias；下载独立使用 FETCH，缓存按 usage 隔离 | 真实账号已取得 720p/480p TS 流 |
+| VIP 检测 | ✅ | `VipInfo` 解析 `data.status/type/expire`，兼容旧 identity，失败不缓存 | 按账号缓存 10 分钟 |
 | 非会员 720p 限制 | ✅ | `client.go:252` height>720 跳过 | 无 |
 | 原画流 | ✅ | `client.go:258-269` web_content_link / medias[].is_origin, ForceProxy | 无 |
 | 清晰度 tier | ✅ | `client.go:278-290` QHD/FHD/HD/SD/LD | 无 |
 | **stream type** | ✅ | `client.go:streamType` | 支持 m3u8/dash/ts(mpegts)/mp4 |
 | **duration** | ✅ | `client.go:fileDurationSeconds` 从详情 duration、medias.video.duration、params.duration 取最大值 | 毫秒值自动转秒 |
 | **分辨率 fallback 解析** | ✅ | `client.go:resolutionHeight` 解析 `resolution_name/media_name/template_id` | 无 |
+
+2026-09-10：真实账号的 MKV 经云端转码、本地 Go 会话代理和实际 Vue 播放器，在 Edge 中解码为 1280×720；暂停和切换 480p 已检查。MPEG-TS 使用按需加载的 mpegts.js 转封装；原始 MKV 不再误标为 MP4，默认优先转码。TS 点播流没有随机跳转索引，当前只支持跳到已缓冲位置，未缓冲跳转会提示而不会卡死。媒体代理、下载引擎、账号刷新与 OSS 上传均支持应用代理优先、系统手动代理回退。
 
 ---
 

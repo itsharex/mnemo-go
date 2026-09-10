@@ -30,6 +30,28 @@ func TestManagerConcurrency(t *testing.T) {
 	}
 }
 
+func TestDownloadReportsUnreadableSettingsBeforeNetwork(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(st, dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Shutdown()
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte("invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	task := &model.DownloadTask{ID: "settings-error", Name: "file", URL: ":invalid", Status: "queued"}
+	m.addDownloadTask(task, task.Name)
+	m.runDownload(task)
+	if task.Status != "failed" || !strings.Contains(task.Error, "读取下载设置失败") {
+		t.Fatalf("status=%s error=%s", task.Status, task.Error)
+	}
+}
+
 func TestManagerSetConcurrency(t *testing.T) {
 	dir := t.TempDir()
 	st, _ := store.Open(dir)

@@ -419,7 +419,18 @@ func (m *Manager) runDownload(t *model.DownloadTask) {
 	url := t.URL
 	headers := t.Headers
 	var requestAuth model.RequestAuthenticator
-	s, _ := m.store.GetSettings()
+	s, settingsErr := m.store.GetSettings()
+	if settingsErr != nil {
+		m.mu.Lock()
+		if !m.removed[t.ID] && t.Status == "downloading" {
+			t.Status = "failed"
+			t.Error = "读取下载设置失败: " + settingsErr.Error()
+			t.Updated = time.Now().Unix()
+		}
+		m.mu.Unlock()
+		m.update(t)
+		return
+	}
 	opts := dlengine.Options{Concurrency: concurrencyFromSettings(s)}
 	if s.MaxDownloadSpeed > 0 {
 		opts.MaxSpeed = 0

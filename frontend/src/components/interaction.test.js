@@ -8,10 +8,16 @@ import TreeNode from './TreeNode.vue'
 import AccountRail from './AccountRail.vue'
 import PreviewModal from './PreviewModal.vue'
 import PlayerPanel from './PlayerPanel.vue'
+import ShareView from '../views/ShareView.vue'
 import * as appearance from '../appearance'
 
 const api = vi.hoisted(() => ({
   login: vi.fn(),
+  ListShareHistory: vi.fn(),
+  capsOf: vi.fn(),
+  importShare: vi.fn(),
+  saveImportedShare: vi.fn(),
+  cancelShare: vi.fn(),
   saveMounted: vi.fn(),
   validateMountedWrite: vi.fn(),
   SendGuangyaSms: vi.fn(),
@@ -97,6 +103,24 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('分享解析期间目标账号被移除时丢弃旧会话', async () => {
+    api.ListShareHistory.mockResolvedValue([])
+    api.capsOf.mockReturnValue({ importShare: true })
+    let resolveImport
+    api.importShare.mockImplementation(() => new Promise(resolve => { resolveImport = resolve }))
+    const first = { user_id: 'first', drive_id: 'drive' }
+    const second = { user_id: 'second', drive_id: 'drive' }
+    const wrapper = mountAttached(ShareView, { props: { accounts: [first, second] } })
+    wrapper.vm.openImport()
+    wrapper.vm.importForm.url = 'https://example.test/share'
+    const parsing = wrapper.vm.parseImport()
+    await wrapper.setProps({ accounts: [second] })
+    resolveImport({ files: [{ fileId: 'old-file' }] })
+    await parsing
+    expect(wrapper.vm.importSession).toBeNull()
+    expect(wrapper.vm.importStep).toBe('form')
+    expect(wrapper.vm.importBusy).toBe(false)
+  })
   it('音频播放结束时清除旧的续播位置', async () => {
     api.PinFileSnapshot.mockResolvedValue(undefined)
     api.getPlayCursor.mockResolvedValue(45)

@@ -42,6 +42,17 @@ const importDir = ref({ id: 'root', name: '根目录' })
 
 const importAccounts = computed(() => (props.accounts || []).filter((account) => capsOf(account, props.providers).importShare))
 const importTarget = computed(() => importAccounts.value.find((account) => account.user_id === importTargetId.value) || null)
+let importSeq = 0
+watch(() => [importTarget.value?.user_id, importTarget.value?.drive_id], ([user, drive], [oldUser, oldDrive]) => {
+  if (user === oldUser && drive === oldDrive) return
+  ++importSeq
+  importBusy.value = false
+  importStep.value = 'form'
+  importSession.value = null
+  importSelected.value = []
+  importDirPick.value = false
+})
+onBeforeUnmount(() => { ++importSeq })
 const importDirRoot = computed(() => {
   const meta = providerMetaOf(importTarget.value, props.providers)
   return { id: meta.rootKey || 'root', name: meta.rootTitle || '根目录' }
@@ -89,9 +100,11 @@ function closeImport() {
 async function parseImport() {
   const url = importForm.value.url.trim()
   if (!url || !importTarget.value || importBusy.value) return
+  const seq = ++importSeq
   importBusy.value = true
   try {
     const session = await importShare(importTarget.value.user_id, importTarget.value.drive_id, url, importForm.value.password.trim())
+    if (seq !== importSeq) return
     if (!session || !Array.isArray(session.files) || !session.files.length) {
       throw new Error('分享中没有可导入的文件')
     }
@@ -100,9 +113,10 @@ async function parseImport() {
     importDir.value = importDirRoot.value
     importStep.value = 'files'
   } catch (e) {
+    if (seq !== importSeq) return
     emit('toast', String(e), 'error')
   } finally {
-    importBusy.value = false
+    if (seq === importSeq) importBusy.value = false
   }
 }
 
@@ -129,6 +143,7 @@ function backToImportForm() {
 
 async function saveImport() {
   if (!importTarget.value || !importSession.value || !importSelected.value.length || importBusy.value) return
+  const seq = ++importSeq
   importBusy.value = true
   try {
     const saved = await saveImportedShare(
@@ -138,6 +153,7 @@ async function saveImport() {
       importSelected.value,
       importDir.value.id,
     )
+    if (seq !== importSeq) return
     const count = Array.isArray(saved) ? saved.length : importSelected.value.length
     emit('toast', `已导入 ${count} 个项目`, 'success')
     importOpen.value = false
@@ -145,9 +161,10 @@ async function saveImport() {
     importSession.value = null
     importSelected.value = []
   } catch (e) {
+    if (seq !== importSeq) return
     emit('toast', String(e), 'error')
   } finally {
-    importBusy.value = false
+    if (seq === importSeq) importBusy.value = false
   }
 }
 

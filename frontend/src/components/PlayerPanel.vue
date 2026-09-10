@@ -86,6 +86,10 @@ let suppressVideoErrors = false
 let hlsPlayer = null
 let dashPlayer = null
 let tsPlayer = null
+let tsTimeBase = 0
+let tsSeekController = null
+let activePreview = null
+let tsSeekSequence = 0
 let hlsRecoveryAttempts = 0
 let dashRecoveryAttempts = 0
 let activeSourceURL = ''
@@ -100,6 +104,7 @@ let assRenderer = null
 let subtitleFetchController = null
 let localSubtitleReader = null
 const subtitleObjectURLs = new Set()
+const subtitleCueTimes = new WeakMap()
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2]
 const speedOptions = SPEEDS.map((s) => ({ value: s, label: s + 'x' }))
@@ -224,6 +229,8 @@ async function loadPlaybackSource(preview, resumeAt, autoplay, parentSeq) {
   pendingResume = Math.max(0, Number(resumeAt) || 0)
   pendingAutoplay = Boolean(autoplay)
   streamType.value = normalizeStreamType(preview)
+  activePreview = preview
+  tsTimeBase = 0
   subtitleSources.value = [...normalizeSubtitles(preview && preview.subtitles), ...extraTextSubs.value]
   subtitleTracks.value = []
   subtitleEnabled.value = false
@@ -242,6 +249,10 @@ async function loadPlaybackSource(preview, resumeAt, autoplay, parentSeq) {
     return
   }
   if (['ts', 'mpegts', 'm2ts', 'mts'].includes(streamType.value)) {
+    if (resumeAt > 0) {
+      await seekTS(resumeAt, autoplay)
+      return
+    }
     await loadMPEGTS(v, url, loadSeq, preview)
     return
   }
@@ -370,6 +381,8 @@ function failPlayback(message) {
 }
 
 function destroyAdaptivePlayers() {
+  tsSeekController?.abort()
+  tsSeekController = null
   const ts = tsPlayer
   tsPlayer = null
   if (ts) {
@@ -458,7 +471,7 @@ function onLoaded() {
   updateDuration(v)
   applyVolume()
   v.playbackRate = speed.value
-  if (pendingResume > 0 && (!Number.isFinite(v.duration) || pendingResume < v.duration)) seekTo(pendingResume)
+  if (pendingResume > 0 && (!Number.isFinite(v.duration) || pendingResume < v.duration)) v.currentTime = pendingResume
   pendingResume = 0
   const autoplay = pendingAutoplay
   pendingAutoplay = false
@@ -469,6 +482,7 @@ function onLoaded() {
 }
 
 function updateDuration(v) {
+  if (tsPlayer) return
   if (Number.isFinite(v.duration) && v.duration > 0) duration.value = v.duration
 }
 
@@ -485,7 +499,7 @@ function onTimeUpdate() {
   const v = videoEl.value
   if (!v) return
   if (playbackEnded && (!Number.isFinite(v.duration) || v.currentTime < v.duration)) playbackEnded = false
-  position.value = v.currentTime
+  position.value = v.currentTime + tsTimeBase
   updateBuffered(v)
   if (supActive.value) renderSupFrame()
 }
@@ -518,7 +532,7 @@ function onProgress() {
 
 function updateBuffered(v) {
   try {
-    if (v.buffered.length > 0) buffered.value = v.buffered.end(v.buffered.length - 1)
+    if (v.buffered.length > 0) buffered.value = v.buffered.end(v.buffered.length - 1) + tsTimeBase
   } catch {}
 }
 
@@ -566,30 +580,67 @@ function togglePlay() {
 function seek(delta) {
   const v = videoEl.value
   if (!v) return
-  seekTo(v.currentTime + delta)
+  seekTo(position.value + delta)
 }
 
 function seekTo(requested) {
   const v = videoEl.value
   if (!v || !Number.isFinite(requested)) return false
+  tsSeekController?.abort()
+  tsSeekController = null
   const total = Number.isFinite(v.duration) ? v.duration : duration.value
   const target = Math.max(0, total > 0 ? Math.min(total, requested) : requested)
-  // Static MPEG-TS has no random-access index. An out-of-buffer seek would
-  // leave MSE waiting forever; keep the current position and explain it.
   if (tsPlayer && target > 0) {
     let bufferedTarget = false
     for (let i = 0; i < v.buffered.length; i++) {
-      if (target >= v.buffered.start(i) && target < v.buffered.end(i)) bufferedTarget = true
+      if (target >= v.buffered.start(i) + tsTimeBase && target < v.buffered.end(i) + tsTimeBase) bufferedTarget = true
     }
     if (!bufferedTarget) {
-      emit('toast', '当前转码流只能跳转到已缓冲的位置', 'info')
-      return false
+      seekTS(target, !v.paused)
+      return true
     }
   }
   playbackEnded = false
-  v.currentTime = target
+  if (tsPlayer && target < tsTimeBase) { seekTS(target, !v.paused); return true }
+  v.currentTime = target - tsTimeBase
   position.value = target
   return true
+}
+
+async function seekTS(target, autoplay) {
+  const requestID = ++tsSeekSequence
+  tsSeekController?.abort()
+  const controller = new AbortController()
+  tsSeekController = controller
+  isBuffering.value = true
+  position.value = target
+  try {
+    const requestURL = new URL(activeSourceURL)
+    requestURL.searchParams.set('seek', String(target))
+    const response = await fetch(requestURL, { signal: controller.signal })
+    if (!response.ok) throw new Error('视频定位失败，请重试')
+    const result = await response.json()
+    if (unmounted || requestID !== tsSeekSequence || controller.signal.aborted) return
+    tsSeekController = null
+    const loadSeq = ++sourceSeq
+    destroyAdaptivePlayers()
+    clearVideoSource()
+    tsTimeBase = Number(result.start) || 0
+    if (assRenderer) assRenderer.timeOffset = tsTimeBase
+    onTracksChange()
+    pendingResume = Math.max(0, target - tsTimeBase)
+    pendingAutoplay = autoplay
+    playbackEnded = false
+    error.value = ''
+    await loadMPEGTS(videoEl.value, new URL(result.url, activeSourceURL).href, loadSeq, activePreview)
+  } catch (e) {
+    if (unmounted || requestID !== tsSeekSequence || controller.signal.aborted) return
+    isBuffering.value = false
+    position.value = (videoEl.value?.currentTime || 0) + tsTimeBase
+    emit('toast', readablePlaybackError(e), 'error')
+  } finally {
+    if (tsSeekController === controller) tsSeekController = null
+  }
 }
 
 function onSeekInput(e) {
@@ -755,6 +806,12 @@ function onTracksChange() {
   let selected = -1
   for (let index = 0; index < v.textTracks.length; index++) {
     const track = v.textTracks[index]
+    if (track.cues) for (const cue of track.cues) {
+      if (!subtitleCueTimes.has(cue)) subtitleCueTimes.set(cue, { start: cue.startTime, end: cue.endTime })
+      const original = subtitleCueTimes.get(cue)
+      cue.startTime = original.start - tsTimeBase
+      cue.endTime = original.end - tsTimeBase
+    }
     tracks.push({ index, label: track.label || `字幕 ${index + 1}`, kind: track.kind })
     if (track.mode === 'showing') selected = index
   }
@@ -921,7 +978,7 @@ async function selectAss(index) {
     const { JASSUB, workerUrl, wasmUrl, fontUrl } = await getJassub()
     if (unmounted || controller.signal.aborted) return
     destroyAss()
-    assRenderer = new JASSUB({ video: videoEl.value, subContent: content, workerUrl, wasmUrl, fonts: [fontUrl] })
+    assRenderer = new JASSUB({ video: videoEl.value, subContent: content, workerUrl, wasmUrl, fonts: [fontUrl], timeOffset: tsTimeBase })
     assActive.value = true
     currentSubtitle.value = 'ass:' + index
   } catch (error) {
@@ -948,7 +1005,7 @@ function renderSupFrame() {
   const v = videoEl.value
   const canvas = supCanvasEl.value
   if (!v || !canvas || !supRenderer) return
-  supRenderer.renderAt(v.currentTime, computeSubtitleBox(v, canvas))
+  supRenderer.renderAt(v.currentTime + tsTimeBase, computeSubtitleBox(v, canvas))
 }
 
 // SUP 按 16:9 规格制作：渲染框锁定为视频内容矩形内的最大 16:9 区域，其余保持透明
@@ -1082,7 +1139,7 @@ function saveCursor(fileId = props.file?.file_id) {
   const v = videoEl.value
   if (!v || !v.currentTime || v.currentTime < 1) return
   if (!fileId) return
-  savePlayCursor(props.account.user_id, props.account.drive_id, fileId, v.currentTime).catch(() => {})
+  savePlayCursor(props.account.user_id, props.account.drive_id, fileId, v.currentTime + tsTimeBase).catch(() => {})
 }
 
 function clearPlayCursor(fileId = props.file?.file_id) {
@@ -1094,7 +1151,7 @@ async function switchQuality(quality) {
   if (!quality || quality === currentQuality.value) return
   const v = videoEl.value
   const wasPlaying = Boolean(v && !v.paused)
-  const currentTime = v ? v.currentTime : 0
+  const currentTime = v ? v.currentTime + tsTimeBase : 0
   const seq = playbackSeq
   try {
     const preview = await playVideoQuality(props.account.user_id, props.account.drive_id, props.file.file_id, quality)

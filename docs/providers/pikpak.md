@@ -72,7 +72,7 @@
 | **duration** | ✅ | `client.go:fileDurationSeconds` 从详情 duration、medias.video.duration、params.duration 取最大值 | 毫秒值自动转秒 |
 | **分辨率 fallback 解析** | ✅ | `client.go:resolutionHeight` 解析 `resolution_name/media_name/template_id` | 无 |
 
-2026-09-10：真实账号的 MKV 经云端转码、本地 Go 会话代理和实际 Vue 播放器，在 Edge 中解码为 1280×720；暂停和切换 480p 已检查。MPEG-TS 使用按需加载的 mpegts.js 转封装；原始 MKV 不再误标为 MP4，默认优先转码。TS 点播流没有随机跳转索引，当前只支持跳到已缓冲位置，未缓冲跳转会提示而不会卡死。媒体代理、下载引擎、账号刷新与 OSS 上传均支持应用代理优先、系统手动代理回退。
+2026-09-10：真实账号的 MKV 经云端转码、本地 Go 会话代理和实际 Vue 播放器，在 Edge 中解码为 1280×720；暂停和切换 480p 已检查。MPEG-TS 使用按需加载的 mpegts.js 转封装；原始 MKV 不再误标为 MP4，默认优先转码。随机跳转由本地代理通过 Range 探测视频 PTS、定位 PAT 后重新加载，前端维护完整时间轴并取消被后续拖动取代的请求；真实视频跳到 600 秒、退回 120 秒、再跳到 2000 秒均继续播放。定位限时 25 秒，失败保留原播放流并提示重试。媒体代理、下载引擎、账号刷新与 OSS 上传均支持应用代理优先、系统手动代理回退。
 
 ---
 

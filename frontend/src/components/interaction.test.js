@@ -97,7 +97,7 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
-  it('TS 转码流进入 MSE、阻止未缓冲跳转并在关闭时释放播放器', async () => {
+  it('TS 转码流跳转会重新定位、取消旧请求并在关闭时释放播放器', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
     vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
     vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
@@ -106,6 +106,8 @@ describe('关键交互组件', () => {
     api.playVideo.mockResolvedValue({ url: 'http://127.0.0.1/stream/test', stream_type: 'ts', duration: 120, qualities: [] })
     const player = { on: vi.fn(), attachMediaElement: vi.fn(), load: vi.fn(), destroy: vi.fn() }
     tsMock.createPlayer.mockReturnValue(player)
+    const pending = []
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((url, options) => new Promise(resolve => pending.push({ url, options, resolve })))
     const wrapper = mountAttached(PlayerPanel, { props: { account: { user_id: 'test', drive_id: 'test' }, file: { file_id: 'video', name: 'video.mkv' } } })
     await flushPromises()
     const video = document.querySelector('video')
@@ -116,9 +118,16 @@ describe('关键交互组件', () => {
     expect(progress).not.toBeNull()
     await setDomInput(progress, 90)
     expect(video.currentTime).toBe(0)
-    expect(wrapper.emitted('toast')?.[0]?.[0]).toContain('已缓冲')
+    expect(fetchSpy).toHaveBeenCalledOnce()
+    await setDomInput(progress, 45)
+    expect(pending[0].options.signal.aborted).toBe(true)
+    pending[0].resolve({ ok: true, json: async () => ({ url: '/stream/test?offset=900', start: 88 }) })
+    pending[1].resolve({ ok: true, json: async () => ({ url: '/stream/test?offset=450', start: 43 }) })
+    await flushPromises()
+    expect(tsMock.createPlayer).toHaveBeenCalledTimes(2)
+    expect(tsMock.createPlayer.mock.calls[1][0].url).toContain('offset=450')
     wrapper.unmount()
-    expect(player.destroy).toHaveBeenCalledOnce()
+    expect(player.destroy).toHaveBeenCalledTimes(2)
   })
   it.each(['image', 'audio'])('%s 预览加载中和失败后始终保留窗口关闭按钮', async (kind) => {
     let rejectPreview

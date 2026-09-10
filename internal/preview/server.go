@@ -721,6 +721,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if r.URL.Query().Has("seek") && resourceTarget == "" {
+		s.handleTSSeek(w, r, session)
+		return
+	}
 	s.proxySessionRequest(w, r, sessionID, session, resourceTarget)
 }
 
@@ -840,7 +844,20 @@ func (s *Server) proxySessionRequest(w http.ResponseWriter, r *http.Request, ses
 			http.Error(w, "url not allowed", http.StatusBadRequest)
 			return
 		}
-		resp, err := s.doProxyRequest(ctx, r.Method, target, source.Headers, source.RequestAuth, r.Header.Get("Range"))
+		byteRange := r.Header.Get("Range")
+		shifted := r.URL.Query().Has("offset") && resourceTarget == ""
+		if shifted {
+			if !isTSStream(source.StreamType) {
+				http.Error(w, "invalid stream offset", 400)
+				return
+			}
+			byteRange, err = tsOffsetRange(r)
+			if err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+		}
+		resp, err := s.doProxyRequest(ctx, r.Method, target, source.Headers, source.RequestAuth, byteRange)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -860,6 +877,19 @@ func (s *Server) proxySessionRequest(w http.ResponseWriter, r *http.Request, ses
 			continue
 		}
 		defer resp.Body.Close()
+		if shifted {
+			if resp.StatusCode != http.StatusPartialContent {
+				http.Error(w, "video range unavailable", 502)
+				return
+			}
+			w.Header().Set("Content-Type", "video/mp2t")
+			corsHeaders(w, r)
+			w.WriteHeader(http.StatusOK)
+			if r.Method != http.MethodHead {
+				_, _ = io.Copy(w, resp.Body)
+			}
+			return
+		}
 		isHLS := isHLSPlaylist(source.StreamType, resp.Header.Get("Content-Type"), target, resourceTarget == "")
 		isDASH := isDASHManifest(source.StreamType, resp.Header.Get("Content-Type"), target, resourceTarget == "")
 		if (isHLS || isDASH) && r.Method != http.MethodHead && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {

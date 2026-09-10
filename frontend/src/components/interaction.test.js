@@ -97,6 +97,20 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('音频播放结束时清除旧的续播位置', async () => {
+    api.PinFileSnapshot.mockResolvedValue(undefined)
+    api.getPlayCursor.mockResolvedValue(45)
+    api.savePlayCursor.mockResolvedValue(undefined)
+    api.PreviewURL.mockResolvedValue('https://example.test/song.wav')
+    const wrapper = mountAttached(PreviewModal, { props: { account: { user_id: 'test', drive_id: 'drive' }, file: { file_id: 'song', name: 'song.wav' } } })
+    await flushPromises()
+    const audio = document.querySelector('audio')
+    audio.currentTime = 120
+    wrapper.vm.audioDur = 120
+    audio.dispatchEvent(new Event('ended'))
+    await flushPromises()
+    expect(api.savePlayCursor).toHaveBeenCalledWith('test', 'drive', 'song', 0)
+  })
   it('视频切换账号时保存旧账号进度并重新获取播放地址', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
     vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})

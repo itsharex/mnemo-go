@@ -390,6 +390,11 @@ function selectAudioFile(f) {
 
 function onAudioEnded() {
   audioPlaying.value = false
+  clearInterval(audioSaveTimer)
+  audioSaveTimer = null
+  if (activeFile.value?.file_id) {
+    savePlayCursor(props.account.user_id, props.account.drive_id, activeFile.value.file_id, 0).catch(() => {})
+  }
   if (audioLoop.value) {
     const el = audioEl.value
     if (el) { el.currentTime = 0; el.play().catch(() => {}) }

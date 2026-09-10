@@ -1147,19 +1147,23 @@ function clearPlayCursor(fileId = props.file?.file_id) {
   savePlayCursor(props.account.user_id, props.account.drive_id, fileId, 0).catch(() => {})
 }
 
+let qualitySeq = 0
 async function switchQuality(quality) {
-  if (!quality || quality === currentQuality.value) return
+  if (!quality) return
+  const requestSeq = ++qualitySeq
+  if (quality === currentQuality.value) return
   const v = videoEl.value
   const wasPlaying = Boolean(v && !v.paused)
   const currentTime = v ? v.currentTime + tsTimeBase : 0
   const seq = playbackSeq
   try {
     const preview = await playVideoQuality(props.account.user_id, props.account.drive_id, props.file.file_id, quality)
-    if (unmounted || seq !== playbackSeq) return
+    if (unmounted || seq !== playbackSeq || requestSeq !== qualitySeq) return
     setQualityOptions(preview)
     error.value = ''
     await loadPlaybackSource(preview, currentTime, wasPlaying, seq)
   } catch (e) {
+    if (unmounted || seq !== playbackSeq || requestSeq !== qualitySeq) return
     emit('toast', readablePlaybackError(e), 'error')
   }
 }

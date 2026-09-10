@@ -10,12 +10,20 @@ import PreviewModal from './PreviewModal.vue'
 import PlayerPanel from './PlayerPanel.vue'
 import ShareView from '../views/ShareView.vue'
 import SyncView from '../views/SyncView.vue'
+import SettingsView from '../views/SettingsView.vue'
 import * as appearance from '../appearance'
 
 const api = vi.hoisted(() => ({
   login: vi.fn(),
   ListShareHistory: vi.fn(),
   ListSyncConfigs: vi.fn(),
+  GetSettings: vi.fn(),
+  SaveSettings: vi.fn(),
+  GetLogPath: vi.fn(),
+  ClearCache: vi.fn(),
+  RevealInFolder: vi.fn(),
+  ClearLogs: vi.fn(),
+  ExportLogs: vi.fn(),
   ListRunningSyncIDs: vi.fn(),
   SaveSyncConfig: vi.fn(),
   DeleteSyncConfig: vi.fn(),
@@ -111,6 +119,15 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('日志路径读取失败不重置已加载的设置', async () => {
+    api.GetSettings.mockResolvedValue({ proxy: 'http://localhost:7890', maxConcurrentDownloads: 7, maxDownloadSpeed: 2048 })
+    api.GetLogPath.mockRejectedValue(new Error('日志路径不可用'))
+    const wrapper = mountAttached(SettingsView)
+    await flushPromises()
+    expect(wrapper.vm.settings.proxy).toBe('http://localhost:7890')
+    expect(wrapper.vm.settings.maxConcurrentDownloads).toBe(7)
+    expect(wrapper.vm.settings.maxDownloadSpeed).toBe(2)
+  })
   it('旧同步任务保存完成后不关闭新打开的编辑表单', async () => {
     api.ListSyncConfigs.mockResolvedValue([])
     api.ListRunningSyncIDs.mockResolvedValue([])

@@ -106,7 +106,7 @@ onMounted(async () => {
       maxUploadSpeed: Math.round((Number(s.maxUploadSpeed) || 0) / 1024),
     }
 		settings.value.logLevel = settings.value.logLevel || 'info'
-		logPath.value = await GetLogPath()
+		logPath.value = await GetLogPath().catch(() => '')
   } catch {
     settings.value = { ...defaults }
   }

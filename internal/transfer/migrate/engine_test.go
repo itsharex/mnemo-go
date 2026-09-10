@@ -3,15 +3,70 @@ package migrate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"mnemo-go/internal/drive"
+	_ "mnemo-go/internal/drive/providers/webdav"
 	"mnemo-go/internal/model"
 )
+
+func TestSpoolMigrationPreservesExistingDestination(t *testing.T) {
+	var mu sync.Mutex
+	files := map[string]string{"/target/report.txt": "existing", "/source/report.txt": "incoming"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, "incoming")
+		case "PROPFIND":
+			if _, ok := files[r.URL.Path]; !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusMultiStatus)
+			_, _ = fmt.Fprintf(w, `<d:multistatus xmlns:d="DAV:"><d:response><d:href>%s</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>8</d:getcontentlength></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>`, r.URL.Path)
+		case http.MethodPut:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			files[r.URL.Path] = string(body)
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	drive.SetTokenResolver(func(_, _ string) (*model.TokenInfo, error) {
+		return &model.TokenInfo{Conn: &model.ConnConfig{Endpoint: server.URL}}, nil
+	})
+	defer drive.SetTokenResolver(nil)
+	job := &Job{SrcUser: "webdav_source", SrcDrive: "webdav:source", DstUser: "webdav_target", DstDrive: "webdav:target"}
+	err := NewEngine(nil, nil).spoolMigrate(context.Background(), job, &model.File{FileID: "/source/report.txt", Name: "report.txt", Size: 8}, "/target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if files["/target/report.txt"] != "existing" || len(files) != 3 {
+		t.Fatalf("migration overwrote existing destination: %#v", files)
+	}
+	for path, body := range files {
+		if path != "/target/report.txt" && body != "incoming" {
+			t.Fatalf("new target content = %q", body)
+		}
+	}
+}
 
 func TestStreamMigrationStopsWhenUploaderReturnsEarly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

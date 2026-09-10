@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"mnemo-go/internal/drive"
+	"mnemo-go/internal/drive/driveutil"
 	"mnemo-go/internal/model"
 	"mnemo-go/internal/netx"
 	"mnemo-go/internal/store"
@@ -494,6 +495,7 @@ func (e *Engine) spoolMigrate(ctx context.Context, job *Job, srcFile *model.File
 		Info: model.UploadInfo{
 			LocalFilePath: tmp.Name(), ParentFileID: targetParent,
 			DriveID: job.DstDrive, Name: srcFile.Name, Size: srcFile.Size,
+			ConflictPolicy: driveutil.ConflictPolicyRename,
 		},
 	}
 	handler, err := drive.QueueUploadHandlerContext(ctx, job.DstUser, job.DstDrive)

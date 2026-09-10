@@ -1086,13 +1086,12 @@ func (a *App) RemoveAccount(userID string) error {
 }
 
 // GetSettings loads app settings.
-func (a *App) GetSettings() store.Settings {
+func (a *App) GetSettings() (store.Settings, error) {
 	st, err := a.storeOrError()
 	if err != nil {
-		return store.Settings{}
+		return store.Settings{}, err
 	}
-	s, _ := st.GetSettings()
-	return s
+	return st.GetSettings()
 }
 
 // SaveSettings persists settings and applies runtime-relevant changes.

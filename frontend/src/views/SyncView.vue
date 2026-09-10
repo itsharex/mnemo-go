@@ -26,6 +26,7 @@ let syncStateVersion = 0
 const showEdit = ref(false)
 const showDirPick = ref(false)
 const editingId = ref('')
+let editVersion = 0
 const form = ref(emptyForm())
 
 const dirOptions = [
@@ -59,6 +60,7 @@ function accountOf(job) {
 const formAccount = computed(() => props.accounts.find((a) => a.user_id === form.value.user_id) || null)
 
 function openCreate() {
+  ++editVersion
   editingId.value = ''
   form.value = emptyForm()
   if (props.account) {
@@ -72,6 +74,7 @@ function openCreate() {
 }
 
 function openEdit(job) {
+  ++editVersion
   editingId.value = job.id
   form.value = {
     name: job.name || '',
@@ -110,6 +113,7 @@ async function save() {
   if (!form.value.local_dir.trim()) { emit('toast', '请填写本地文件夹路径', 'error'); return }
   if (!formAccount.value) { emit('toast', '请选择绑定账号', 'error'); return }
   savingEdit.value = true
+  const version = editVersion
   const id = editingId.value || 'sync-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8)
   try {
     await SaveSyncConfig({
@@ -125,7 +129,7 @@ async function save() {
        intervalMin: Math.max(0, Math.floor(Number(form.value.intervalMin) || 0)),
        deletePropagation: !!form.value.deletePropagation,
     })
-    showEdit.value = false
+    if (version === editVersion) showEdit.value = false
     refresh()
     emit('toast', '已保存同步任务', 'success')
   } catch (e) { emit('toast', String(e), 'error') }

@@ -111,6 +111,21 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('旧同步任务保存完成后不关闭新打开的编辑表单', async () => {
+    api.ListSyncConfigs.mockResolvedValue([])
+    api.ListRunningSyncIDs.mockResolvedValue([])
+    let finishSave
+    api.SaveSyncConfig.mockImplementation(() => new Promise(resolve => { finishSave = resolve }))
+    const wrapper = mountAttached(SyncView, { props: { accounts: [{ user_id: 'user', drive_id: 'drive' }] } })
+    wrapper.vm.openEdit({ id: 'first', name: '旧任务', user_id: 'user', drive_id: 'drive', local_dir: 'D:/first' })
+    const saving = wrapper.vm.save()
+    wrapper.vm.showEdit = false
+    wrapper.vm.openEdit({ id: 'second', name: '新任务', user_id: 'user', drive_id: 'drive', local_dir: 'D:/second' })
+    finishSave()
+    await saving
+    expect(wrapper.vm.showEdit).toBe(true)
+    expect(wrapper.vm.form.name).toBe('新任务')
+  })
   it('同步初始化的旧运行列表不能清除刚启动的任务', async () => {
     api.ListSyncConfigs.mockResolvedValue([])
     let resolveInitial, resolveRun

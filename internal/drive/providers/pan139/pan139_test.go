@@ -53,6 +53,60 @@ func TestPan139S305ExplainsAccountPasswordRequirement(t *testing.T) {
 	}
 }
 
+func TestPan139SMSWrongCodeDoesNotChangeLoginFlow(t *testing.T) {
+	state, err := newPan139LoginState("13800138000", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	state.Client.HTTP.Transport = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.URL.Path != "/Login/Login.ashx" {
+			t.Fatalf("wrong-code retry changed login endpoint: %s", r.URL.Path)
+		}
+		if calls == 1 {
+			return pan139Response(r, 302, http.Header{"Location": {"https://mail.10086.cn/default.html?ec=S305"}}, ""), nil
+		}
+		return pan139Response(r, 302, http.Header{"Location": {"https://mail.10086.cn/?sid=retry-ok"}}, ""), nil
+	})
+	if _, _, err := submitPan139Login(context.Background(), state, true, "000000"); err == nil {
+		t.Fatal("expected wrong code")
+	}
+	if state.RiskCode != "" {
+		t.Fatalf("SMS error polluted risk scene: %s", state.RiskCode)
+	}
+	_, sid, err := submitPan139Login(context.Background(), state, true, "123456")
+	if err != nil || sid != "retry-ok" {
+		t.Fatalf("corrected code failed: %s %v", sid, err)
+	}
+}
+
+func TestPan139FailedSMSSendDoesNotStartCooldown(t *testing.T) {
+	resetPan139LoginStatesForTest(t)
+	old := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = old })
+	calls := 0
+	netx.TestTransportHook = pan139RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return pan139Response(r, 503, nil, `{"code":"S_ERROR"}`), nil
+		}
+		return pan139Response(r, 200, nil, `{"code":"S_OK"}`), nil
+	})
+	if err := RequestPan139SMS(context.Background(), "13800138000"); err == nil {
+		t.Fatal("expected failed send")
+	}
+	if err := RequestPan139SMS(context.Background(), "13800138000"); err != nil {
+		t.Fatalf("failed send blocked manual retry: %v", err)
+	}
+	if err := RequestPan139SMS(context.Background(), "13800138000"); err == nil {
+		t.Fatal("successful send must start cooldown")
+	}
+	if calls != 2 {
+		t.Fatalf("unexpected automatic requests: %d", calls)
+	}
+}
+
 func TestPan139AuthorizationExpirationUsesFourthTokenField(t *testing.T) {
 	expires := time.Now().Add(30 * 24 * time.Hour).UnixMilli()
 	for _, suffix := range []string{"", "|metadata", "|metadata|0"} {
@@ -343,6 +397,7 @@ func TestPan139PasswordUpgradeUsesOneCookieSessionForSMS(t *testing.T) {
 	if encryptedEnvelope == "" {
 		t.Fatal("test SSO envelope encryption failed")
 	}
+	smsSubmits, ssoCalls := 0, 0
 
 	netx.TestTransportHook = pan139RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {
@@ -379,6 +434,7 @@ func TestPan139PasswordUpgradeUsesOneCookieSessionForSMS(t *testing.T) {
 				headers.Set("Location", "https://mail.10086.cn/default.html?ec=S046")
 				return pan139Response(req, http.StatusFound, headers, ""), nil
 			case "3":
+				smsSubmits++
 				if values.Get("passOld") != "" || values.Get("Password") != sha1Hex("fetion.com.cn:"+smsCode) {
 					return nil, errors.New("SMS request does not contain the expected code fields")
 				}
@@ -405,6 +461,10 @@ func TestPan139PasswordUpgradeUsesOneCookieSessionForSMS(t *testing.T) {
 			return pan139Response(req, http.StatusOK, nil, `{"artifact":"artifact-value"}`), nil
 
 		case req.URL.Host == "user-njs.yun.139.com" && req.URL.Path == "/user/thirdlogin":
+			ssoCalls++
+			if ssoCalls == 1 {
+				return pan139Response(req, http.StatusServiceUnavailable, nil, ""), nil
+			}
 			body, readErr := io.ReadAll(req.Body)
 			if readErr != nil {
 				return nil, readErr
@@ -437,6 +497,9 @@ func TestPan139PasswordUpgradeUsesOneCookieSessionForSMS(t *testing.T) {
 	if err := RequestPan139SMS(context.Background(), username); err == nil || !strings.Contains(err.Error(), "秒后再试") {
 		t.Fatalf("duplicate RequestPan139SMS() error = %v, want local cooldown", err)
 	}
+	if _, err := loginBySMS(context.Background(), username, smsCode); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("expected temporary SSO failure: %v", err)
+	}
 	authorization, err := loginBySMS(context.Background(), username, smsCode)
 	if err != nil {
 		t.Fatalf("loginBySMS() error = %v", err)
@@ -444,6 +507,9 @@ func TestPan139PasswordUpgradeUsesOneCookieSessionForSMS(t *testing.T) {
 	wantAuthorization := "cGM6Y2xvdWQtYWNjb3VudDphdXRoLXRva2Vu"
 	if authorization != wantAuthorization {
 		t.Fatalf("authorization = %q, want %q", authorization, wantAuthorization)
+	}
+	if smsSubmits != 1 || ssoCalls != 2 {
+		t.Fatalf("SSO retry replayed SMS: sms=%d sso=%d", smsSubmits, ssoCalls)
 	}
 	if loadPan139LoginState(username) != nil {
 		t.Fatal("completed SMS login left a reusable password login state")

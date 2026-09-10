@@ -1555,8 +1555,10 @@ func (pan139SMSRequiredError) Error() string {
 }
 
 type pan139LoginState struct {
+	operationMu   sync.Mutex
 	Username      string
 	RiskCode      string
+	MailSID       string
 	Password      string
 	MailCookies   string
 	Client        *netx.Client
@@ -1820,7 +1822,6 @@ func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, s
 	state.MailCookies = mergePan139ResponseCookies(state.MailCookies, resp.Cookies())
 	syncPan139JarCookies(state)
 	if code := pan139RiskCode(location); code != "" {
-		state.RiskCode = code
 		if code == "S305" {
 			if sms {
 				return location, "", errors.New("139 登录失败：S305 短信验证码错误，请重新获取")
@@ -1830,6 +1831,7 @@ func submitPan139Login(ctx context.Context, state *pan139LoginState, sms bool, s
 		if _, ok := pan139SMSScene(code); !ok {
 			return location, "", fmt.Errorf("139 登录失败：%s", code)
 		}
+		state.RiskCode = code
 		return location, "", nil
 	}
 	sid = extractPan139SID(location, resp)
@@ -1870,26 +1872,49 @@ func loginBySMS(ctx context.Context, username, smsCode string) (string, error) {
 	if state == nil {
 		return "", errors.New("139 登录会话已过期，请重新获取短信验证码")
 	}
-	location, sid, err := submitPan139Login(ctx, state, true, smsCode)
+	state.operationMu.Lock()
+	defer state.operationMu.Unlock()
+	if loadPan139LoginState(username) != state {
+		return "", errors.New("139 登录会话已结束，请重新获取短信验证码")
+	}
+	if state.MailSID == "" {
+		location, sid, err := submitPan139Login(ctx, state, true, smsCode)
+		if err != nil {
+			return "", err
+		}
+		if sid == "" {
+			if pan139NeedsSMS(location) {
+				return "", errors.New("139 短信验证码未通过，请检查验证码")
+			}
+			return "", errors.New("139 短信登录失败：服务器未返回登录会话")
+		}
+		state.MailSID = sid
+	}
+	// The SMS proof is single-use. Retain its mail session until cloud SSO
+	// succeeds so a manual retry only repeats the ticket exchange.
+	authorization, err := finishPan139Login(ctx, state, state.MailSID)
 	if err != nil {
 		return "", err
 	}
-	if sid == "" {
-		if pan139NeedsSMS(location) {
-			return "", errors.New("139 短信验证码未通过，请检查验证码")
-		}
-		return "", errors.New("139 短信登录失败：服务器未返回登录会话")
-	}
 	deletePan139LoginState(username)
-	return finishPan139Login(ctx, state, sid)
+	return authorization, nil
 }
 
 // RequestPan139SMS supports both direct SMS login and password risk verification.
-func RequestPan139SMS(ctx context.Context, username string) error {
+func RequestPan139SMS(ctx context.Context, username string) (sendErr error) {
 	state, err := reservePan139SMSSend(username)
 	if err != nil {
 		return err
 	}
+	state.operationMu.Lock()
+	defer state.operationMu.Unlock()
+	defer func() {
+		if sendErr != nil {
+			pan139LoginStateMu.Lock()
+			state.LastSMSSentAt = time.Time{}
+			pan139LoginStateMu.Unlock()
+		}
+	}()
 	scene, ok := pan139SMSScene(state.RiskCode)
 	if !ok && state.RiskCode != "" {
 		return fmt.Errorf("139 登录校验场景不支持短信：%s", state.RiskCode)
@@ -1930,7 +1955,10 @@ func RequestPan139SMS(ctx context.Context, username string) error {
 		return fmt.Errorf("139 获取短信验证码失败: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return fmt.Errorf("139 获取短信验证码响应读取失败: %w", err)
+	}
 	state.MailCookies = mergePan139ResponseCookies(state.MailCookies, resp.Cookies())
 	syncPan139JarCookies(state)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

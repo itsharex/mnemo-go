@@ -39,7 +39,9 @@ SetHashes(["dropbox"], nil)
 | List / ListPaged | ✅ | `dropbox.go:108-146` /files/list_folder + /continue | 无 |
 | cursor 防环 | ✅ | `dropbox.go:138-142` seen | 无 |
 | deleted 过滤 | ✅ | `dropbox.go:120-127` filterDeleted | 无 |
-| limit=500 | ✅ | `dropbox.go:122` | 无 |
+| limit=2000 | ✅ | `ListPage` 请求参数 | 按 has_more/cursor 继续分页 |
+
+2026-09-10：确认并修复前端根目录标记 `root` 未转换的问题。同一真实账号下，`path:"root"` 返回 HTTP 500，`path:""` 返回 HTTP 200；原测试仅使用 `dropbox_root`，未覆盖前端入口。现在列表、分页、上传及移动/复制目标统一转换 `root`、`dropbox_root`、`/` 和空路径，保留 `/root` 等真实目录。修复后的正式驱动使用真实账号通过 `root` 入口读取根目录及分页列表；测试账号根目录没有子目录，本次未进行真实子目录遍历或写入操作。
 
 ---
 

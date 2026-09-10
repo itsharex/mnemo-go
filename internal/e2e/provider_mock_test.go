@@ -1269,6 +1269,14 @@ func TestDropboxExpiredTokenIsRefreshedAndPersisted(t *testing.T) {
 func TestDropboxListMock(t *testing.T) {
 	mock := MockAPI(t, "api.dropboxapi.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/2/files/list_folder" {
+			var payload struct {
+				Path string `json:"path"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.Path != "" {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"entries": []map[string]any{
 					{".tag": "file", "id": "id:1", "name": "note.txt", "path_display": "/note.txt", "size": 300, "server_modified": "2026-01-01T00:00:00Z"},
@@ -1286,7 +1294,7 @@ func TestDropboxListMock(t *testing.T) {
 		AccessToken: "test-token", TokenFrom: "dropbox", UserID: "dropbox_test",
 	})
 
-	names := listNames(t, uid, did, "dropbox_root")
+	names := listNames(t, uid, did, "root")
 	if len(names) != 2 || names[0] != "note.txt" || names[1] != "data" {
 		t.Fatalf("names: %v", names)
 	}

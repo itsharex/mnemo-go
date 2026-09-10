@@ -211,16 +211,11 @@ func (c *client) ListPage(ctx context.Context, parentID, cursor string) ([]Metad
 		}
 		return filterDeleted(resp.Entries), resp.Cursor, resp.HasMore, nil
 	}
-	path := ""
-	if parentID != "" && parentID != RootID {
-		path = parentID
-	}
+	path := normalizeDropboxPath(parentID)
 	var resp listFolderResp
 	err := c.rpc(ctx, "/files/list_folder", map[string]any{
-		// Keep the initial listing payload to the stable fields accepted by both
-		// personal and team accounts. Some Dropbox accounts return a server-side
-		// 500 for include_mounted_folders=true even though a normal root listing
-		// is otherwise valid.
+		// Root sentinels must be converted to an empty API path. In particular,
+		// the frontend's default "root" can cause Dropbox to return HTTP 500.
 		"path": path, "recursive": false, "include_media_info": false,
 		"include_deleted": false, "include_has_explicit_shared_members": false,
 		"include_mounted_folders": false, "include_non_downloadable_files": false,
@@ -796,9 +791,16 @@ func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
 // ---- helpers ----
 
+func normalizeDropboxPath(path string) string {
+	if path == "" || path == "root" || path == RootID || path == "/" {
+		return ""
+	}
+	return path
+}
+
 // resolveCommandPath maps a file id to a Dropbox path.
 func resolveCommandPath(fileID, description, path string) string {
-	if fileID == "" || fileID == "root" || fileID == RootID {
+	if normalizeDropboxPath(fileID) == "" {
 		return ""
 	}
 	if path != "" {
@@ -823,6 +825,7 @@ func renameTarget(path, name string) string {
 }
 
 func joinTarget(targetParent, from string) string {
+	targetParent = normalizeDropboxPath(targetParent)
 	base := from
 	if i := strings.LastIndex(base, "/"); i >= 0 {
 		base = base[i+1:]

@@ -17,7 +17,57 @@ import (
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
 	"mnemo-go/internal/netx"
+	"mnemo-go/internal/store"
 )
+
+// Explicitly enabled, read-only account diagnostic. Never logs account data,
+// access tokens, filenames, cursors or returned metadata.
+func TestDropboxLiveListDiagnostic(t *testing.T) {
+	dir := os.Getenv("MNEMO_DROPBOX_DIAGNOSTIC_ACCOUNT_DIR")
+	if dir == "" {
+		t.Skip("live diagnostic disabled")
+	}
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal("cannot open account store")
+	}
+	accounts, err := st.ListAccounts()
+	if err != nil {
+		t.Fatal("cannot decode account store")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	for _, account := range accounts {
+		if account.Token == nil || account.Token.TokenFrom != "dropbox" {
+			continue
+		}
+		d := &Driver{}
+		c := drive.Context{Token: account.Token}
+		files, err := d.List(ctx, c, "root", nil)
+		if err != nil {
+			t.Fatalf("UI root listing failed: %v", err)
+		}
+		t.Logf("UI root listing succeeded: %d entries", len(files))
+		page, err := d.ListPaged(ctx, c, "root", "", nil)
+		if err != nil {
+			t.Fatalf("UI root paged listing failed: %v", err)
+		}
+		t.Logf("UI root paged listing succeeded: %d entries", len(page.Items))
+		for _, file := range files {
+			if !file.IsDir {
+				continue
+			}
+			children, err := d.List(ctx, c, file.FileID, nil)
+			if err != nil {
+				t.Fatalf("child directory listing failed: %v", err)
+			}
+			t.Logf("child directory listing succeeded: %d entries", len(children))
+			break
+		}
+		return
+	}
+	t.Fatal("no Dropbox account found")
+}
 
 type dropboxRoundTripper func(*http.Request) (*http.Response, error)
 
@@ -398,6 +448,68 @@ func TestDropboxListUsesConservativeFolderPayload(t *testing.T) {
 
 	if _, err := newClient("access").List(context.Background(), RootID); err != nil {
 		t.Fatalf("List returned error: %v", err)
+	}
+}
+
+func TestDropboxListNormalizesUIRootAndPreservesRealPaths(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"root", ""}, {RootID, ""}, {"", ""}, {"/", ""}, {"/root", "/root"}, {"/folder", "/folder"}, {"id:folder", "id:folder"},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			withDropboxTransport(t, dropboxRoundTripper(func(r *http.Request) (*http.Response, error) {
+				var payload struct {
+					Path string `json:"path"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					return nil, err
+				}
+				if payload.Path != tc.want {
+					return nil, fmt.Errorf("API path=%q, want %q", payload.Path, tc.want)
+				}
+				return dropboxResponse(r, 200, `{"entries":[],"has_more":false}`), nil
+			}))
+			if _, _, _, err := newClient("access").ListPage(context.Background(), tc.input, ""); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestDropboxRootDestinations(t *testing.T) {
+	for _, root := range []string{"root", RootID, "", "/"} {
+		if got := joinTarget(root, "/source/file.txt"); got != "/file.txt" {
+			t.Fatalf("joinTarget(%q)=%q", root, got)
+		}
+		if got := resolveCommandPath(root, "", ""); got != "" {
+			t.Fatalf("root path=%q", got)
+		}
+	}
+	if got := joinTarget("/root", "/source/file.txt"); got != "/root/file.txt" {
+		t.Fatalf("real directory changed: %q", got)
+	}
+}
+
+func TestDropboxUploadUsesUIRootAsAPIRoot(t *testing.T) {
+	path := t.TempDir() + "/file.txt"
+	if err := os.WriteFile(path, []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	withDropboxTransport(t, dropboxRoundTripper(func(r *http.Request) (*http.Response, error) {
+		var arg struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(r.Header.Get("Dropbox-API-Arg")), &arg); err != nil {
+			return nil, err
+		}
+		if arg.Path != "/file.txt" {
+			return nil, fmt.Errorf("upload target=%q", arg.Path)
+		}
+		return dropboxResponse(r, 200, `{"id":"id:file"}`), nil
+	}))
+	ui := &model.UploadingUI{Info: model.UploadInfo{LocalFilePath: path, ParentFileID: "root", Name: "file.txt"}}
+	err := (&Driver{}).UploadOneFile(context.Background(), drive.Context{Token: &model.TokenInfo{AccessToken: "access"}}, ui)
+	if err != nil || ui.Upload.FileID != "id:file" {
+		t.Fatalf("upload failed: %v", err)
 	}
 }
 

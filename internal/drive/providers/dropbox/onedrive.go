@@ -23,13 +23,7 @@ func (d *Driver) Capabilities() drive.Capabilities { return drive.RegistryCaps(p
 func (d *Driver) RootID() string                   { return RootID }
 
 func pathOf(ref drive.FileRef) string {
-	if ref.ID == "" || ref.ID == "root" || ref.ID == RootID {
-		return ""
-	}
-	if ref.ID[0] == '/' {
-		return ref.ID
-	}
-	return ref.ID
+	return normalizeDropboxPath(ref.ID)
 }
 
 func (d *Driver) List(ctx context.Context, c drive.Context, dirID string, _ *drive.ListOptions) ([]model.File, error) {
@@ -77,7 +71,7 @@ func (d *Driver) Search(ctx context.Context, c drive.Context, keyword string) ([
 }
 
 func (d *Driver) GetInfo(ctx context.Context, c drive.Context, fileID string) (any, error) {
-	if fileID == RootID {
+	if normalizeDropboxPath(fileID) == "" {
 		return rootFile(c.DriveID), nil
 	}
 	return d.GetFile(ctx, c, fileID)
@@ -265,7 +259,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	if err != nil {
 		return err
 	}
-	path := ui.Info.ParentFileID
+	path := normalizeDropboxPath(ui.Info.ParentFileID)
 	if path == "" || path == RootID {
 		path = ""
 	} else {

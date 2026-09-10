@@ -1,12 +1,20 @@
 package sync
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestRunRejectsUnknownDirectionBeforeAccessingFiles(t *testing.T) {
+	err := NewEngine(nil).Run(context.Background(), Config{Direction: "pul"})
+	if err == nil || !strings.Contains(err.Error(), "direction") {
+		t.Fatalf("invalid direction must be rejected explicitly, got %v", err)
+	}
+}
 
 func TestGuardDeleteThreshold(t *testing.T) {
 	eng := NewEngine(nil)

@@ -98,8 +98,10 @@ func (e *Engine) Run(ctx context.Context, cfg Config) error {
 		err = e.push(ctx, cfg)
 	case "pull":
 		err = e.pull(ctx, cfg)
-	default:
+	case "", "two-way":
 		err = e.twoWay(ctx, cfg)
+	default:
+		err = fmt.Errorf("sync: invalid direction %q", cfg.Direction)
 	}
 	if err != nil {
 		e.log(cfg.ID, "error", err.Error())

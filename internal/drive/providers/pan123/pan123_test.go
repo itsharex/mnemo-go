@@ -1071,6 +1071,24 @@ func TestPan123UploadRejectsMissingTargetFile(t *testing.T) {
 	}
 }
 
+func TestPan123RapidUploadRequiresTargetFileID(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	for _, data := range []string{`{"Reuse":true}`, `{"Reuse":true,"FileId":0}`, `{"FileId":0}`} {
+		t.Run(data, func(t *testing.T) {
+			netx.TestTransportHook = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return pan123JSONResponse(`{"code":0,"data":`+data+`}`, req), nil
+			})
+			result, err := (&Driver{}).RapidUploadByHash(context.Background(), drive.Context{Token: &model.TokenInfo{AccessToken: "test-token"}}, drive.RapidUploadRequest{
+				Method: "md5", Hash: strings.Repeat("a", 32), FileName: "file.txt", Size: 8,
+			})
+			if err == nil && result != nil && result.Reuse {
+				t.Fatalf("invalid destination reported as rapid-upload success: %+v", result)
+			}
+		})
+	}
+}
+
 func TestPan123UploadRequestUsesConflictPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.txt")
 	content := []byte("conflict policy")

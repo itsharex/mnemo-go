@@ -1556,7 +1556,7 @@ func (d *Driver) RapidUploadByHash(ctx context.Context, c drive.Context, req dri
 	reuse := asBool(pick(data, "Reuse", "reuse"))
 	fileID := firstString(data, "FileId", "fileId")
 	key := firstString(data, "Key", "key")
-	if reuse || (fileID != "" && key == "") {
+	if strings.TrimSpace(fileID) != "" && fileID != "0" && (reuse || key == "") {
 		return &drive.RapidUploadResult{Reuse: true, FileID: fileID, ParentID: req.ParentID, Message: "秒传命中"}, nil
 	}
 	return &drive.RapidUploadResult{Reuse: false, Message: "未命中秒传"}, nil

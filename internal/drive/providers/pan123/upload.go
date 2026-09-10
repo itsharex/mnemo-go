@@ -338,7 +338,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	}
 	if stopped(ctx, ui) {
 		markStopped(ui)
-		return nil
+		return ctx.Err()
 	}
 
 	stat, err := os.Stat(ui.Info.LocalFilePath)
@@ -403,7 +403,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 		uploadErr := d.uploadPan123Parts(ctx, c, ui, data, sessionKey, savedParts, f, size)
 		if errors.Is(uploadErr, errPan123UploadStopped) {
 			markStopped(ui)
-			return nil
+			return ctx.Err()
 		}
 		if uploadErr != nil {
 			if resumed && sessionAttempt == 0 && errors.Is(uploadErr, errPan123UploadSessionInvalid) {

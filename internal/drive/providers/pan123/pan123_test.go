@@ -25,6 +25,23 @@ import (
 
 // ---- signPath / crc32 ----
 
+func TestUploadCanceledContextCannotReportSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "canceled.txt")
+	if err := os.WriteFile(path, []byte("payload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ui := &model.UploadingUI{Info: model.UploadInfo{LocalFilePath: path, Name: "canceled.txt"}}
+	err := (&Driver{}).UploadOneFile(ctx, drive.Context{}, ui)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled upload returned %v, want context.Canceled", err)
+	}
+	if ui.Upload.IsCompleted {
+		t.Fatal("canceled upload was marked completed")
+	}
+}
+
 func TestCRC32StandardVector(t *testing.T) {
 	if got := crc32sum("123456789"); got != 0xCBF43926 {
 		t.Fatalf("crc32sum(123456789) = %08x, want cbf43926", got)

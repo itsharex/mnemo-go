@@ -128,6 +128,8 @@ export function OpenFile(arg1:string):Promise<void>;
 
 export function OpenPikPakCaptcha(arg1:string):Promise<void>;
 
+export function OpenPreviewWindow(arg1:app.PreviewWindowSeed):Promise<void>;
+
 export function PauseDownload(arg1:string):Promise<void>;
 
 export function PickDirectory(arg1:string,arg2:string):Promise<string>;
@@ -207,6 +209,8 @@ export function SetupTray(arg1:Array<number>):Promise<void>;
 export function ShowMainWindow():Promise<void>;
 
 export function ShowPikPakCaptcha(arg1:string,arg2:string):Promise<boolean>;
+
+export function ShowPreviewWindows():Promise<void>;
 
 export function StartSyncScheduler():Promise<string>;
 

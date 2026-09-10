@@ -45,6 +45,7 @@ const PREFS_DEFAULTS = {
 }
 
 export function getPrefs() {
+  if (window.__mnemoPreviewPrefs) return { ...PREFS_DEFAULTS, ...window.__mnemoPreviewPrefs }
   try {
     return { ...PREFS_DEFAULTS, ...(JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') || {}) }
   } catch { return { ...PREFS_DEFAULTS } }

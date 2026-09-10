@@ -42,16 +42,18 @@ import (
 
 // App is the root Wails-bound struct.
 type App struct {
-	stateMu    sync.RWMutex
-	persistMu  sync.Mutex
-	persistErr error
-	ctx        context.Context
-	store      *store.Store
-	preview    *preview.Server
-	dl         *transfer.Manager
-	uploads    *transfer.UploadQueue
-	secrets    config.Secrets
-	dataDir    string
+	previewWindows  sync.Map
+	previewStopping atomic.Bool
+	stateMu         sync.RWMutex
+	persistMu       sync.Mutex
+	persistErr      error
+	ctx             context.Context
+	store           *store.Store
+	preview         *preview.Server
+	dl              *transfer.Manager
+	uploads         *transfer.UploadQueue
+	secrets         config.Secrets
+	dataDir         string
 
 	updateMu   sync.Mutex
 	updateInfo *updater.Info
@@ -421,6 +423,8 @@ func (a *App) Shutdown(ctx context.Context) {
 		return
 	}
 	a.shutdownOnce.Do(func() {
+		a.previewStopping.Store(true)
+		a.previewWindows.Range(func(_, value any) bool { value.(*previewProcess).cancel(); return true })
 		shutdownAt := time.Now()
 		logging.Info("application shutdown started")
 		captcha.Close()

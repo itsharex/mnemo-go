@@ -246,6 +246,10 @@ export function OpenPikPakCaptcha(arg1) {
   return window['go']['app']['App']['OpenPikPakCaptcha'](arg1);
 }
 
+export function OpenPreviewWindow(arg1) {
+  return window['go']['app']['App']['OpenPreviewWindow'](arg1);
+}
+
 export function PauseDownload(arg1) {
   return window['go']['app']['App']['PauseDownload'](arg1);
 }
@@ -404,6 +408,10 @@ export function ShowMainWindow() {
 
 export function ShowPikPakCaptcha(arg1, arg2) {
   return window['go']['app']['App']['ShowPikPakCaptcha'](arg1, arg2);
+}
+
+export function ShowPreviewWindows() {
+  return window['go']['app']['App']['ShowPreviewWindows']();
 }
 
 export function StartSyncScheduler() {

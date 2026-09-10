@@ -78,6 +78,7 @@ const PATHS = {
   'window-restore': 'M7 7h12v12H7z M5 17H4V5h12v1',
   'more-horizontal': 'M5 12h.01 M12 12h.01 M19 12h.01',
   'picture-in-picture': 'M3 5h18v14H3z M13 13h6v4h-6z',
+  stop: 'M6 6h12v12H6z',
 }
 
 const d = computed(() => PATHS[props.name] || PATHS.file)

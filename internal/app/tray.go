@@ -8,7 +8,60 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"mnemo-go/internal/logging"
+	"mnemo-go/internal/model"
 )
+
+type downloadIndicator struct {
+	state   uintptr
+	percent uint64
+	label   string
+}
+
+func summarizeDownloads(tasks []model.DownloadTask) downloadIndicator {
+	active, paused, failed := 0, 0, 0
+	var done, total float64
+	unknown := false
+	for _, task := range tasks {
+		switch task.Status {
+		case "downloading", "queued":
+			active++
+		case "paused":
+			paused++
+		case "failed":
+			failed++
+		default:
+			continue
+		}
+		if task.Status == "failed" {
+			continue
+		}
+		if task.Size <= 0 {
+			unknown = true
+			continue
+		}
+		total += float64(task.Size)
+		done += float64(max(0, min(task.Downloaded, task.Size)))
+	}
+	progress := downloadIndicator{label: "Mnemo · 无下载任务"}
+	if total > 0 {
+		progress.percent = uint64(done * 100 / total)
+	}
+	if active > 0 {
+		progress.state = 2
+		progress.label = fmt.Sprintf("Mnemo · 下载 %d%% · %d 个任务", progress.percent, active)
+		if unknown {
+			progress.state = 1
+			progress.label = fmt.Sprintf("Mnemo · 正在下载 · %d 个任务", active)
+		}
+	} else if paused > 0 {
+		progress.state = 8
+		progress.label = fmt.Sprintf("Mnemo · 已暂停 %d%% · %d 个任务", progress.percent, paused)
+	} else if failed > 0 {
+		progress.state, progress.percent = 4, 100
+		progress.label = fmt.Sprintf("Mnemo · %d 个下载失败", failed)
+	}
+	return progress
+}
 
 // ShowMainWindow 从托盘/隐藏状态恢复主窗口并置于前台。
 func (a *App) ShowMainWindow() {

@@ -5,18 +5,16 @@ import {
   move, copy, favorite, createShare, uploadFiles, validateUploadFiles, migrateFiles, download,
   AddFavorite, RemoveFavorite, ListFavorites, OfflineDownload, PickDirectory, PickFiles,
   formatBytes, formatTime, formatTimeParts, iconOf, extOf, openKindOf, copyText,
-  capsOf, providerMetaOf, providerOf, GetDirectoryCache, SaveDirectoryCache, DeleteDirectoryCache,
+  capsOf, providerMetaOf, providerOf, GetDirectoryCache, SaveDirectoryCache, DeleteDirectoryCache, onEvent,
 } from '../api'
 import ContextMenu from '../components/ContextMenu.vue'
 import DropdownBtn from '../components/DropdownBtn.vue'
 import Modal from '../components/Modal.vue'
 import SelectDirModal from '../components/SelectDirModal.vue'
-import PreviewModal from '../components/PreviewModal.vue'
 import RenameMultiModal from '../components/RenameMultiModal.vue'
 import ConfirmModal from '../components/ConfirmModal.vue'
 import UiIcon from '../components/UiIcon.vue'
 import UiSelect from '../components/UiSelect.vue'
-import PlayerPanel from '../components/PlayerPanel.vue'
 import TreeNode from '../components/TreeNode.vue'
 import DragDropZone from '../components/DragDropZone.vue'
 import { getPrefs, setPref } from '../appearance'
@@ -743,16 +741,19 @@ async function openFile(file) {
   if (file.isDir) { openDir(file); return }
   if (mode.value === 'trash') { emit('toast', '回收站中的文件无法打开', 'error'); return }
   const kind = openKindOf(file, caps.value)
-  if (kind === 'video') {
-    modalFile.value = file
-    modal.value = 'player'
-  } else if (kind === 'pdf') {
+  if (kind === 'pdf') {
     askConfirm(`“${file.name}”暂不支持在线预览，需要下载后查看，是否下载到本地？`, () => doDownload([file]), { okText: '下载', title: 'PDF 暂不支持预览' })
   } else if (kind === 'download') {
     askConfirm(`“${file.name}”不支持在线预览，是否下载到本地？`, () => doDownload([file]), { okText: '下载', title: '无法预览' })
   } else {
-    modalFile.value = file
-    modal.value = 'preview'
+    try {
+      const prefs = getPrefs()
+      await window.go.app.App.OpenPreviewWindow({
+        account: { user_id: uid.value, drive_id: did.value },
+        file, files: listShown.value, capabilities: caps.value, kind,
+        preferences: Object.fromEntries(['defaultVolume', 'defaultSpeed', 'seekStep', 'autoCloseOnEnd', 'autoLoadSubtitles'].map(key => [key, prefs[key]])),
+      })
+    } catch (error) { emit('toast', `打开预览窗口失败：${String(error)}`, 'error') }
   }
 }
 
@@ -1288,6 +1289,7 @@ watch(listEl, (el) => {
 watch([listShown, viewMode], () => nextTick(() => updateVirtualMetrics()), { flush: 'post' })
 
 let pageActive = false
+let stopPreviewSaved
 function activatePage() {
   if (pageActive) return
   pageActive = true
@@ -1308,6 +1310,9 @@ function deactivatePage() {
 onActivated(activatePage)
 onDeactivated(deactivatePage)
 onMounted(() => {
+  stopPreviewSaved = onEvent('preview:saved', (user, drive) => {
+    if (user === uid.value && drive === did.value) refresh()
+  })
   activatePage()
   if (props.account) {
     expanded.value[rootKey.value] = true
@@ -1316,6 +1321,7 @@ onMounted(() => {
   }
 })
 onBeforeUnmount(() => {
+  stopPreviewSaved?.()
   deactivatePage()
   clearTimeout(filterTimer)
   clearTimeout(hoverTimer)
@@ -1741,27 +1747,6 @@ onBeforeUnmount(() => {
       :providers="providers"
       @close="migrateDirPick = false"
       @select="(d) => { migrateDir = d.id; migrateDirName = d.name; migrateDirPick = false }"
-      @toast="(m, t) => emit('toast', m, t)"
-    />
-
-    <!-- 预览（支持画廊/翻页/缩放/文本编辑保存） -->
-    <PreviewModal
-      v-if="modal === 'preview'"
-      :account="account"
-      :file="modalFile"
-      :file-list="listShown"
-      @close="modal = null"
-      @toast="(m, t) => emit('toast', m, t)"
-      @saved="refresh"
-    />
-    <PlayerPanel
-      v-if="modal === 'player'"
-      :account="account"
-      :file="modalFile"
-      :files="listShown"
-      :capabilities="caps"
-      @select-file="modalFile = $event"
-      @close="modal = null"
       @toast="(m, t) => emit('toast', m, t)"
     />
 

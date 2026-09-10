@@ -20,6 +20,60 @@ export namespace app {
 	        this.notes = source["notes"];
 	    }
 	}
+	export class PreviewWindowAccount {
+	    user_id: string;
+	    drive_id: string;
+
+	    static createFrom(source: any = {}) {
+	        return new PreviewWindowAccount(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.user_id = source["user_id"];
+	        this.drive_id = source["drive_id"];
+	    }
+	}
+	export class PreviewWindowSeed {
+	    account: PreviewWindowAccount;
+	    file: model.File;
+	    files: model.File[];
+	    capabilities: Record<string, any>;
+	    kind: string;
+	    preferences: Record<string, any>;
+
+	    static createFrom(source: any = {}) {
+	        return new PreviewWindowSeed(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.account = this.convertValues(source["account"], PreviewWindowAccount);
+	        this.file = this.convertValues(source["file"], model.File);
+	        this.files = this.convertValues(source["files"], model.File);
+	        this.capabilities = source["capabilities"];
+	        this.kind = source["kind"];
+	        this.preferences = source["preferences"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class ProviderInfo {
 	    ID: string;
 	    Meta: drive.Meta;
@@ -1343,4 +1397,3 @@ export namespace sync {
 	}
 
 }
-

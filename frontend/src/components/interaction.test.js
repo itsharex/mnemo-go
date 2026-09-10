@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import Modal from './Modal.vue'
 import UiSelect from './UiSelect.vue'
@@ -95,6 +95,10 @@ Object.defineProperty(globalThis, 'localStorage', {
 })
 
 const wrappers = []
+beforeEach(() => {
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
+})
 
 function mountAttached(component, options = {}) {
   const wrapper = mount(component, { attachTo: document.body, ...options })
@@ -281,6 +285,48 @@ describe('关键交互组件', () => {
     expect(pending[0].options.signal.aborted).toBe(true)
     wrapper.unmount()
     expect(pending[1].options.signal.aborted).toBe(true)
+  })
+  it('文本工具栏实际显示，修改后请求关闭先确认', async () => {
+    vi.spyOn(api, 'openKindOf').mockReturnValue('text')
+    api.PinFileSnapshot.mockResolvedValue(undefined)
+    api.PreviewURL.mockResolvedValue('http://127.0.0.1/document')
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, arrayBuffer: async () => new TextEncoder().encode('hello').buffer })
+    const wrapper = mountAttached(PreviewModal, { props: { account: { user_id: 'test', drive_id: 'test' }, file: { file_id: 'text', name: 'test.txt' } } })
+    await flushPromises()
+    const toolbar = document.querySelector('.pv-toolbar')
+    expect(toolbar.querySelector('template')).toBeNull()
+    expect(toolbar.textContent).toContain('在线编辑')
+    ;[...toolbar.querySelectorAll('button')].find(b => b.textContent.includes('在线编辑')).click()
+    await nextTick()
+    await setDomInput(document.querySelector('textarea'), 'changed')
+    wrapper.vm.requestClose()
+    await nextTick()
+    expect(wrapper.emitted('close')).toBeUndefined()
+    expect(document.body.textContent).toContain('未保存')
+  })
+  it('窗口播放和暂停时闲置都会隐藏上下控制区，移动鼠标恢复', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+    api.pinFileSnapshot.mockResolvedValue(undefined)
+    api.getSettings.mockResolvedValue({ playbackResume: false })
+    api.playVideo.mockResolvedValue({ url: 'http://127.0.0.1/video.mp4', stream_type: 'mp4' })
+    mountAttached(PlayerPanel, { props: { account: { user_id: 'test', drive_id: 'test' }, file: { file_id: 'video', name: 'video.mp4' } } })
+    await flushPromises()
+    vi.useFakeTimers()
+    try {
+      const panel = document.querySelector('.player-panel')
+      const video = document.querySelector('video')
+      for (const event of ['play', 'pause']) {
+        video.dispatchEvent(new Event(event))
+        await vi.advanceTimersByTimeAsync(2700)
+        expect(document.querySelector('.pp-topbar').classList.contains('hidden')).toBe(true)
+        expect(document.querySelector('.pp-bottom').classList.contains('hidden')).toBe(true)
+        panel.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }))
+        await nextTick()
+        expect(document.querySelector('.pp-topbar').classList.contains('hidden')).toBe(false)
+        expect(document.querySelector('.pp-bottom').classList.contains('hidden')).toBe(false)
+      }
+    } finally { vi.useRealTimers() }
   })
   it('TS 转码流跳转会重新定位、取消旧请求并在关闭时释放播放器', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})

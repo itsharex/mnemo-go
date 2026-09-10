@@ -5,6 +5,8 @@ package app
 import (
 	"errors"
 	"runtime"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/energye/systray"
@@ -117,8 +119,72 @@ func (a *App) SetupTray(icon []byte) {
 			systray.SetTooltip("Mnemo")
 			systray.SetOnClick(func(systray.IMenu) { a.ShowMainWindow() })
 			systray.AddMenuItem("显示 Mnemo", "显示主窗口").Click(func() { a.ShowMainWindow() })
+			systray.AddMenuItem("打开预览窗口", "恢复后台音频及其他预览窗口").Click(func() { a.ShowPreviewWindows() })
+			progressItem := systray.AddMenuItem("无下载任务", "查看下载状态")
+			progressItem.Click(func() { a.ShowMainWindow() })
+			go a.watchDownloadIndicator(progressItem)
 			systray.AddSeparator()
 			systray.AddMenuItem("退出 Mnemo", "完全退出").Click(func() { a.ForceQuit() })
 		}, func() {})
 	}()
+}
+
+// ITaskbarList3 must be created and used on the same COM apartment thread.
+type nativeTaskbar struct{ vtable *[21]uintptr }
+
+func (a *App) watchDownloadIndicator(menu *systray.MenuItem) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	ole := windows.NewLazySystemDLL("ole32.dll")
+	hr, _, _ := ole.NewProc("CoInitializeEx").Call(0, 2)
+	var taskbar *nativeTaskbar
+	if int32(hr) >= 0 {
+		defer ole.NewProc("CoUninitialize").Call()
+		clsid, _ := windows.GUIDFromString("{56FDF344-FD6D-11D0-958A-006097C9A090}")
+		iid, _ := windows.GUIDFromString("{EA1AFB91-9E28-4B86-90E9-9E9F8A5EEFAF}")
+		hr, _, _ = ole.NewProc("CoCreateInstance").Call(uintptr(unsafe.Pointer(&clsid)), 0, 1, uintptr(unsafe.Pointer(&iid)), uintptr(unsafe.Pointer(&taskbar)))
+		if int32(hr) < 0 {
+			taskbar = nil
+		}
+	}
+	call := func(index int, args ...uintptr) {
+		if taskbar == nil {
+			return
+		}
+		_, _, _ = syscall.SyscallN(taskbar.vtable[index], append([]uintptr{uintptr(unsafe.Pointer(taskbar))}, args...)...)
+	}
+	call(3)
+	defer call(2)
+	title := windows.StringToUTF16Ptr("Mnemo")
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	lastLabel := ""
+	for range ticker.C {
+		ctx, ready := a.wailsContext()
+		if !ready {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		indicator := summarizeDownloads(a.ListDownloads())
+		if indicator.label != lastLabel {
+			systray.SetTooltip(indicator.label)
+			menu.SetTitle(indicator.label)
+			lastLabel = indicator.label
+		}
+		hwnd, _, _ := procFindWindowW.Call(0, uintptr(unsafe.Pointer(title)))
+		if hwnd == 0 {
+			continue
+		}
+		if indicator.state != 0 && indicator.state != 1 {
+			// Windows amd64/arm64 use one native argument per ULONGLONG.
+			if unsafe.Sizeof(uintptr(0)) == 8 {
+				call(9, hwnd, uintptr(indicator.percent), 100)
+			}
+		}
+		call(10, hwnd, indicator.state)
+	}
 }

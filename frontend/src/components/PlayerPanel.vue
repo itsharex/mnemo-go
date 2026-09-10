@@ -540,7 +540,7 @@ function updateBuffered(v) {
 }
 
 function onPlay() { playbackEnded = false; playing.value = true; isBuffering.value = false; scheduleHideControls() }
-function onPause() { playing.value = false; isBuffering.value = false; showControls.value = true }
+function onPause() { playing.value = false; isBuffering.value = false; onMouseMove() }
 function onWaiting() { isBuffering.value = true }
 function onPlaying() { isBuffering.value = false }
 function onCanPlay() { isBuffering.value = false }
@@ -1223,9 +1223,9 @@ function adjustBrightness(delta) {
 // ---- auto-hide controls ----
 function scheduleHideControls() {
   if (controlsTimer) clearTimeout(controlsTimer)
-  if (!playing.value) return
+  if (loading.value || error.value) return
   controlsTimer = setTimeout(() => {
-    if (!activeMenu.value && !containerEl.value?.querySelector('.pp-bottom:hover, .pp-bottom:focus-within, .pp-topbar:hover, .pp-topbar:focus-within')) showControls.value = false
+    if (!activeMenu.value && !containerEl.value?.querySelector(':focus-visible:not(.player-panel)')) showControls.value = false
   }, 2600)
 }
 
@@ -1235,7 +1235,7 @@ function onMouseMove() {
 }
 
 function onMouseLeave() {
-  if (playing.value && !activeMenu.value && !containerEl.value?.querySelector(':focus-within')) showControls.value = false
+  scheduleHideControls()
 }
 
 function onProgressPointerMove(event) {
@@ -1289,7 +1289,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
     <div
       ref="containerEl"
       class="player-panel"
-      :class="{ 'cursor-hidden': !showControls && playing, fullscreen: isFullscreen }"
+      :class="{ 'cursor-hidden': !showControls, fullscreen: isFullscreen }"
       role="dialog"
       aria-modal="true"
       :aria-label="'视频预览：' + file.name"
@@ -1377,7 +1377,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
         </transition>
       </div>
 
-      <header class="pp-topbar" :class="{ hidden: isFullscreen && !showControls && playing }" @focusin="onMouseMove" @focusout="scheduleHideControls">
+      <header class="pp-topbar" :class="{ hidden: !showControls }" @focusin="onMouseMove" @focusout="scheduleHideControls">
         <div class="pp-media-mark"><UiIcon name="video" :size="20" /></div>
         <div class="pp-file-meta pp-window-drag">
           <div class="pp-title" :title="file.name">{{ file.name }}</div>
@@ -1395,7 +1395,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
         </div>
       </header>
 
-      <section v-if="!loading && !error" class="pp-bottom" :class="{ hidden: isFullscreen && !showControls && playing }" @focusin="onMouseMove" @focusout="scheduleHideControls" aria-label="播放控制">
+      <section v-if="!loading && !error" class="pp-bottom" :class="{ hidden: !showControls }" @focusin="onMouseMove" @focusout="scheduleHideControls" aria-label="播放控制">
         <div
           ref="progressEl"
           class="pp-progress"
@@ -1529,7 +1529,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
   color: var(--text-primary); background: var(--bg-surface);
   font-family: inherit; user-select: none;
 }
-.pp-stage { position: absolute; inset: 48px 0 92px; display: flex; align-items: center; justify-content: center; background: #08090c; overflow: hidden; }
+.pp-stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: #000; overflow: hidden; }
 .pp-video { display: block; width: 100%; height: 100%; object-fit: contain; }
 .pp-video::cue { color: #fff; background: rgba(0,0,0,.65); font-size: calc(1em * var(--subtitle-scale)); }
 .pp-sup-canvas { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -1619,10 +1619,17 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 /* 全屏时保留画布空间，工具栏在鼠标活动或键盘聚焦时显示。 */
 .player-panel.fullscreen { --bg-surface: #12151bef; --bg-elevated: #20242e; --bg-hover: #ffffff12; --bg-subtle: #ffffff16; --text-primary: #f3f4f7; --text-secondary: #c5c9d3; --text-tertiary: #9ba2b1; --border-light: #ffffff18; --control-border: #ffffff38; --listselectbg: #ffffff18; }
 .fullscreen .pp-stage { inset: 0; }
-.fullscreen .pp-topbar, .fullscreen .pp-bottom { transition: opacity 200ms ease; }
-.fullscreen .hidden { opacity: 0; pointer-events: none; }
-.fullscreen .hidden:focus-within { opacity: 1; pointer-events: auto; }
+.pp-topbar, .pp-bottom { transition: opacity 200ms ease; }
+.player-panel .hidden { opacity: 0; pointer-events: none; }
+.player-panel .hidden:has(:focus-visible) { opacity: 1; pointer-events: auto; }
 @media (max-width: 900px) { .pp-sub { display: none; } .pp-vol:hover .pp-vol-slider, .pp-vol:focus-within .pp-vol-slider { width: 76px; } .pp-vol-value { display: none; } }
 @media (max-width: 680px) { .pp-bottom { padding-right: 12px; padding-left: 12px; } .pp-group { gap: 2px; } .pp-controls { gap: 4px; } .pp-vol { margin-left: 0; } .pp-time { font-size: 11px; margin-left: 2px; } .pp-text-btn { padding: 0 6px; min-width: 34px; } .pp-episode-nav { display: none; } }
 @media (max-width: 480px) { .pp-bottom { height: 130px; } .pp-stage { bottom: 130px; } .pp-controls { flex-wrap: wrap; justify-content: center; gap: 4px; } .pp-right { justify-content: center; width: 100%; } .pp-title { font-size: 12px; } .pp-media-mark { display: none; } .pp-pop { position: fixed; left: 12px; right: 12px; bottom: 128px; max-width: none; width: auto; } }
+.player-panel { --bg-surface: #141414; --bg-elevated: #202020; --bg-hover: #ffffff14; --bg-subtle: #ffffff20; --text-primary: #fff; --text-secondary: #ddd; --text-tertiary: #aaa; --color-primary: #fff; --border-light: #ffffff20; --border-focus: #fff; --control-border: #ffffff55; --listselectbg: #ffffff18; background: #000; color: #fff; }
+.player-panel .pp-stage { inset: 0; }
+.pp-topbar { background: linear-gradient(#000b, transparent); border: 0; }
+.pp-bottom { background: linear-gradient(transparent, #000d); border: 0; }
+.pp-media-mark { display: none; }
+.pp-play-main, .pp-play-main:hover:not(:disabled) { background: #ffffff14; color: #fff; }
+.player-panel :deep(svg) { color: #fff !important; stroke: #fff; fill: none; stroke-width: 1.6; }
 </style>

@@ -15,8 +15,9 @@ const props = defineProps({
   account: { type: Object, required: true },
   file: { type: Object, required: true },
   fileList: { type: Array, default: () => [] },
+  backgroundAudio: { type: Boolean, default: false },
 })
-const emit = defineEmits(['close', 'toast', 'saved'])
+const emit = defineEmits(['close', 'toast', 'saved', 'background-audio', 'stop-close'])
 
 const activeFile = ref(props.file)
 const kind = computed(() => openKindOf(activeFile.value))
@@ -651,6 +652,7 @@ function handleCloseRequest() {
     emit('close')
   }
 }
+defineExpose({ requestClose: handleCloseRequest })
 
 // ---------- 轻量安全 Markdown 解析器 ----------
 function escapeHtml(str) {
@@ -850,6 +852,7 @@ onBeforeUnmount(() => {
   // 音频播放器清理：保存进度、停表、释放 WebAudio、注销 MediaSession
   if (kind.value === 'audio') {
     saveAudioCursor()
+    try { audioEl.value?.pause(); audioEl.value?.removeAttribute('src'); audioEl.value?.load() } catch { /* 已卸载的媒体元素 */ }
     clearInterval(audioSaveTimer)
     audioSaveTimer = null
     clearAudioMediaSession()
@@ -940,7 +943,7 @@ function decodeText(buf) {
     <!-- 顶部悬浮工具条（仅文本） -->
     <div v-if="kind === 'text'" class="pv-toolbar">
       <!-- 文本与代码专业工具 -->
-      <template>
+      <template v-if="kind === 'text'">
         <!-- 模式切换分段按钮 -->
         <div class="pv-mode-seg">
           <button
@@ -1039,6 +1042,10 @@ function decodeText(buf) {
         <span class="pv-topbar-sub">{{ formatBytes(activeFile.size) }}<template v-if="kind === 'image' && natural.w"> · {{ natural.w }} × {{ natural.h }}</template></span>
       </div>
       <div class="pv-topbar-actions" aria-label="窗口控制">
+        <label v-if="kind === 'audio'" class="pv-background-option" title="关闭窗口后继续播放，可从托盘菜单重新打开">
+          <input type="checkbox" :checked="backgroundAudio" @change="emit('background-audio', $event.target.checked)" />关闭后继续播放
+        </label>
+        <button v-if="kind === 'audio' && backgroundAudio" type="button" class="pv-ctl-btn" title="停止播放并关闭窗口" aria-label="停止播放并关闭窗口" @click="emit('stop-close')"><UiIcon name="stop" :size="16" /></button>
         <button type="button" class="pv-ctl-btn pv-window-btn" title="最小化" aria-label="最小化窗口" @click="winMinimise"><UiIcon name="window-minimize" :size="14" /></button>
         <button type="button" class="pv-ctl-btn pv-window-btn" :title="winMax ? '还原窗口' : '最大化窗口'" :aria-label="winMax ? '还原窗口' : '最大化窗口'" @click="winToggleMax"><UiIcon :name="winMax ? 'window-restore' : 'window-maximize'" :size="14" /></button>
         <button type="button" class="pv-ctl-btn pv-window-btn pv-window-close" title="关闭 (Esc)" aria-label="关闭预览" @click="handleCloseRequest"><UiIcon name="close" :size="14" /></button>
@@ -1303,6 +1310,8 @@ function decodeText(buf) {
 </template>
 
 <style scoped>
+.pv-background-option { display: flex; align-items: center; gap: 6px; padding: 0 10px; font-size: 11px; color: #ddd; white-space: nowrap; --wails-draggable: no-drag; }
+.pv-background-option input { accent-color: #999; }
 /* 媒体预览与应用共享主题；窗口控制不受内容加载和隐藏计时影响。 */
 :global(.modal.preview-modal.immersive) {
   --pv-media-surface: var(--bg-surface);

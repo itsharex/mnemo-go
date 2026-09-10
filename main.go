@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -21,6 +22,25 @@ var trayIcon []byte
 var appIcon []byte
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--mnemo-preview" {
+		host, err := app.ReadPreviewHost(os.Stdin)
+		if err != nil {
+			return
+		}
+		err = wails.Run(&options.App{
+			Title: "Mnemo 预览", Frameless: true,
+			Width: 1100, Height: 720, MinWidth: 480, MinHeight: 360,
+			AssetServer:      &assetserver.Options{Assets: assets},
+			BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 255},
+			Bind:             []interface{}{host},
+			OnStartup:        host.Startup,
+			OnBeforeClose:    host.BeforeClose,
+		})
+		if err != nil {
+			logging.Error("preview window exited with error", "error", err)
+		}
+		return
+	}
 	// 单实例：已有实例时激活其窗口后直接退出
 	if !app.AcquireSingleInstance("Mnemo") {
 		return

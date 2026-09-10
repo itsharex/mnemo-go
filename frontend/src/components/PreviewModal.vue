@@ -733,9 +733,13 @@ const renderedMarkdown = computed(() => renderMarkdown(text.value))
 
 // ---------- 加载核心逻辑 ----------
 let loadSeq = 0
+let textController = null
 async function loadPreview() {
-  if (kind.value === 'image') return loadImage()
   const seq = ++loadSeq
+  textController?.abort()
+  textController = null
+  if (kind.value === 'image') return loadImage()
+  ++imgSeq
   // 切曲/换图时保留已渲染舞台，避免整屏闪烁；仅首次或空态才展示全屏 loading
   if (!url.value) loading.value = true
   error.value = ''
@@ -764,9 +768,11 @@ async function loadPreview() {
     }
     url.value = previewUrl
     if (kind.value === 'text') {
-      const resp = await fetch(previewUrl)
+      textController = new AbortController()
+      const resp = await fetch(previewUrl, { signal: textController.signal })
       if (!resp.ok) throw new Error(`HTTP ${resp.status} 加载失败`)
       const buf = await resp.arrayBuffer()
+      if (seq !== loadSeq) return
       if (buf.byteLength > 4 * 1024 * 1024) throw new Error('文本文件超过 4MB，不支持在线预览，请下载后查看')
       const decoded = decodeText(buf)
       text.value = decoded.text
@@ -823,6 +829,9 @@ watch(stageEl, (el) => {
   if (el && stageRO) { stageRO.observe(el); nextTick(computeFit) }
 })
 onBeforeUnmount(() => {
+  ++loadSeq
+  ++imgSeq
+  textController?.abort()
   window.removeEventListener('keydown', onKey)
   clearTimeout(idleTimer)
   stageRO?.disconnect()

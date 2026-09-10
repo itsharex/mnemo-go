@@ -97,6 +97,27 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('切换文本文件后旧响应不得覆盖新内容，关闭时取消读取', async () => {
+    vi.spyOn(api, 'openKindOf').mockReturnValue('text')
+    api.PreviewURL.mockImplementation(async (_user, _drive, id) => `https://example.test/${id}`)
+    const pending = []
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url, options) => Promise.resolve({
+      ok: true,
+      arrayBuffer: () => new Promise(resolve => pending.push({ url, options, resolve })),
+    }))
+    const wrapper = mountAttached(PreviewModal, { props: { account: { user_id: 'test', drive_id: 'test' }, file: { file_id: 'old', name: 'old.txt' } } })
+    await flushPromises()
+    await wrapper.setProps({ file: { file_id: 'new', name: 'new.txt' } })
+    await flushPromises()
+    pending[1].resolve(new TextEncoder().encode('new content').buffer)
+    await flushPromises()
+    pending[0].resolve(new TextEncoder().encode('old content').buffer)
+    await flushPromises()
+    expect(wrapper.vm.text).toBe('new content')
+    expect(pending[0].options.signal.aborted).toBe(true)
+    wrapper.unmount()
+    expect(pending[1].options.signal.aborted).toBe(true)
+  })
   it('TS 转码流跳转会重新定位、取消旧请求并在关闭时释放播放器', async () => {
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
     vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})

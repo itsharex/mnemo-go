@@ -6,7 +6,7 @@ import {
   RemoveDownload, PrioritizeDownload, OpenFile,
   CancelUpload, ClearUploads, DownloadURL, ResumeUpload,
   ListOfflineTasks, OfflineDownload, DeleteOfflineTask,
-  ListMigrateJobs, CancelMigrate, ResumeMigrate, DeleteMigrateJob, ClearMigrateJobs,
+  ListMigrateJobs, CancelMigrate, ResumeMigrate, DeleteMigrateJob, ClearMigrateJobs, VerifyMigration,
   EventsOn, RevealInFolder,
   accountName, providerIconUrl, providerMetaOf, capsOf,
   formatBytes, formatSpeed, formatTime, iconOf, copyText
@@ -17,19 +17,32 @@ import ConfirmModal from '../components/ConfirmModal.vue'
 import ContextMenu from '../components/ContextMenu.vue'
 import UiIcon from '../components/UiIcon.vue'
 import UiSelect from '../components/UiSelect.vue'
+import { motion, MotionConfig } from 'motion-v'
+import { compactReveal, reducedMotion } from '../motion/presets'
+import { dispatchDriveNotice, driveErrorNotice } from '../workspace'
 
 const props = defineProps({
   accounts: { type: Array, default: () => [] },
   providers: { type: Array, default: () => [] }
 })
 const emit = defineEmits(['toast', 'navigate'])
+const notifiedTaskFailures = new Set()
+function taskErrorText(reason, action) {
+  return reason ? driveErrorNotice(reason, action).message : ''
+}
+function notifyTaskFailure(key, reason, action) {
+  if (!reason || notifiedTaskFailures.has(key)) return
+  notifiedTaskFailures.add(key)
+  dispatchDriveNotice(driveErrorNotice(reason, action))
+}
+function clearTaskFailure(key) { notifiedTaskFailures.delete(key) }
 const detailID = ref('')
 const verifying = ref(false), verification = ref({})
 async function verifyMigration() {
   if (!detailID.value || verifying.value) return
   const id = detailID.value; verifying.value = true
   try {
-    const result = await window.go.app.App.VerifyMigration(id)
+    const result = await VerifyMigration(id)
     if (detailID.value === id) verification.value = Object.fromEntries((result || []).map(item => [item.id,item]))
   } catch(e) { emit('toast',String(e),'error') }
   finally { verifying.value = false }
@@ -117,6 +130,9 @@ function onTransferEvent(ev) {
   if (!ev || !ev.task) { scheduleRefresh(); return }
   const t = ev.task
   if (ev.kind === 'download') {
+    const failureKey = `download:${t.id}`
+    if (t.status === 'failed') notifyTaskFailure(failureKey, t.error, '下载文件')
+    else clearTaskFailure(failureKey)
     const list = downloads.value
     const idx = list.findIndex((x) => x.id === t.id)
     if (t.status === 'removed') {
@@ -144,6 +160,9 @@ function onTransferEvent(ev) {
       downloads.value.unshift(t)
     }
   } else if (ev.kind === 'upload') {
+    const failureKey = `upload:${t.id}`
+    if (t.status === 'failed') notifyTaskFailure(failureKey, t.error, '上传文件')
+    else clearTaskFailure(failureKey)
     const list = uploads.value
     const idx = list.findIndex((x) => x.UploadID === t.id)
     if (idx < 0) {
@@ -165,6 +184,7 @@ function onTransferEvent(ev) {
       IsFailed: t.status === 'failed',
       IsStop: t.status === 'paused' || t.status === 'canceled',
       IsDowning: t.status === 'uploading' || t.status === 'queued',
+      failedMessage: t.error || job.Upload?.failedMessage || '',
     }
     // Keep the rich upload metadata returned by ListUploads while replacing
     // only the progress fields carried by the lightweight event snapshot.
@@ -223,7 +243,7 @@ const upStatusBadge = (t) => ({ 已完成: 'success', 失败: 'error', 已停止
 const upName = (t) => (t.Info && t.Info.name) || ((t.Info && t.Info.localFilePath) || '').split(/[\\/]/).pop() || t.UploadID
 const upSize = (t) => (t.Info && (t.Info.sizeStr || formatBytes(t.Info.size))) || ''
 const upSpeed = (t) => (t.Upload && (t.Upload.DownSpeedStr || formatSpeed(t.Upload.DownSpeed || 0))) || ''
-const upErr = (t) => (t.Upload && t.Upload.failedMessage) || ''
+const upErr = (t) => taskErrorText((t.Upload && t.Upload.failedMessage) || '', '上传文件')
 
 // ---------- 选择 / 批量 ----------
 const selectedIds = ref(new Set())
@@ -654,6 +674,9 @@ const migrateLoading = ref(false)
 let migrateRefreshSeq = 0
 function onMigrate(job) {
   if (!job || !job.id) return
+  const failureKey = `migrate:${job.id}`
+  if (['failed', 'partial'].includes(job.status)) notifyTaskFailure(failureKey, job.message, '迁移文件')
+  else clearTaskFailure(failureKey)
   const i = migrateJobs.value.findIndex((j) => j.id === job.id)
   if (i >= 0) migrateJobs.value.splice(i, 1, job)
   else migrateJobs.value.unshift(job)
@@ -814,7 +837,7 @@ onBeforeUnmount(() => {
     <Modal v-if="detailJob" title="迁移详情" width="760px" @close="detailID = ''">
       <p class="account-inline"><img :src="migIcon(detailJob.srcUser)" alt="" />{{ migName(detailJob.srcUser) }} → <img :src="migIcon(detailJob.dstUser)" alt="" />{{ migName(detailJob.dstUser) }}</p>
       <p>目标目录：{{ detailJob.dstParent }} · {{ migStatusText(detailJob.status) }}</p>
-      <div class="workspace-results"><div v-for="item in Object.values(detailJob.items || {})" :key="item.id" class="workspace-result"><span><strong>{{ item.name }}</strong><small>{{ migStatusText(item.status) }} · {{ verificationLabels[item.verification] || '未校验' }}</small><small v-if="item.error">{{ item.error }}</small></span></div><p v-if="!Object.keys(detailJob.items || {}).length">旧任务没有逐项记录，恢复任务后会记录详情。</p></div>
+      <div class="workspace-results"><div v-for="item in Object.values(detailJob.items || {})" :key="item.id" class="workspace-result"><span><strong>{{ item.name }}</strong><small>{{ migStatusText(item.status) }} · {{ verificationLabels[item.verification] || '未校验' }}</small><small v-if="item.error">{{ taskErrorText(item.error, '迁移文件') }}</small></span></div><p v-if="!Object.keys(detailJob.items || {}).length">旧任务没有逐项记录，恢复任务后会记录详情。</p></div>
       <p class="hint">大小核对只验证传输字节数；服务商接受哈希不等于重新读取目标文件校验。</p>
       <button class="btn" :disabled="verifying || ['running','pending'].includes(detailJob.status)" @click="verifyMigration">{{ verifying ? '校验中…' : '校验目标' }}</button>
       <p v-for="item in Object.values(verification)" :key="item.id" :style="item.status === 'mismatch' ? {color:'var(--color-error)'} : {}">{{ detailJob.items?.[item.id]?.name || item.id }}：{{ item.detail }}</p>
@@ -822,34 +845,48 @@ onBeforeUnmount(() => {
     </Modal>
     <div class="down-layout">
       <!-- 左侧边栏 -->
-      <aside class="down-side">
-        <div
+      <aside class="down-side" aria-label="传输分类与账号筛选">
+        <div class="transfer-side-title">传输中心</div>
+        <div class="transfer-menu" role="tablist" aria-label="传输分类">
+        <button
           v-for="m in menus" :key="m.key"
+          type="button"
           class="down-menu-item" :class="{ active: menu === m.key }"
+          role="tab"
+          :aria-selected="menu === m.key"
           @click="menu = m.key"
         >
           <span style="width:15px;display:inline-flex"><UiIcon :name="m.icon" :size="15" /></span><span>{{ m.label }}</span>
           <span v-if="m.cnt" class="cnt">{{ m.cnt }}</span>
+        </button>
         </div>
 
-        <div class="side-label">账号筛选</div>
-        <div class="down-filter" :class="{ active: !filterUser }" @click="filterUser = ''">
+        <button type="button" class="down-filter" :class="{ active: !filterUser }" :aria-pressed="!filterUser" @click="filterUser = ''">
           <span style="width:15px;display:inline-flex"><UiIcon name="globe" :size="15" /></span>
           <span class="df-name">全部账号</span>
-        </div>
-        <div
+        </button>
+        <button
           v-for="acc in accounts" :key="acc.user_id"
+          type="button"
           class="down-filter" :class="{ active: filterUser === acc.user_id }"
+          :aria-pressed="filterUser === acc.user_id"
           @click="filterUser = acc.user_id"
         >
           <img v-if="accIcon(acc)" :src="accIcon(acc)" alt="" />
           <span v-else style="width:15px;display:inline-flex"><UiIcon name="drive" :size="15" /></span>
           <span class="df-name">{{ accLabel(acc) }}</span>
-        </div>
+        </button>
       </aside>
 
       <!-- 右侧内容区 -->
-      <section class="down-content">
+      <MotionConfig :reduced-motion="reducedMotion">
+      <motion.section
+        :key="menu"
+        class="down-content"
+        :initial="compactReveal.initial"
+        :animate="compactReveal.animate"
+        :transition="compactReveal.transition"
+      >
         <div v-if="refreshError" class="transfer-error" role="alert">
           <UiIcon name="alert" :size="15" />
           <span>传输列表刷新失败：{{ refreshError }}</span>
@@ -931,7 +968,7 @@ onBeforeUnmount(() => {
                       <div class="progress-total">
                         <div :class="t.status === 'downloading' || t.status === 'queued' ? 'progress-current active' : t.status === 'completed' ? 'progress-current succeed' : t.status === 'failed' ? 'progress-current error' : 'progress-current'" :style="{ width: (t.progress || 0) + '%' }"></div>
                       </div>
-                      <p v-if="t.status === 'failed' && t.error" class="text-error" :title="t.error">{{ t.error }}</p>
+                      <p v-if="t.status === 'failed' && t.error" class="text-error" :title="taskErrorText(t.error, '下载文件')">{{ taskErrorText(t.error, '下载文件') }}</p>
                     </div>
                   </div>
                   <div class="downspeed">{{ t.status === 'downloading' ? formatSpeed(t.speed || 0) : '' }}</div>
@@ -1172,7 +1209,7 @@ onBeforeUnmount(() => {
                     <div class="progress-total">
                       <div :class="j.status === 'completed' ? 'progress-current succeed' : j.status === 'failed' ? 'progress-current error' : j.status === 'partial' ? 'progress-current warning' : 'progress-current active'" :style="{ width: migProgress(j) + '%' }"></div>
                     </div>
-                    <p v-if="j.message" class="text-error" :title="j.message">{{ j.message }}</p>
+                    <p v-if="j.message" class="text-error" :title="['failed','partial'].includes(j.status) ? taskErrorText(j.message, '迁移文件') : j.message">{{ ['failed','partial'].includes(j.status) ? taskErrorText(j.message, '迁移文件') : j.message }}</p>
                   </div>
                 </div>
                 <div class="downspeed">{{ migProgressText(j) }}</div>
@@ -1188,11 +1225,11 @@ onBeforeUnmount(() => {
             <div v-if="!migrateJobs.length" class="workspace-empty-state">
               <UiIcon name="migrate" :size="36" style="opacity:.4" />
               <span class="wes-title">暂无迁移任务</span>
-              <span class="wes-desc">在网盘页选中文件后，右键选择「迁移到其他网盘」</span>
             </div>
           </div>
         </template>
-      </section>
+      </motion.section>
+      </MotionConfig>
     </div>
     <!-- 新建下载弹窗 -->
     <Modal v-if="dlModal" title="新建下载" width="480px" @close="dlModal = false">
@@ -1249,7 +1286,7 @@ onBeforeUnmount(() => {
       <div class="td-row"><span class="td-label">状态</span><span class="td-val">{{ statusText(detailTask.status) }}</span></div>
       <div class="td-row" v-if="detailTask.speed"><span class="td-label">速度</span><span class="td-val">{{ formatSpeed(detailTask.speed) }}</span></div>
       <div class="td-row" v-if="detailTask.url"><span class="td-label">来源链接</span><span class="td-val td-url">{{ detailTask.url }}</span></div>
-      <div class="td-row" v-if="detailTask.error"><span class="td-label">失败原因</span><span class="td-val" style="color:var(--color-error)">{{ detailTask.error }}</span></div>
+      <div class="td-row" v-if="detailTask.error"><span class="td-label">失败原因</span><span class="td-val" style="color:var(--color-error)">{{ taskErrorText(detailTask.error, '下载文件') }}</span></div>
       <div class="td-row"><span class="td-label">创建时间</span><span class="td-val">{{ formatTime(detailTask.created) }}</span></div>
       <template #actions>
         <button class="btn primary" @click="detailTask = null">关闭</button>

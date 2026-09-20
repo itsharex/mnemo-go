@@ -16,7 +16,7 @@ import (
 // Personal and family capacity are returned independently by the portal API.
 func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *model.TokenInfo) (*model.TokenInfo, error) {
 	if token == nil {
-		return nil, nil
+		return nil, drive.AuthExpired("天翼云盘未登录")
 	}
 	sess, err := sessionOf(token)
 	if err != nil {

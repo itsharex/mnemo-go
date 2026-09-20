@@ -392,12 +392,12 @@ async function exportLogs() {
               </div>
             </div>
 
-            <div class="sg-row">
+            <div class="sg-row oled-background-row">
               <div class="sg-text">
                 <span class="sg-label" id="oled-background-label">OLED 纯黑背景</span>
                 <span class="sg-desc">适用于 OLED 屏幕，仅在深色模式下将背景改为纯黑，主题色保持不变</span>
               </div>
-              <div class="sg-control">
+              <div class="sg-control oled-background-control">
                 <button type="button" class="switch" role="switch" aria-labelledby="oled-background-label"
                   :aria-checked="prefs.oledBackground" :class="{ on: prefs.oledBackground }"
                   @click="onPref('oledBackground', !prefs.oledBackground)"></button>

@@ -3,6 +3,7 @@ import * as App from '../wailsjs/go/app/App'
 import { EventsOn } from '../wailsjs/runtime/runtime'
 import { debug, info, warn, error, errorText, configKeys } from './logger'
 import { getAccountAlias, getAccountCustomIcon } from './appearance'
+import { directoryCacheKey, dispatchDriveNotice, driveErrorNotice } from './workspace'
 
 // re-export the raw binding surface (used by views directly)
 export * from '../wailsjs/go/app/App'
@@ -28,6 +29,19 @@ export function onFileDrop(cb) {
       stopNativeDrop = null
     }
   }
+}
+
+function driveCall(action, operation) {
+  return Promise.resolve(operation).catch((cause) => {
+    const notice = driveErrorNotice(cause, action)
+    warn('drive', 'provider operation failed', { action, category: notice.category, error: errorText(cause) })
+    dispatchDriveNotice(notice)
+    const friendly = new Error(notice.message)
+    friendly.name = 'DriveOperationError'
+    friendly.category = notice.category
+    friendly.cause = cause
+    throw friendly
+  })
 }
 
 export { EventsOn }
@@ -63,22 +77,31 @@ export function login(provider, config) {
     info('login', 'provider login RPC completed', { provider, duration_ms: Math.round(performance.now() - started) })
     return result
   }).catch((err) => {
-    warn('login', 'provider login RPC failed', { provider, error: errorText(err), duration_ms: Math.round(performance.now() - started) })
-    throw err
+    const detail = errorText(err)
+    warn('login', 'provider login RPC failed', { provider, error: detail, duration_ms: Math.round(performance.now() - started) })
+    // These markers are continuation states consumed by LoginModal, not
+    // terminal failures. Keep them intact so captcha/SMS flows can proceed.
+    if (/captcha_required(?:\r?\n|_189)|pan139_sms_required/i.test(detail)) throw err
+    if (/captcha_(?:retry|expired)_189|429|too[ _-]*(?:many|frequent)|rate[ _-]*limit|risk[ _-]*control|access[ _-]*prohibited/i.test(detail)) {
+      dispatchDriveNotice(driveErrorNotice(err, '登录网盘'))
+      throw err
+    }
+    return driveCall('登录网盘', Promise.reject(err))
   })
 }
 export function SendPan139SMS(username) {
   const fn = App.SendPan139SMS || (typeof window !== 'undefined' && window.go?.app?.App?.SendPan139SMS)
   if (typeof fn !== 'function') return Promise.reject(new Error('139 短信验证暂不可用'))
-  return fn(username)
+  return driveCall('发送短信验证码', fn(username))
 }
 export function SendPan189SMS(username, validateCode = '') {
   const fn = App.SendPan189SMS || (typeof window !== 'undefined' && window.go?.app?.App?.SendPan189SMS)
   if (typeof fn !== 'function') return Promise.reject(new Error('天翼短信登录暂不可用，请重启新版应用'))
-  return fn(username, validateCode)
+  return driveCall('发送短信验证码', fn(username, validateCode))
 }
-export function saveMounted(provider, conn) { return App.SaveMountedAccount(provider, conn) }
-export function validateMountedWrite(provider, conn) { return App.ValidateMountedWrite(provider, conn) }
+export function SendGuangyaSms(phone) { return driveCall('发送短信验证码', App.SendGuangyaSms(phone)) }
+export function saveMounted(provider, conn) { return driveCall('连接网盘', App.SaveMountedAccount(provider, conn)) }
+export function validateMountedWrite(provider, conn) { return driveCall('验证写入权限', App.ValidateMountedWrite(provider, conn)) }
 export function removeAccount(userId) { return App.RemoveAccount(userId) }
 export function renameMountedAccount(userId, name) { return App.RenameMountedAccount(userId, name) }
 export function setAccountCustomMeta(userId, customName, customIcon) {
@@ -89,33 +112,42 @@ export function setAccountCustomMeta(userId, customName, customIcon) {
   return Promise.resolve(null)
 }
 
-export function listDir(userId, driveId, dirId) { return App.ListDir(userId, driveId, dirId) }
-export function search(userId, driveId, kw) { return App.SearchFiles(userId, driveId, kw) }
-export function listTrash(userId, driveId) { return App.ListTrash(userId, driveId) }
-export function mkdir(userId, driveId, parentId, name) { return App.Mkdir(userId, driveId, parentId, name) }
-export function rename(userId, driveId, fileId, name) { return App.RenameFile(userId, driveId, fileId, name) }
-export function trash(userId, driveId, ids) { return App.TrashFiles(userId, driveId, ids) }
-export function remove(userId, driveId, ids) { return App.DeleteFiles(userId, driveId, ids) }
-export function restore(userId, driveId, ids) { return App.RestoreFiles(userId, driveId, ids) }
-export function move(userId, driveId, ids, toParent) { return App.MoveFiles(userId, driveId, ids, toParent) }
-export function copy(userId, driveId, ids, toParent) { return App.CopyFiles(userId, driveId, ids, toParent) }
-export function favorite(userId, driveId, fav, ids) { return App.FavoriteFiles(userId, driveId, fav, ids) }
-export function download(userId, driveId, file) { return App.DownloadFile(userId, driveId, file) }
-export function pinFileSnapshot(userId, driveId, file) { return App.PinFileSnapshot(userId, driveId, file) }
+export function listDir(userId, driveId, dirId) { return driveCall('加载目录', App.ListDir(userId, driveId, dirId)) }
+export function search(userId, driveId, kw) { return driveCall('搜索文件', App.SearchFiles(userId, driveId, kw)) }
+export function listTrash(userId, driveId) { return driveCall('加载回收站', App.ListTrash(userId, driveId)) }
+export function mkdir(userId, driveId, parentId, name) { return driveCall('创建文件夹', App.Mkdir(userId, driveId, parentId, name)) }
+export function rename(userId, driveId, fileId, name) { return driveCall('重命名', App.RenameFile(userId, driveId, fileId, name)) }
+export function RenameBatch(userId, driveId, refs, names) { return driveCall('批量重命名', App.RenameBatch(userId, driveId, refs, names)) }
+export function trash(userId, driveId, ids) { return driveCall('移入回收站', App.TrashFiles(userId, driveId, ids)) }
+export function remove(userId, driveId, ids) { return driveCall('删除文件', App.DeleteFiles(userId, driveId, ids)) }
+export function restore(userId, driveId, ids) { return driveCall('还原文件', App.RestoreFiles(userId, driveId, ids)) }
+export function move(userId, driveId, ids, toParent) { return driveCall('移动文件', App.MoveFiles(userId, driveId, ids, toParent)) }
+export function copy(userId, driveId, ids, toParent) { return driveCall('复制文件', App.CopyFiles(userId, driveId, ids, toParent)) }
+export function favorite(userId, driveId, fav, ids) { return driveCall(fav ? '添加收藏' : '取消收藏', App.FavoriteFiles(userId, driveId, fav, ids)) }
+export function ListFavorites(userId, driveId) { return driveCall('加载收藏', App.ListFavorites(userId, driveId)) }
+export function AddFavorite(userId, driveId, favoriteItem) { return driveCall('添加收藏', App.AddFavorite(userId, driveId, favoriteItem)) }
+export function RemoveFavorite(userId, driveId, fileId) { return driveCall('取消收藏', App.RemoveFavorite(userId, driveId, fileId)) }
+export function download(userId, driveId, file) { return driveCall('添加下载任务', App.DownloadFile(userId, driveId, file)) }
+export function pinFileSnapshot(userId, driveId, file) { return driveCall('读取文件信息', App.PinFileSnapshot(userId, driveId, file)) }
+export function PinFileSnapshot(userId, driveId, file) { return pinFileSnapshot(userId, driveId, file) }
 export function downloadUrl(name, url, headers) { return App.DownloadURL(name, url, headers) }
-export function createShare(userId, driveId, params) { return App.CreateShare(userId, driveId, params) }
-export function cancelShare(entry) { return App.CancelShare(entry) }
-export function uploadFiles(userId, driveId, parentId, conflictPolicy, paths) { return App.UploadFiles(userId, driveId, parentId, conflictPolicy, paths) }
-export function validateUploadFiles(userId, driveId, paths) { return App.ValidateUploadFiles(userId, driveId, paths) }
-export function saveCloudText(userId, driveId, parentId, fileName, content) { return App.SaveCloudTextFile(userId, driveId, parentId, fileName, content) }
+export function createShare(userId, driveId, params) { return driveCall('创建分享', App.CreateShare(userId, driveId, params)) }
+export function cancelShare(entry) { return driveCall('取消分享', App.CancelShare(entry)) }
+export function uploadFiles(userId, driveId, parentId, conflictPolicy, paths) { return driveCall('添加上传任务', App.UploadFiles(userId, driveId, parentId, conflictPolicy, paths)) }
+export function validateUploadFiles(userId, driveId, paths) { return driveCall('检查上传文件', App.ValidateUploadFiles(userId, driveId, paths)) }
+export function saveCloudText(userId, driveId, parentId, fileName, content) { return driveCall('保存云端文件', App.SaveCloudTextFile(userId, driveId, parentId, fileName, content)) }
 export function migrateFiles(srcUser, srcDrive, dstUser, dstDrive, dstParent, fileIDs, move) {
-  return App.MigrateFiles(srcUser, srcDrive, dstUser, dstDrive, dstParent, fileIDs, move)
+  return driveCall('创建跨盘迁移任务', App.MigrateFiles(srcUser, srcDrive, dstUser, dstDrive, dstParent, fileIDs, move))
 }
-export function listMigrateJobs() { return App.ListMigrateJobs() }
-export function cancelMigrate(id) { return App.CancelMigrate(id) }
-export function resumeMigrate(id) { return App.ResumeMigrate(id) }
-export function deleteMigrateJob(id) { return App.DeleteMigrateJob(id) }
-export function clearMigrateJobs() { return App.ClearMigrateJobs() }
+export function PreviewMigration(srcUser, srcDrive, dstUser, dstDrive, dstParent, fileIDs) {
+  return driveCall('检查迁移任务', App.PreviewMigration(srcUser, srcDrive, dstUser, dstDrive, dstParent, fileIDs))
+}
+export function VerifyMigration(id) { return driveCall('校验迁移结果', App.VerifyMigration(id)) }
+export function listMigrateJobs() { return driveCall('加载迁移任务', App.ListMigrateJobs()) }
+export function cancelMigrate(id) { return driveCall('取消迁移任务', App.CancelMigrate(id)) }
+export function resumeMigrate(id) { return driveCall('继续迁移任务', App.ResumeMigrate(id)) }
+export function deleteMigrateJob(id) { return driveCall('删除迁移记录', App.DeleteMigrateJob(id)) }
+export function clearMigrateJobs() { return driveCall('清空迁移记录', App.ClearMigrateJobs()) }
 
 // ---------- transfer (download) ----------
 export function listDownloads() { return App.ListDownloads() }
@@ -133,15 +165,27 @@ export function resumeUpload(id) { return App.ResumeUpload(id) }
 export function clearUploads() { return App.ClearUploads() }
 
 // ---------- offline (PikPak cloud) ----------
-export function offlineDownload(userId, driveId, url, fileName) { return App.OfflineDownload(userId, driveId, url, fileName) }
-export function listOfflineTasks(userId) { return App.ListOfflineTasks(userId) }
-export function refreshOfflineTasks(userId, driveId) { return App.RefreshOfflineTasks(userId, driveId) }
-export function deleteOfflineTask(userId, driveId, taskId, deleteFiles) { return App.DeleteOfflineTask(userId, driveId, taskId, deleteFiles) }
+export function offlineDownload(userId, driveId, url, fileName) { return driveCall('创建离线下载', App.OfflineDownload(userId, driveId, url, fileName)) }
+export function OfflineDownload(userId, driveId, url, fileName) { return offlineDownload(userId, driveId, url, fileName) }
+export function listOfflineTasks(userId) { return driveCall('加载离线任务', App.ListOfflineTasks(userId)) }
+export function ListOfflineTasks(userId) { return listOfflineTasks(userId) }
+export function refreshOfflineTasks(userId, driveId) { return driveCall('刷新离线任务', App.RefreshOfflineTasks(userId, driveId)) }
+export function deleteOfflineTask(userId, driveId, taskId, deleteFiles) { return driveCall('删除离线任务', App.DeleteOfflineTask(userId, driveId, taskId, deleteFiles)) }
+export function DeleteOfflineTask(userId, driveId, taskId, deleteFiles) { return deleteOfflineTask(userId, driveId, taskId, deleteFiles) }
 
 // ---------- share import ----------
-export function importShare(userId, driveId, shareUrl, password) { return App.ImportShare(userId, driveId, shareUrl, password) }
-export function saveImportedShare(userId, driveId, session, fileIDs, toParentId) { return App.SaveImportedShare(userId, driveId, session, fileIDs, toParentId) }
-export function listShareHistory(userId) { return App.ListShareHistory(userId) }
+export function importShare(userId, driveId, shareUrl, password) { return driveCall('读取分享链接', App.ImportShare(userId, driveId, shareUrl, password)) }
+export function saveImportedShare(userId, driveId, session, fileIDs, toParentId) { return driveCall('保存分享文件', App.SaveImportedShare(userId, driveId, session, fileIDs, toParentId)) }
+export function listShareHistory(userId) { return driveCall('加载分享记录', App.ListShareHistory(userId)) }
+export function ListShareHistory(userId) { return listShareHistory(userId) }
+
+// ---------- sync ----------
+export function PreviewSync(id) { return driveCall('检查同步计划', App.PreviewSync(id)) }
+export function RunSync(id) { return driveCall('启动同步任务', App.RunSync(id)) }
+export function RunSyncPlan(id, mode, conflictPolicy) { return driveCall('启动同步任务', App.RunSyncPlan(id, mode, conflictPolicy)) }
+export function CancelSync(id) { return driveCall('取消同步任务', App.CancelSync(id)) }
+
+export function RestoreFavorite(item) { return driveCall('恢复收藏文件', App.RestoreFavorite(item)) }
 
 // ---------- settings ----------
 export function getSettings() { return App.GetSettings() }
@@ -162,16 +206,90 @@ export function SaveDirectoryCache(key, files) { return enqueueCacheRpc(() => Ap
 export function DeleteDirectoryCache(key) { return enqueueCacheRpc(() => App.DeleteDirectoryCache(key)) }
 export function ClearCache() { return enqueueCacheRpc(() => App.ClearCache()) }
 
+const ROOT_PREWARM_CONCURRENCY = 2
+const rootPrewarmTasks = new Map()
+
+function validDirectorySnapshot(files) {
+  if (!Array.isArray(files)) return false
+  const ids = new Set()
+  return files.every((file) => {
+    const id = file?.file_id
+    if (typeof id !== 'string' || !id.trim() || ids.has(id)) return false
+    ids.add(id)
+    return true
+  })
+}
+
+async function fetchRootFirstPage(account, rootId) {
+  try {
+    const page = await App.ListDirPage(account.user_id, account.drive_id || '', rootId, '')
+    return page?.items
+  } catch (cause) {
+    // Older/non-paginated providers can only expose ListDir. Keep the fallback
+    // narrow so a network/auth failure never causes a duplicate cloud request.
+    if (!/listpaged.*not supported|capability not implemented/i.test(errorText(cause))) throw cause
+    return App.ListDir(account.user_id, account.drive_id || '', rootId)
+  }
+}
+
+function prewarmRootAccount(account, providers) {
+  const meta = providerMetaOf(account, providers)
+  const rootId = meta.rootKey || 'root'
+  const key = directoryCacheKey(account.user_id, account.drive_id || '', 'list', rootId, '')
+  if (rootPrewarmTasks.has(key)) return rootPrewarmTasks.get(key)
+  const task = (async () => {
+    const cached = await GetDirectoryCache(key)
+    if (Array.isArray(cached)) return 'cached'
+    const files = await fetchRootFirstPage(account, rootId)
+    if (!validDirectorySnapshot(files)) throw new Error('root directory prewarm returned an invalid snapshot')
+    // PanView may have completed a full foreground load while this first-page
+    // request was in flight. Re-check so prewarming never downgrades a newer,
+    // complete snapshot to the first page.
+    const latest = await GetDirectoryCache(key)
+    if (Array.isArray(latest)) return 'cached'
+    await SaveDirectoryCache(key, files)
+    return 'warmed'
+  })().finally(() => rootPrewarmTasks.delete(key))
+  rootPrewarmTasks.set(key, task)
+  return task
+}
+
+// Warm every signed-in account quietly. Existing persistent snapshots skip
+// the network entirely; cache misses request only the provider's first page.
+// Ordinary failures stay in logs, while provider-confirmed auth expiry is
+// still handled by the backend's account:expired flow.
+export async function prewarmRootDirectories(accounts, providers) {
+  const queue = (accounts || []).filter(account => account?.user_id && !account.disabled)
+  const summary = { cached: 0, warmed: 0, failed: 0 }
+  let cursor = 0
+  async function worker() {
+    while (cursor < queue.length) {
+      const account = queue[cursor++]
+      try {
+        const status = await prewarmRootAccount(account, providers)
+        summary[status]++
+      } catch (cause) {
+        summary.failed++
+        warn('cache', 'root directory prewarm failed', { provider: providerOf(account.user_id), error: errorText(cause) })
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(ROOT_PREWARM_CONCURRENCY, queue.length) }, worker))
+  if (summary.warmed) info('cache', 'root directory prewarm completed', summary)
+  return summary
+}
+
 // ---------- account ----------
-export function refreshAccount(userId) { return App.RefreshAccount(userId) }
-export function refreshAccountNow(userId) { return App.RefreshAccountNow(userId) }
+export function refreshAccount(userId) { return driveCall('刷新账号', App.RefreshAccount(userId)) }
+export function refreshAccountNow(userId) { return driveCall('检查账号', App.RefreshAccountNow(userId)) }
 
 // ---------- preview / player ----------
-export function previewUrl(userId, driveId, fileId) { return App.PreviewURL(userId, driveId, fileId) }
+export function previewUrl(userId, driveId, fileId) { return driveCall('打开预览', App.PreviewURL(userId, driveId, fileId)) }
+export function PreviewURL(userId, driveId, fileId) { return previewUrl(userId, driveId, fileId) }
 export function localPreviewUrl(path) { return App.LocalPreviewURL(path) }
 export function mediaProxy() { return App.MediaProxy() }
-export function playVideo(userId, driveId, fileId) { return App.PlayVideo(userId, driveId, fileId) }
-export function playVideoQuality(userId, driveId, fileId, quality) { return App.PlayVideoQuality(userId, driveId, fileId, quality) }
+export function playVideo(userId, driveId, fileId) { return driveCall('播放视频', App.PlayVideo(userId, driveId, fileId)) }
+export function playVideoQuality(userId, driveId, fileId, quality) { return driveCall('切换清晰度', App.PlayVideoQuality(userId, driveId, fileId, quality)) }
 export function getPlayCursor(userId, driveId, fileId) { return App.GetPlayCursor(userId, driveId, fileId) }
 export function savePlayCursor(userId, driveId, fileId, sec) { return App.SavePlayCursor(userId, driveId, fileId, sec) }
 

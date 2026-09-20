@@ -466,11 +466,11 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 
 func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *model.TokenInfo) (*model.TokenInfo, error) {
 	if token == nil {
-		return nil, errors.New("PikPak 未登录")
+		return nil, drive.AuthExpired("PikPak 未登录")
 	}
 	refresh := strings.TrimSpace(token.RefreshToken)
 	if refresh == "" {
-		return nil, errors.New("PikPak 缺少 refresh token，请重新登录")
+		return nil, drive.AuthExpired("PikPak 缺少 refresh token，请重新登录")
 	}
 	deviceID := token.DeviceID
 	if deviceID == "" {
@@ -479,6 +479,10 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	hc := netx.NewClientWithSystemProxy(60 * time.Second)
 	auth, err := refreshToken(ctx, hc, deviceID, refresh)
 	if err != nil {
+		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "invalid_grant") || strings.Contains(message, "invalid refresh") || strings.Contains(message, "refresh token") && strings.Contains(message, "expired") {
+			return nil, drive.AuthExpired("PikPak 登录已失效，请重新登录")
+		}
 		return nil, err
 	}
 	token.AccessToken = auth.AccessToken

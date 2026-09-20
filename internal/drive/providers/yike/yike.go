@@ -75,7 +75,7 @@ func clientOf(c drive.Context) (*client, error) {
 	}
 	sess := parseSession(c.Token)
 	if sess == nil || sess.Cookie == "" {
-		return nil, errors.New("一刻相册 Cookie 无效，请重新登录")
+		return nil, drive.AuthExpired("一刻相册 Cookie 无效，请重新登录")
 	}
 	return &client{http: netx.NewClient(60 * time.Second), sess: sess, limit: 300 * time.Millisecond}, nil
 }
@@ -156,7 +156,7 @@ func (c *client) do(ctx context.Context, method, rawURL string, query, form url.
 		return body, nil
 	}
 	if errno == -6 || errno == 111 {
-		return nil, errors.New("一刻登录已失效，请重新粘贴 BDUSS/Cookie")
+		return nil, drive.AuthExpired("一刻登录已失效，请重新粘贴 BDUSS/Cookie")
 	}
 	msg := wrapper.Errmsg
 	if msg == "" {

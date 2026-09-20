@@ -72,6 +72,7 @@ type App struct {
 	accountRefreshLast       map[string]time.Time
 	accountRefreshRetryAfter map[string]time.Time
 	accountRefreshGroup      singleflight.Group
+	expiredAccounts          sync.Map // user id -> struct{}; deduplicates removal/events from concurrent provider calls
 	favoriteLocks            sync.Map // account/drive -> *sync.Mutex; serializes cloud snapshots and edits
 
 	syncRunMu sync.Mutex
@@ -324,6 +325,7 @@ func (a *App) startup(ctx context.Context) {
 		}
 		return st.UpdateAccountToken(userID, drive.CloneToken(token))
 	})
+	drive.SetOperationErrorHandler(a.handleDriveOperationError)
 
 	// secret resolver so providers can read OAuth client ids during refresh
 	drive.SetSecretResolver(func(key string) string {
@@ -680,6 +682,7 @@ func (a *App) ProviderLogin(provider string, config map[string]string) (*model.A
 		logging.Error("provider account persistence failed", "provider", provider, "error", err)
 		return nil, err
 	}
+	a.expiredAccounts.Delete(acc.UserID)
 	a.markAccountRefreshSuccess(acc.UserID)
 	logging.Info("provider login completed", "provider", provider, "account_id", redactID(accountID), "duration", logging.Duration(started))
 	a.emit("account:changed", acc)
@@ -720,6 +723,7 @@ func (a *App) SaveMountedAccount(provider string, conn model.ConnConfig) (*model
 		logging.Error("mounted account persistence failed", "provider", provider, "error", err)
 		return nil, err
 	}
+	a.expiredAccounts.Delete(acc.UserID)
 	logging.Info("mounted account save completed", "provider", provider, "account_id", redactID(accountID), "duration", logging.Duration(started))
 	a.emit("account:changed", acc)
 	return acc, nil
@@ -1020,6 +1024,10 @@ func (a *App) RefreshAccount(userID string) (*model.Account, error) {
 		}
 		tok, refreshErr := drive.RefreshAccount(userID, current.DriveID)
 		if refreshErr != nil {
+			if errors.Is(refreshErr, drive.ErrUnauthorized) {
+				a.handleDriveOperationError(userID, current.DriveID, refreshErr)
+				return nil, fmt.Errorf("网盘登录已失效，账号已从本机移除: %w", refreshErr)
+			}
 			a.markAccountRefreshFailure(userID, refreshErr)
 			// The provider layer may already have persisted a rotated token even
 			// when a later quota request failed. Re-read before saving display
@@ -1090,13 +1098,74 @@ func (a *App) RemoveAccount(userID string) error {
 		logging.Warn("account removal failed", "account_id", redactID(userID), "error", err)
 		return err
 	}
+	if err := st.DeleteDirectoryCachesForAccount(userID); err != nil {
+		logging.Warn("removed account cache cleanup failed", "account_id", redactID(userID), "error", err)
+	}
 	a.accountRefreshMu.Lock()
 	delete(a.accountRefreshLast, userID)
 	delete(a.accountRefreshRetryAfter, userID)
 	a.accountRefreshMu.Unlock()
+	a.expiredAccounts.Delete(userID)
 	a.emit("account:changed", map[string]string{"removed": userID})
 	logging.Info("account removal completed", "account_id", redactID(userID))
 	return nil
+}
+
+// handleDriveOperationError removes only accounts whose provider explicitly
+// classified the credentials as unusable. Network errors, rate limits, 5xx,
+// and ordinary authorization failures never reach this branch.
+func (a *App) handleDriveOperationError(userID, driveID string, operationErr error) {
+	if a == nil || strings.TrimSpace(userID) == "" || !errors.Is(operationErr, drive.ErrUnauthorized) {
+		return
+	}
+	if _, loaded := a.expiredAccounts.LoadOrStore(userID, struct{}{}); loaded {
+		return
+	}
+	st, err := a.storeOrError()
+	if err != nil {
+		a.expiredAccounts.Delete(userID)
+		logging.Warn("expired account store unavailable", "account_id", redactID(userID), "error", err)
+		return
+	}
+	account, err := st.GetAccount(userID)
+	if err != nil || account == nil {
+		a.expiredAccounts.Delete(userID)
+		return
+	}
+	if driveID != "" && account.DriveID != "" && driveID != account.DriveID {
+		a.expiredAccounts.Delete(userID)
+		logging.Warn("expired account drive mismatch", "account_id", redactID(userID))
+		return
+	}
+	if err := st.DeleteAccount(userID); err != nil {
+		a.expiredAccounts.Delete(userID)
+		logging.Warn("expired account removal failed", "account_id", redactID(userID), "error", err)
+		return
+	}
+	if err := st.DeleteDirectoryCachesForAccount(userID); err != nil {
+		logging.Warn("expired account cache cleanup failed", "account_id", redactID(userID), "error", err)
+	}
+	a.accountRefreshMu.Lock()
+	delete(a.accountRefreshLast, userID)
+	delete(a.accountRefreshRetryAfter, userID)
+	a.accountRefreshMu.Unlock()
+	provider := account.Provider()
+	name := strings.TrimSpace(account.CustomName)
+	if name == "" && account.Token != nil {
+		for _, candidate := range []string{account.Token.NickName, account.Token.UserName, account.Token.Name} {
+			if name = strings.TrimSpace(candidate); name != "" {
+				break
+			}
+		}
+	}
+	a.emit("account:changed", map[string]string{"removed": userID})
+	a.emit("account:expired", map[string]string{
+		"userId":      userID,
+		"driveId":     account.DriveID,
+		"provider":    provider,
+		"accountName": name,
+	})
+	logging.Warn("expired account removed", "provider", provider, "account_id", redactID(userID))
 }
 
 // GetSettings loads app settings.

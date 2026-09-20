@@ -40,11 +40,11 @@ func ParseSession(raw string) *Session {
 // session including username/password for silent re-login.
 func sessionOf(tok *model.TokenInfo) (*Session, error) {
 	if tok == nil || tok.AccessToken == "" {
-		return nil, errors.New("天翼云盘未登录")
+		return nil, drive.AuthExpired("天翼云盘未登录")
 	}
 	s := ParseSession(tok.RefreshToken)
 	if s == nil {
-		return nil, errors.New("天翼云盘会话缺失，请重新登录")
+		return nil, drive.AuthExpired("天翼云盘会话缺失，请重新登录")
 	}
 	if tok.AccessToken != "" && tok.AccessToken != s.SessionKey {
 		s.SessionKey = tok.AccessToken
@@ -181,7 +181,7 @@ func (d *Driver) request(ctx context.Context, c drive.Context, rawURL string, o 
 				return err
 			}
 			if res.needRefresh {
-				return errors.New("189 Session 失效，请重新登录")
+				return drive.AuthExpired("天翼云盘 Session 已失效，请重新登录")
 			}
 		}
 		out = res.json
@@ -364,7 +364,7 @@ func (d *Driver) refreshSession(ctx context.Context, tok *model.TokenInfo, sess 
 
 func (d *Driver) refreshSessionOnce(ctx context.Context, tok *model.TokenInfo, sess *Session, allowRefresh bool) (*Session, error) {
 	if sess == nil {
-		return nil, errors.New("189 Session 缺失，请重新登录")
+		return nil, drive.AuthExpired("天翼云盘 Session 缺失，请重新登录")
 	}
 	relogin := func() (*Session, error) {
 		if sess.Username == "" || sess.Password == "" {
@@ -423,7 +423,7 @@ func (d *Driver) refreshSessionOnce(ctx context.Context, tok *model.TokenInfo, s
 		if sess.Username != "" && sess.Password != "" {
 			return relogin()
 		}
-		return nil, errors.New("189 Session 失效，请重新登录")
+		return nil, drive.AuthExpired("天翼云盘 Session 已失效，请重新登录")
 	}
 	if status < 200 || status >= 300 || (code != "" && code != "0") || (resCode != "" && resCode != "0") {
 		return nil, pan189SessionError(status, j)
@@ -510,6 +510,11 @@ func refreshPan189OpenToken(ctx context.Context, sess *Session) (*Session, error
 	}
 	access := strVal(j, "accessToken")
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || access == "" {
+		detail := strings.ToLower(string(body))
+		if strings.Contains(detail, "invalid_grant") || strings.Contains(detail, "invalid_token") ||
+			strings.Contains(detail, "refresh") && (strings.Contains(detail, "expired") || strings.Contains(detail, "invalid")) {
+			return nil, drive.AuthExpired("天翼云盘授权已过期，请重新登录")
+		}
 		return nil, errors.New("189 令牌续期失败，请重新登录")
 	}
 	next := *sess

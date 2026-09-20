@@ -299,7 +299,7 @@ func (a *apiClient) do(ctx context.Context, method, rawURL string, body any, que
 // stored credentials, then code != 0 → error.
 func (d *Driver) api(ctx context.Context, c drive.Context, method, rawURL string, body any, query map[string]string) (*apiResp, error) {
 	if c.Token == nil || c.Token.AccessToken == "" {
-		return nil, errors.New("123 云盘未登录")
+		return nil, drive.AuthExpired("123 云盘未登录")
 	}
 	a := newAPIClient(c.Token.AccessToken)
 	resp, err := a.do(ctx, method, rawURL, body, query)
@@ -317,6 +317,9 @@ func (d *Driver) api(ctx context.Context, c drive.Context, method, rawURL string
 		}
 	}
 	if resp.Code != 0 {
+		if resp.Code == 401 {
+			return nil, drive.AuthExpired("123 云盘登录已失效，请重新登录")
+		}
 		msg := resp.Message
 		if msg == "" {
 			msg = fmt.Sprintf("123 云盘请求失败 code=%d", resp.Code)

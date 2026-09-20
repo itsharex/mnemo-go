@@ -999,11 +999,11 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 // belong to explicit account refreshes, and must not recurse into auth recovery.
 func renewDropboxSession(ctx context.Context, token *model.TokenInfo) error {
 	if token == nil {
-		return errors.New("Dropbox 未登录")
+		return drive.AuthExpired("Dropbox 未登录")
 	}
 	refreshToken := strings.TrimSpace(token.RefreshToken)
 	if refreshToken == "" {
-		return errors.New("dropbox: missing refresh_token")
+		return drive.AuthExpired("Dropbox 缺少 refresh_token")
 	}
 	configuredKey := strings.TrimSpace(drive.Secret("dropbox_app_key"))
 	appKey := strings.TrimSpace(token.DeviceID)
@@ -1014,6 +1014,9 @@ func renewDropboxSession(ctx context.Context, token *model.TokenInfo) error {
 
 	fresh, err := refreshDropboxToken(ctx, appKey, appSecret, refreshToken)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "invalid_grant") {
+			return drive.AuthExpired("Dropbox 授权已过期，请重新登录")
+		}
 		return err
 	}
 

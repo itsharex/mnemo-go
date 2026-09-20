@@ -35,6 +35,7 @@ const api = vi.hoisted(() => ({
   ApplyUpdate: vi.fn(),
   listAccounts: vi.fn(),
   listProviders: vi.fn(),
+  prewarmRootDirectories: vi.fn().mockResolvedValue({ cached: 0, warmed: 0, failed: 0 }),
   setAccountCustomMeta: vi.fn(),
   login: vi.fn(),
   ListShareHistory: vi.fn(),
@@ -518,6 +519,34 @@ describe('关键交互组件', () => {
     expect(api.listDir).toHaveBeenLastCalledWith(other.user_id, other.drive_id, 'root')
     expect(wrapper.text()).toContain('另一个账号的文件.txt')
     expect(wrapper.text()).not.toContain('重新加载的文件.txt')
+    vi.unstubAllGlobals()
+  })
+  it('账号登录失效后提示本地清理，并从原网盘重新登录', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
+    const handlers = new Map()
+    api.onEvent.mockImplementation((name, fn) => { handlers.set(name, fn); return () => handlers.delete(name) })
+    api.listAccounts.mockResolvedValue([{ user_id: 'dropbox_expired', drive_id: 'dropbox:expired' }])
+    api.listProviders.mockResolvedValue([
+      { ID: 'pikpak', Meta: { label: 'PikPak' }, Login: { fields: [] } },
+      { ID: 'dropbox', Meta: { label: 'Dropbox' }, Login: { type: 'oauth', fields: [] } },
+    ])
+    api.GetSettings.mockResolvedValue({ theme: 'light', autoUpdate: false })
+    api.listDir.mockResolvedValue([])
+    const wrapper = mountAttached(App, { global: { stubs: { PanView: true, AccountAvatar: true } } })
+    await flushPromises()
+
+    handlers.get('account:expired')({ userId: 'dropbox_expired', provider: 'dropbox', accountName: '工作盘' })
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('Dropbox 登录已失效')
+    expect(document.body.textContent).toContain('已从本机移除')
+    expect(document.body.textContent).toContain('云端文件不会被删除')
+    const relogin = [...document.querySelectorAll('.modal button')].find(button => button.textContent.trim() === '重新登录')
+    expect(relogin).toBeTruthy()
+    relogin.click()
+    await flushPromises()
+    expect(wrapper.findComponent(LoginModal).props('initialProvider')).toBe('dropbox')
+    expect(document.querySelector('.lp-item.active')?.textContent).toContain('Dropbox')
     vi.unstubAllGlobals()
   })
   it('手动检查无更新时明确显示当前版本，不自动关闭', async () => {

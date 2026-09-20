@@ -168,6 +168,9 @@ func (d *Driver) request(ctx context.Context, c drive.Context, pathName string, 
 		if msg == "" {
 			msg = "优享版蓝奏云请求失败"
 		}
+		if proved && (numOf(j["code"]) == -1 || numOf(j["code"]) == -2 || token == "") {
+			return nil, nil, drive.AuthExpired("优享版蓝奏云登录已失效，请重新登录")
+		}
 		return nil, nil, fmt.Errorf("%v: %s", j["code"], msg)
 	}
 	return j, nil, nil
@@ -490,7 +493,7 @@ func truncate(s string, n int) string {
 // onto the returned token.
 func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *model.TokenInfo) (*model.TokenInfo, error) {
 	if token == nil {
-		return nil, errors.New("优享版蓝奏云未登录")
+		return nil, drive.AuthExpired("优享版蓝奏云未登录")
 	}
 	payload, login, err := d.request(ctx, c, "/user/account/map", requestOptions{method: http.MethodGet})
 	if err != nil {

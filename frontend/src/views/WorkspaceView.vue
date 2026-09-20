@@ -2,6 +2,7 @@
 import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue'
 import PanView from './PanView.vue'
 import UiSelect from '../components/UiSelect.vue'
+import UiIcon from '../components/UiIcon.vue'
 import { accountName, providerMetaOf, providerIconUrl, migrateFiles, move, copy, capsOf, onEvent, pinFileSnapshot } from '../api'
 const props = defineProps({ account: Object, accounts: Array, providers: Array, dual: Boolean })
 const emit = defineEmits(['toast', 'go'])
@@ -101,17 +102,24 @@ defineExpose({
 <template>
   <div class="workspace-view">
     <div v-if="dual" class="workspace-controls">
-      <button class="btn" :disabled="busy" @click="transfer('right')">复制 →</button><button class="btn" :disabled="busy" @click="transfer('left')">← 复制</button><UiSelect v-model="rightId" :options="options" placeholder="右侧账号" />
+      <button class="btn" :disabled="busy" @click="transfer('right')"><UiIcon name="copy" :size="14" />复制到右栏</button>
+      <button class="btn" :disabled="busy" @click="transfer('left')"><UiIcon name="copy" :size="14" />复制到左栏</button>
+      <UiSelect v-model="rightId" :options="options" placeholder="右侧账号" />
     </div>
     <div class="workspace-panes" :class="{dual}">
-      <div class="workspace-pane" :class="{focused:focused === 'left', 'cloud-drop-active': dragOver === 'left'}" @pointerdown.capture="focused = 'left'" @focusin="focused = 'left'" @dragover="overPane('left', $event)" @dragleave="leavePane"><PanView ref="left" :account="account" :accounts="accounts" :providers="providers" :keyboard-active="!dual || focused === 'left'" :cloud-drag-enabled="dual && !busy" :cloud-drag-active="!!cloudDrag" @cloud-drag-start="(source, event) => startDrag('left', source, event)" @cloud-drag-end="endDrag" @cloud-drop="folder => dropOnPane('left', folder)" @toast="(...args) => emit('toast', ...args)" @go="emit('go', $event)" /><div v-if="dragOver === 'left'" class="cloud-drop-hint">松开鼠标移动到此栏，拖到文件夹可移入该文件夹</div></div>
-      <div v-if="dual" class="workspace-pane" :class="{focused:focused === 'right', 'cloud-drop-active': dragOver === 'right'}" @pointerdown.capture="focused = 'right'" @focusin="focused = 'right'" @dragover="overPane('right', $event)" @dragleave="leavePane"><PanView ref="right" :account="rightAccount" :accounts="accounts" :providers="providers" :keyboard-active="focused === 'right'" location-key="right" :cloud-drag-enabled="dual && !busy" :cloud-drag-active="!!cloudDrag" @cloud-drag-start="(source, event) => startDrag('right', source, event)" @cloud-drag-end="endDrag" @cloud-drop="folder => dropOnPane('right', folder)" @toast="(...args) => emit('toast', ...args)" @go="emit('go', $event)" /><div v-if="dragOver === 'right'" class="cloud-drop-hint">松开鼠标移动到此栏，拖到文件夹可移入该文件夹</div></div>
+      <div class="workspace-pane" :class="{focused:focused === 'left', 'cloud-drop-active': dragOver === 'left'}" @pointerdown.capture="focused = 'left'" @focusin="focused = 'left'" @dragover="overPane('left', $event)" @dragleave="leavePane"><PanView ref="left" :account="account" :accounts="accounts" :providers="providers" :keyboard-active="!dual || focused === 'left'" :cloud-drag-enabled="dual && !busy" :cloud-drag-active="!!cloudDrag" @cloud-drag-start="(source, event) => startDrag('left', source, event)" @cloud-drag-end="endDrag" @cloud-drop="folder => dropOnPane('left', folder)" @toast="(...args) => emit('toast', ...args)" @go="emit('go', $event)" /><div v-if="dragOver === 'left'" class="cloud-drop-hint">释放以移动</div></div>
+      <div v-if="dual" class="workspace-pane workspace-pane-enter" :class="{focused:focused === 'right', 'cloud-drop-active': dragOver === 'right'}" @pointerdown.capture="focused = 'right'" @focusin="focused = 'right'" @dragover="overPane('right', $event)" @dragleave="leavePane"><PanView ref="right" :account="rightAccount" :accounts="accounts" :providers="providers" :keyboard-active="focused === 'right'" location-key="right" :cloud-drag-enabled="dual && !busy" :cloud-drag-active="!!cloudDrag" @cloud-drag-start="(source, event) => startDrag('right', source, event)" @cloud-drag-end="endDrag" @cloud-drop="folder => dropOnPane('right', folder)" @toast="(...args) => emit('toast', ...args)" @go="emit('go', $event)" /><div v-if="dragOver === 'right'" class="cloud-drop-hint">释放以移动</div></div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.workspace-pane { position: relative; }
-.cloud-drop-active { outline: 2px dashed var(--color-primary); outline-offset: -2px; }
-.cloud-drop-hint { position: absolute; bottom: 16px; left: 16px; right: 16px; padding: 12px; border-radius: var(--radius-lg); background: var(--bg-surface); color: var(--color-primary); box-shadow: var(--shadow-modal); text-align: center; pointer-events: none; z-index: 10; }
+.workspace-controls { gap: 8px; }
+.workspace-controls .btn { display: inline-flex; align-items: center; gap: 6px; }
+.workspace-pane { position: relative; min-width: 0; }
+.workspace-pane-enter { animation: workspace-pane-enter var(--motion-normal) var(--motion-ease); }
+@keyframes workspace-pane-enter { from { opacity: 0; transform: translateX(6px); } }
+.cloud-drop-active { outline: 2px dashed var(--color-primary); outline-offset: -4px; }
+.cloud-drop-hint { position: absolute; bottom: 16px; left: 50%; translate: -50% 0; padding: 8px 14px; border-radius: var(--radius-full); background: var(--bg-elevated); color: var(--color-primary); box-shadow: var(--shadow-modal); font-size: 12px; text-align: center; pointer-events: none; z-index: 10; }
+@media (prefers-reduced-motion: reduce) { .workspace-pane-enter { animation: none; } }
 </style>

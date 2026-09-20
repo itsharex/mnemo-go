@@ -1,6 +1,10 @@
 package drive
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // Sentinel errors returned across the drive facade.
 var (
@@ -17,4 +21,15 @@ var (
 // NotSupported returns a capability-gated error for a driver method.
 func NotSupported(what string) error {
 	return errors.New("drive: " + what + " not supported by this provider")
+}
+
+// AuthExpired marks a provider-confirmed credential expiration while keeping
+// a useful message for logs and the operation caller. Do not use this for
+// timeouts, rate limits, server errors, or authorization/scope denials.
+func AuthExpired(message string) error {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ErrUnauthorized
+	}
+	return fmt.Errorf("%w: %s", ErrUnauthorized, message)
 }

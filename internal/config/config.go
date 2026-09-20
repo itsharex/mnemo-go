@@ -107,7 +107,7 @@ func EnsureDownloadDir(dir string) error {
 }
 
 // AppVersion is the application version. Should match wails.json and git tags.
-const AppVersion = "0.3.0"
+const AppVersion = "0.4.0"
 
 // Secrets holds OAuth application credentials, loaded from secrets.json in the
 // data dir. Keys match the legacy app.

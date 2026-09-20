@@ -308,32 +308,96 @@ func TestDirectoryCacheIsolationAndClear(t *testing.T) {
 	}
 }
 
-func TestDirectoryCacheExpiresAndRemovesStaleSnapshot(t *testing.T) {
+func TestDirectoryCacheDoesNotPersistExpiringProviderURLs(t *testing.T) {
 	dir := t.TempDir()
 	st, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := "provider|account-a|drive-a|list|stale|"
-	if err := st.SaveDirectoryCache(key, []model.File{{FileID: "stale"}}); err != nil {
+	key := "provider|account-a|drive-a|list|root|"
+	files := []model.File{{FileID: "file-1", Name: "one.txt", DownloadURL: "https://download.test/?token=secret", Thumbnail: "https://thumb.test/?token=secret"}}
+	if err := st.SaveDirectoryCache(key, files); err != nil {
+		t.Fatal(err)
+	}
+	if files[0].DownloadURL == "" || files[0].Thumbnail == "" {
+		t.Fatal("SaveDirectoryCache mutated the caller's file slice")
+	}
+	cached, err := st.LoadDirectoryCache(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cached) != 1 || cached[0].DownloadURL != "" || cached[0].Thumbnail != "" {
+		t.Fatalf("long-lived cache retained an expiring provider URL: %#v", cached)
+	}
+	raw, err := os.ReadFile(st.path(directoryCacheName(key)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secret") {
+		t.Fatalf("cache file contains signed URL material: %s", raw)
+	}
+}
+
+func TestDirectoryCacheRemainsAvailableAcrossRestartsWithoutExpiry(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "provider|account-a|drive-a|list|root|"
+	if err := st.SaveDirectoryCache(key, []model.File{{FileID: "persisted"}}); err != nil {
 		t.Fatal(err)
 	}
 	name := directoryCacheName(key)
 	if err := st.writeJSON(name, directoryCacheDoc{
-		UpdatedAt: time.Now().Add(-directoryCacheTTL - time.Second).Unix(),
-		Files:     []model.File{{FileID: "stale"}},
+		Key:       key,
+		UpdatedAt: time.Now().Add(-365 * 24 * time.Hour).Unix(),
+		Files:     []model.File{{FileID: "persisted"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	files, err := st.LoadDirectoryCache(key)
+	reopened, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if files != nil {
-		t.Fatalf("expired directory cache returned files: %#v", files)
+	files, err := reopened.LoadDirectoryCache(key)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(st.path(name)); !os.IsNotExist(err) {
-		t.Fatalf("expired directory cache was not removed: %v", err)
+	if len(files) != 1 || files[0].FileID != "persisted" {
+		t.Fatalf("long-lived directory cache was lost: %#v", files)
+	}
+	if _, err := os.Stat(reopened.path(name)); err != nil {
+		t.Fatalf("long-lived directory cache file was removed: %v", err)
+	}
+}
+
+func TestDeleteDirectoryCachesForAccountKeepsOtherAccounts(t *testing.T) {
+	st, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{
+		"webdav|webdav%3Aaccount-a|drive-a|list|%2F|",
+		"webdav|webdav%3Aaccount-a|drive-a|list|folder|",
+		"webdav|webdav%3Aaccount-b|drive-b|list|%2F|",
+	}
+	for _, key := range keys {
+		if err := st.SaveDirectoryCache(key, []model.File{{FileID: key}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.DeleteDirectoryCachesForAccount("webdav:account-a"); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range keys[:2] {
+		if files, err := st.LoadDirectoryCache(key); err != nil || files != nil {
+			t.Fatalf("removed account cache remains: key=%q files=%#v err=%v", key, files, err)
+		}
+	}
+	files, err := st.LoadDirectoryCache(keys[2])
+	if err != nil || len(files) != 1 {
+		t.Fatalf("other account cache was removed: files=%#v err=%v", files, err)
 	}
 }
 

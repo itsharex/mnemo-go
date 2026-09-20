@@ -315,7 +315,7 @@ func refreshAuthorization(hc *netx.Client, authorization string) (string, error)
 		return normalizeAuthorization(authorization), nil
 	}
 	if expiration > 0 && remain < 0 {
-		return "", errors.New("authorization 已过期，请重新登录")
+		return "", drive.AuthExpired("139 云盘 authorization 已过期，请重新登录")
 	}
 	// Unknown expiry metadata is not proof of an invalid credential. Let the
 	// refresh endpoint validate it once, without inventing a local expiry.
@@ -362,7 +362,7 @@ type cred struct {
 // loadCred refreshes and returns the session credentials.
 func loadCred(hc *netx.Client, tok *model.TokenInfo) (*cred, error) {
 	if tok == nil {
-		return nil, errors.New("139 云盘未登录")
+		return nil, drive.AuthExpired("139 云盘未登录")
 	}
 	auth := normalizeAuthorization(tok.AccessToken)
 	var stored struct {
@@ -381,7 +381,7 @@ func loadCred(hc *netx.Client, tok *model.TokenInfo) (*cred, error) {
 		auth = normalizeAuthorization(stored.Authorization)
 	}
 	if auth == "" {
-		return nil, errors.New("139 云盘未登录")
+		return nil, drive.AuthExpired("139 云盘未登录")
 	}
 	account := stored.Account
 	authChanged := false
@@ -524,6 +524,9 @@ func (d *Driver) personalPostWithCred(ctx context.Context, hc *netx.Client, cr *
 		return nil, err
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, drive.AuthExpired("139 云盘登录已失效，请重新登录")
+		}
 		return nil, fmt.Errorf("pan139: API HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	var wrapper struct {
@@ -1490,7 +1493,7 @@ func (d *Driver) ResolveTransferHash(ctx context.Context, c drive.Context, fileI
 
 func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *model.TokenInfo) (*model.TokenInfo, error) {
 	if token == nil {
-		return nil, errors.New("139 云盘未登录")
+		return nil, drive.AuthExpired("139 云盘未登录")
 	}
 	hc := netx.NewClient(60 * time.Second)
 	cr, err := loadCred(hc, token)

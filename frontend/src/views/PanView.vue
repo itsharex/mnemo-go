@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
 import {
   listDir, listTrash, search, mkdir, rename, trash, remove, restore,
-  move, copy, createShare, uploadFiles, validateUploadFiles, migrateFiles, download,
+  move, copy, createShare, uploadFiles, validateUploadFiles, migrateFiles, PreviewMigration, download,
   AddFavorite, RemoveFavorite, ListFavorites, OfflineDownload, PickDirectory, PickFiles,
   formatBytes, formatTime, formatTimeParts, iconOf, extOf, openKindOf, copyText,
   capsOf, providerMetaOf, providerOf, accountName, providerIconUrl, GetDirectoryCache, SaveDirectoryCache, DeleteDirectoryCache, onEvent,
@@ -19,7 +19,7 @@ import TreeNode from '../components/TreeNode.vue'
 import DragDropZone from '../components/DragDropZone.vue'
 import { getPrefs, setPref } from '../appearance'
 import { createNavigationHistory } from '../navigation'
-import { recordAccountHealth } from '../workspace'
+import { directoryCacheKey, recordAccountHealth } from '../workspace'
 
 const props = defineProps({
   account: Object,
@@ -137,7 +137,7 @@ async function checkMigration() {
   const target = migrateTargetAcc.value, source = props.account, parent = migrateDir.value
   migrationChecking.value = true
   try {
-    const result = await window.go.app.App.PreviewMigration(source.user_id, source.drive_id, target.user_id, target.drive_id, parent, (Array.isArray(modalFile.value) ? modalFile.value : [modalFile.value]).map(f => f.file_id))
+    const result = await PreviewMigration(source.user_id, source.drive_id, target.user_id, target.drive_id, parent, (Array.isArray(modalFile.value) ? modalFile.value : [modalFile.value]).map(f => f.file_id))
     if (props.account?.user_id === source.user_id && migrateTarget.value === target.user_id && migrateDir.value === parent) migrationPreview.value = result
   } catch(e) { emit('toast', String(e), 'error') }
   finally { migrationChecking.value = false }
@@ -200,7 +200,7 @@ function validDirectory(list) {
   })
 }
 function dirCacheKey(uidV, didV, modeV, idV, kwV) {
-  return [providerOf(uidV), uidV, didV, modeV, idV || '', kwV || ''].map(cacheKeyPart).join('|')
+  return directoryCacheKey(uidV, didV, modeV, idV, kwV)
 }
 function cacheDir(key, list) {
   if (!validDirectory(list)) return

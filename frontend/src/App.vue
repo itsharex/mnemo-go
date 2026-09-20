@@ -1,10 +1,9 @@
 <script setup>
 import { ref, onMounted, computed, watch, nextTick, onBeforeUnmount, defineAsyncComponent } from 'vue'
-import { listAccounts, listProviders, removeAccount, renameMountedAccount, onEvent, GetSettings, SaveSettings, providerOf, providerMetaOf, accountName, providerIconUrl, setAccountCustomMeta as setAccountCustomMetaBackend } from './api'
+import { listAccounts, listProviders, prewarmRootDirectories, removeAccount, renameMountedAccount, onEvent, GetSettings, SaveSettings, providerOf, providerMetaOf, accountName, providerIconUrl, setAccountCustomMeta as setAccountCustomMetaBackend } from './api'
 import { applyAppearance, getLastDriveSelection, setLastDriveSelection, clearLastDriveSelection, getAccountAlias, getAccountCustomIcon, setAccountCustomMeta, useOrderedAccounts } from './appearance'
 import PanView from './views/PanView.vue'
 import WorkspaceView from './views/WorkspaceView.vue'
-import GlobalSearch from './components/GlobalSearch.vue'
 import { accountHealth, healthLabels, recordAccountHealth } from './workspace'
 import { refreshAccountNow } from './api'
 import AccountRail from './components/AccountRail.vue'
@@ -12,8 +11,6 @@ import AccountAvatar from './components/AccountAvatar.vue'
 import UiIcon from './components/UiIcon.vue'
 import appIcon from './assets/logo/icon.svg'
 import Modal from './components/Modal.vue'
-import LoginModal from './components/LoginModal.vue'
-import QuickOpen from './components/QuickOpen.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import UpdateModal from './components/UpdateModal.vue'
 import ImageCropModal from './components/ImageCropModal.vue'
@@ -46,6 +43,9 @@ const TransferView = defineAsyncComponent(() => import('./views/TransferView.vue
 const ShareView = defineAsyncComponent(() => import('./views/ShareView.vue'))
 const SyncView = defineAsyncComponent(() => import('./views/SyncView.vue'))
 const SettingsView = defineAsyncComponent(() => import('./views/SettingsView.vue'))
+const LoginModal = defineAsyncComponent(() => import('./components/LoginModal.vue'))
+const GlobalSearch = defineAsyncComponent(() => import('./components/GlobalSearch.vue'))
+const QuickOpen = defineAsyncComponent(() => import('./components/QuickOpen.vue'))
 const prevTabIdx = ref(0)
 const pageTrans = ref('page-slide-left')
 const pageComponents = { pan: WorkspaceView, transfer: TransferView, sync: SyncView, share: ShareView, settings: SettingsView }
@@ -78,7 +78,12 @@ const accounts = ref([])
 const orderedAccounts = useOrderedAccounts(() => accounts.value)
 const providers = ref([])
 const current = ref(null)
+watch([accounts, providers], ([nextAccounts, nextProviders]) => {
+  if (!nextAccounts.length || !nextProviders.length) return
+  void prewarmRootDirectories(nextAccounts, nextProviders)
+}, { flush: 'post' })
 const showLogin = ref(false)
+const loginProvider = ref('')
 const showQuickOpen = ref(false)
 const showSearch = ref(false)
 const checkingAccount = ref(false)
@@ -181,7 +186,7 @@ async function saveThemePref() {
 const toasts = ref([])
 const confirmDialog = ref(null)
 function askConfirm(message, onOk, opts) {
-  confirmDialog.value = { message, onOk, okText: opts?.okText || '确定', danger: opts?.danger || false, title: opts?.title || '确认操作' }
+  confirmDialog.value = { message, onOk, okText: opts?.okText || '确定', cancelText: opts?.cancelText || '取消', danger: opts?.danger || false, title: opts?.title || '确认操作' }
 }
 function closeConfirm() { confirmDialog.value = null }
 function handleConfirmOk() {
@@ -254,8 +259,41 @@ function onPanGo(target) {
   else switchTab(target)
 }
 
+function handleAccountExpired(event) {
+  const userId = String(event?.userId || '')
+  const provider = String(event?.provider || '')
+  const meta = providers.value.find(item => item.ID === provider)
+  const providerName = meta?.Meta?.label || provider || '网盘'
+  const account = String(event?.accountName || '').trim()
+  if (userId) {
+    delete accountHealth[userId]
+    if (current.value?.user_id === userId) current.value = null
+    if (infoAcc.value?.user_id === userId) infoAcc.value = null
+    const saved = getLastDriveSelection()
+    if (saved?.userId === userId) clearLastDriveSelection()
+  }
+  refresh()
+  const subject = account ? `「${account}」` : '该账号'
+  askConfirm(
+    `${subject}的登录凭据已过期，账号已从本机移除；云端文件不会被删除。重新登录后即可继续使用。`,
+    () => {
+      loginProvider.value = provider
+      showLogin.value = true
+    },
+    { title: `${providerName} 登录已失效`, okText: '重新登录', cancelText: '稍后' },
+  )
+}
+
+function closeLogin() {
+  showLogin.value = false
+  loginProvider.value = ''
+}
+
 function clearPanCache() {
   panView.value?.clearCache?.()
+  // ClearCache intentionally removes every account snapshot. Rebuild missing
+  // root first pages immediately so switching accounts stays instant.
+  void prewarmRootDirectories(accounts.value, providers.value)
 }
 
 function providerLabel(acc) {
@@ -325,10 +363,15 @@ async function saveRename() {
 }
 
 function toast(msg, type = '') {
+  const message = String(msg ?? '')
   const id = Date.now() + Math.random()
   const normalizedType = ['success', 'error', 'warn', 'info'].includes(type) ? type : 'info'
+  const duplicate = toasts.value.find((item) => Date.now() - item.createdAt < 5000 && (
+    item.msg === message || message.includes(item.msg) || item.msg.includes(message)
+  ))
+  if (duplicate) return duplicate.id
   const labels = { success: '已完成', error: '操作失败', warn: '需要注意', info: '提示' }
-  const item = { id, msg: String(msg ?? ''), type: normalizedType, label: labels[normalizedType] }
+  const item = { id, msg: message, type: normalizedType, label: labels[normalizedType], createdAt: Date.now() }
   toasts.value.push(item)
   const lifetime = normalizedType === 'error' ? 6500 : 3600
   setTimeout(() => dismissToast(id), lifetime)
@@ -381,6 +424,11 @@ onMounted(async () => {
 	const removeMouseNavigation = installMouseNavigation(window, navigateMouse, mouseNavigationBlocked)
 	info('app', 'frontend mounted')
 	window.addEventListener('contextmenu', preventNativeContextMenu, true)
+	const onDriveNotice = (event) => {
+	  const notice = event?.detail
+	  if (notice?.message) toast(notice.message, notice.type || 'error')
+	}
+	window.addEventListener('mnemo:drive-notice', onDriveNotice)
 	const removeGlobalErrorLogging = installGlobalErrorLogging()
 	listProviders().then((p) => { providers.value = p || [] }).catch(() => {})
 	let autoUpdateEnabled = true
@@ -411,9 +459,11 @@ onMounted(async () => {
   mq.addEventListener('change', onScheme)
   const offFns = [
     onEvent('account:changed', refresh),
+    onEvent('account:expired', handleAccountExpired),
     onEvent('app:ready', refresh),
     onEvent('share:history-error', (ev) => {
-      toast(`分享已创建，但本地历史保存失败：${ev?.error || '未知错误'}`, 'warn')
+      error('share', 'share history persistence failed', { error: errorText(ev?.error) })
+      toast('分享已创建，但本地历史记录保存失败，请稍后重试', 'warn')
     }),
     // 原生传输悬浮窗点击/菜单「显示主窗口」时跳到传输页
     onEvent('nav:tab', (key) => { if (typeof key === 'string' && tabOrder.includes(key)) switchTab(key) }),
@@ -426,6 +476,7 @@ onMounted(async () => {
     window.removeEventListener('resize', updateGlider)
     window.removeEventListener('keydown', onKey)
     window.removeEventListener('contextmenu', preventNativeContextMenu, true)
+		window.removeEventListener('mnemo:drive-notice', onDriveNotice)
     mq.removeEventListener('change', onScheme)
     offFns.forEach((fn) => { try { fn && fn() } catch { /* noop */ } })
 	}
@@ -496,7 +547,7 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
       </main>
     </div>
 
-    <LoginModal v-if="showLogin" :providers="providers" @close="showLogin = false" @toast="toast" />
+    <LoginModal v-if="showLogin" :providers="providers" :initial-provider="loginProvider" @close="closeLogin" @toast="toast" />
     <GlobalSearch v-if="showSearch" :accounts="orderedAccounts" :providers="providers" @close="showSearch = false" @navigate="navigateTo" />
 
     <QuickOpen
@@ -634,7 +685,7 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
       </div>
     </transition-group>
 
-    <ConfirmModal v-if="confirmDialog" :title="confirmDialog.title" :message="confirmDialog.message" :okText="confirmDialog.okText" :danger="confirmDialog.danger" @ok="handleConfirmOk" @cancel="closeConfirm" />
+    <ConfirmModal v-if="confirmDialog" :title="confirmDialog.title" :message="confirmDialog.message" :okText="confirmDialog.okText" :cancel-text="confirmDialog.cancelText" :danger="confirmDialog.danger" @ok="handleConfirmOk" @cancel="closeConfirm" />
     <UpdateModal v-if="showUpdate" :initial-info="pendingUpdateInfo" @close="closeUpdateModal" />
   </div>
 </template>

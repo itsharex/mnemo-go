@@ -51,11 +51,11 @@ type directoryCacheDoc struct {
 	Files     []model.File `json:"files"`
 }
 
-const directoryCacheTTL = 10 * time.Minute
-
 // LoadDirectoryCache reads one account-isolated directory snapshot. Cache
 // files live under data/cache, which is co-located with the installation by
-// config.DataDir; missing cache is represented by a nil slice and no error.
+// config.DataDir. Directory snapshots intentionally have no time-based expiry:
+// callers show them immediately and refresh from the provider in the
+// background. Missing cache is represented by a nil slice and no error.
 func (s *Store) LoadDirectoryCache(key string) ([]model.File, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -66,12 +66,6 @@ func (s *Store) LoadDirectoryCache(key string) ([]model.File, error) {
 			return nil, nil
 		}
 		return nil, err
-	}
-	if doc.UpdatedAt <= 0 || time.Since(time.Unix(doc.UpdatedAt, 0)) > directoryCacheTTL {
-		if err := os.Remove(s.path(name)); err != nil && !os.IsNotExist(err) {
-			return nil, err
-		}
-		return nil, nil
 	}
 	return doc.Files, nil
 }
@@ -85,7 +79,17 @@ func (s *Store) SaveDirectoryCache(key string, files []model.File) error {
 	if err := os.MkdirAll(filepath.Dir(s.path(name)), 0o755); err != nil {
 		return err
 	}
-	return s.writeJSONUnlocked(name, directoryCacheDoc{Key: key, UpdatedAt: time.Now().Unix(), Files: files})
+	snapshot := append([]model.File(nil), files...)
+	for i := range snapshot {
+		// Provider download/thumbnail URLs are frequently signed bearer URLs.
+		// They expire independently and must not enter the long-lived cache.
+		snapshot[i].DownloadURL = ""
+		snapshot[i].Thumbnail = ""
+	}
+	if snapshot == nil && files != nil {
+		snapshot = []model.File{}
+	}
+	return s.writeJSONUnlocked(name, directoryCacheDoc{Key: key, UpdatedAt: time.Now().Unix(), Files: snapshot})
 }
 
 type CachedSearchResult struct {
@@ -151,6 +155,48 @@ func (s *Store) DeleteDirectoryCache(key string) error {
 		return nil
 	}
 	return err
+}
+
+// DeleteDirectoryCachesForAccount removes every directory snapshot owned by
+// one account. This prevents a removed or expired login from leaving cloud
+// filenames behind in the long-lived cache.
+func (s *Store) DeleteDirectoryCachesForAccount(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil
+	}
+	dir := filepath.Join("cache", "directories")
+	entries, err := os.ReadDir(s.path(dir))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		name := filepath.Join(dir, entry.Name())
+		var doc directoryCacheDoc
+		if err := s.readJSON(name, &doc); err != nil {
+			continue
+		}
+		parts := strings.Split(doc.Key, "|")
+		if len(parts) != 6 {
+			continue
+		}
+		owner, err := url.PathUnescape(parts[1])
+		if err != nil || owner != userID {
+			continue
+		}
+		if err := os.Remove(s.path(name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // ClearCache removes only the application cache directory. It deliberately

@@ -4,11 +4,15 @@ import { login, saveMounted, validateMountedWrite, SendGuangyaSms, SendPan139SMS
 import UiIcon from './UiIcon.vue'
 import UiSelect from './UiSelect.vue'
 import { debug, info, warn, error, errorText as formatErrorText, configKeys } from '../logger'
+import { driveErrorNotice } from '../workspace'
 
-const props = defineProps({ providers: { type: Array, default: () => [] } })
+const props = defineProps({
+  providers: { type: Array, default: () => [] },
+  initialProvider: { type: String, default: '' },
+})
 const emit = defineEmits(['close', 'toast'])
 
-const providerId = ref(localStorage.getItem('login_provider') || 'pikpak')
+const providerId = ref(props.initialProvider || localStorage.getItem('login_provider') || 'pikpak')
 function defaultLoginForm(id) {
   if (id === 'lanzou') return { upload_tier: 'v0' }
   if (id === 'pan189') return { cloud_type: 'personal', login_mode: 'password' }
@@ -74,6 +78,9 @@ function handlePikPakRateLimit(error) {
   return true
 }
 const errorText = ref('')
+function friendlyLoginError(reason, action = '登录网盘') {
+  return driveErrorNotice(reason, action).message
+}
 const pan139SMSRequired = ref(false)
 const passwordVisibility = ref({})
 function passwordVisible(key) { return !!passwordVisibility.value[key] }
@@ -120,17 +127,6 @@ const hasTokenLogin = computed(() => !hasAccountLogin.value && visibleFields.val
 const isLongText = (key) => /cookie|token|bduss|secret|authorization/i.test(key)
 const isPan139DirectLogin = computed(() => providerId.value === 'pan139' && String(form.value.authorization || '').trim() !== '')
 const hasRefreshToken = computed(() => String(form.value.refresh_token || '').trim() !== '')
-const loginSubtitle = computed(() => {
-  if (isMounted.value) return '连接设置'
-  if (isOAuth.value) return '浏览器授权'
-  if (hasPhoneLogin.value && hasEmailLogin.value) return '手机号/邮箱登录'
-  if (hasPhoneLogin.value) return '手机号登录'
-  if (hasEmailLogin.value) return '邮箱登录'
-  if (hasAccountLogin.value) return '账号密码登录'
-  if (hasCookieLogin.value) return 'Cookie 登录'
-  if (hasTokenLogin.value) return '令牌登录'
-  return '登录设置'
-})
 function isFieldRequired(field) {
   if (['pan139', 'pan189'].includes(providerId.value) && form.value.login_mode === 'sms' && field.key === 'password') return false
   if (isPan139DirectLogin.value && (field.key === 'username' || field.key === 'password')) return false
@@ -212,6 +208,10 @@ watch(() => form.value.login_mode, () => {
 // localStorage value while the visible panel falls back to another item.
 watch(availableProviders, (list) => {
   if (!list.length) return
+  if (props.initialProvider && list.some((p) => p.ID === props.initialProvider)) {
+    providerId.value = props.initialProvider
+    return
+  }
   if (!list.some((p) => p.ID === providerId.value)) providerId.value = list[0].ID
 }, { immediate: true })
 
@@ -317,7 +317,7 @@ async function openCaptchaWindow() {
   } catch (e) {
     if (sessionID === captchaSessionId.value) {
       captchaNativeWindow.value = true
-      errorText.value = String(e)
+      errorText.value = friendlyLoginError(e, '打开安全验证')
     }
   } finally {
     captchaOpening.value = false
@@ -393,7 +393,7 @@ async function sendSms() {
     startSmsCountdown()
   } catch (e) {
 		warn('login', 'SMS verification request failed', { error: formatErrorText(e) })
-    errorText.value = String(e)
+    errorText.value = friendlyLoginError(e, '发送短信验证码')
   } finally {
     smsBusy.value = false
   }
@@ -412,7 +412,7 @@ async function sendPan139Sms() {
     startSmsCountdown()
   } catch (e) {
     warn('login', '139 SMS verification request failed', { error: formatErrorText(e) })
-    errorText.value = String(e)
+    errorText.value = friendlyLoginError(e, '发送短信验证码')
   } finally {
     smsBusy.value = false
   }
@@ -437,7 +437,7 @@ async function sendPan189Sms() {
       errorText.value = '短信验证码已发送，请填写后登录'
     }
   } catch (e) {
-    if (providerId.value === attemptProvider) errorText.value = formatErrorText(e)
+    if (providerId.value === attemptProvider) errorText.value = friendlyLoginError(e, '发送短信验证码')
   } finally {
     smsBusy.value = false
   }
@@ -572,12 +572,12 @@ async function submit() {
       } else if (attemptProvider === 'pan139' && parsePan139SMSRequired(e)) {
         // 账密登录已建立临时会话，切换到短信二次验证，不重复提交密码。
       } else {
-        errorText.value = String(e)
+        errorText.value = friendlyLoginError(e)
       }
 		warn('login', 'login form submit failed', { provider: attemptProvider, error: formatErrorText(e) })
     } catch (handlerError) {
       // Error rendering must never leave the submit button stuck in busy state.
-			errorText.value = String(handlerError)
+      errorText.value = friendlyLoginError(handlerError)
 			error('login', 'login error handler failed', { provider: attemptProvider, error: formatErrorText(handlerError) })
     }
   } finally {
@@ -598,37 +598,38 @@ async function submit() {
       <div class="modal-mask" @click.self="emit('close')">
         <div class="modal login-modal">
           <div class="modal-head login-modal-head">
-            <h3>添加网盘账号</h3>
+            <div class="login-modal-title">
+              <h3>添加网盘</h3>
+            </div>
             <button class="icon-btn login-close" title="关闭 (Esc)" @click="emit('close')"><UiIcon name="close" :size="14" /></button>
           </div>
           <div class="login-body">
-            <div class="login-side" role="tablist" aria-label="网盘服务">
-              <button
-                v-for="p in availableProviders"
-                :key="p.ID"
-                type="button"
-                role="tab"
-                class="lp-item"
-                :class="{ active: p.ID === providerId }"
-                :aria-selected="p.ID === providerId"
-                :title="p.Meta.label"
-				:disabled="busy"
-                @click="providerId = p.ID"
-              >
-                <img :src="providerIconUrl(p.Meta)" alt="" />
-                <span>{{ p.Meta.label }}</span>
-              </button>
-            </div>
+            <aside class="login-side" role="tablist" aria-label="网盘服务">
+              <div class="login-provider-list">
+                <button
+                  v-for="p in availableProviders"
+                  :key="p.ID"
+                  type="button"
+                  role="tab"
+                  class="lp-item"
+                  :class="{ active: p.ID === providerId }"
+                  :aria-selected="p.ID === providerId"
+                  :title="p.Meta.label"
+				  :disabled="busy"
+                  @click="providerId = p.ID"
+                >
+                  <span class="lp-icon-wrap"><img :src="providerIconUrl(p.Meta)" alt="" /></span>
+                  <span class="lp-label">{{ p.Meta.label }}</span>
+                  <UiIcon v-if="p.ID === providerId" name="check" :size="14" class="lp-check" />
+                </button>
+              </div>
+            </aside>
 
             <form v-if="provider" class="login-form" @submit.prevent="submit">
-              <div class="lf-head">
-                <img :src="providerIconUrl(provider.Meta)" alt="" />
-                <div>
-                  <div class="lf-title">{{ provider.Meta.label }}</div>
-                  <div class="lf-sub">{{ loginSubtitle }}</div>
-                </div>
+              <div class="login-provider-heading">
+                <span class="login-provider-logo"><img :src="providerIconUrl(provider.Meta)" alt="" /></span>
+                <strong>{{ provider.Meta.label }}</strong>
               </div>
-
               <div class="login-form-content" :key="providerId">
                 <!-- 挂载存储（WebDAV / S3） -->
                 <template v-if="isMounted">
@@ -672,16 +673,8 @@ async function submit() {
                   </div>
                 </template>
 
-                <!-- OAuth 授权 -->
-                <div v-else-if="isOAuth" class="login-state-card oauth-box">
-                  <div class="login-state-icon"><UiIcon name="external" :size="20" /></div>
-                  <div>
-                    <strong>在浏览器中完成授权</strong>
-                    <p>点击下方按钮打开授权页面，完成后会自动返回并登录。</p>
-                  </div>
-                </div>
                 <!-- 常规表单 -->
-                <template v-else>
+                <template v-else-if="!isOAuth">
                   <div v-if="visibleFields.length" class="login-section">
                     <div v-for="f in visibleFields" v-show="isPan139FieldVisible(f)" :key="f.key" class="field login-field">
                       <label>{{ f.label }}</label>
@@ -743,7 +736,7 @@ async function submit() {
                 <button class="btn" type="button" @click="emit('close')">取消</button>
                 <button class="btn primary" type="submit" :disabled="busy || (providerId === 'pikpak' && pikpakCooldownSeconds > 0)">
                   <span v-if="busy" class="spin spin-on-primary"></span>
-                  {{ busy ? '处理中…' : (providerId === 'pikpak' && captchaUrl ? '继续登录' : (isOAuth ? '打开授权页面' : (isMounted ? '保存连接' : '登录'))) }}
+                  {{ busy ? '处理中…' : (providerId === 'pikpak' && captchaUrl ? '继续登录' : (isOAuth ? '浏览器授权' : (isMounted ? '保存连接' : '登录'))) }}
                 </button>
               </div>
             </form>
@@ -755,33 +748,76 @@ async function submit() {
 </template>
 
 <style scoped>
-.login-close { width: 28px; height: 28px; }
+.login-modal-head {
+  min-height: 56px; padding: 10px 14px 10px 20px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--bg-surface);
+}
+.login-modal-title { min-width: 0; }
+.login-modal-title h3 { font-size: 16px; font-weight: 680; letter-spacing: -.01em; }
+.login-close { width: 30px; height: 30px; border-radius: var(--radius-sm); }
+.login-body { background: var(--bg-surface); }
+.login-side {
+  display: flex; flex-direction: column; min-height: 0;
+  padding: 8px;
+  background: var(--bg-surface);
+}
+.login-provider-list {
+  display: grid; align-content: start; gap: 2px;
+  min-height: 0; overflow-y: auto; padding: 0 2px 0 0;
+  scrollbar-width: thin; scrollbar-gutter: stable;
+}
 .login-side .lp-item {
-  width: 100%; border: 0; background: transparent; font: inherit; text-align: left;
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 9px; border-radius: var(--radius-sm);
-  cursor: pointer; font-size: 13px; color: var(--text-secondary);
-  transition: background var(--motion-fast) ease, color var(--motion-fast) ease, transform var(--motion-spring);
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; min-height: 36px; padding: 6px 8px;
+  border: 0; border-radius: var(--radius-sm); background: transparent;
+  color: var(--text-secondary); cursor: pointer; font: inherit; font-size: 13px; text-align: left;
+  transition: background-color var(--motion-fast) var(--motion-ease), color var(--motion-fast) var(--motion-ease);
 }
-.login-side .lp-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.login-side .lp-item:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
 .login-side .lp-item.active {
-  background: var(--listselectbg);
-  color: var(--color-primary);
-  font-weight: 600;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 18%, transparent);
+  background: var(--listselectbg); color: var(--text-primary); font-weight: 600;
 }
-.login-side .lp-item.active img { transform: scale(1.06); }
+.login-side .lp-item:disabled { cursor: wait; opacity: .62; }
+.lp-icon-wrap {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; flex: 0 0 22px;
+}
 .login-side .lp-item img {
-  width: 18px; height: 18px; object-fit: contain; flex-shrink: 0;
-  transition: transform var(--motion-spring);
+  width: 19px; height: 19px; object-fit: contain; flex-shrink: 0;
 }
+.lp-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-check { flex: 0 0 auto; color: var(--color-primary); }
 .login-side .lp-item:focus-visible,
 .switch:focus-visible {
   outline: none; box-shadow: var(--ring-focus);
 }
-.login-form { display: flex; flex-direction: column; }
-.login-form-content { display: grid; gap: 14px; }
-.login-section { display: grid; gap: 13px; }
+.login-form {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  padding: 0; overflow: hidden; background: var(--bg-surface);
+}
+.login-provider-heading {
+  display: flex; align-items: center; gap: 10px; flex: 0 0 auto;
+  min-height: 54px; padding: 10px 24px;
+  border-bottom: 1px solid var(--border-lighter);
+  color: var(--text-primary); font-size: 14px;
+}
+.login-provider-logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  box-sizing: border-box; width: 32px; height: 32px; flex: 0 0 32px;
+  border: 1px solid var(--border-light); border-radius: var(--radius-sm);
+  background: var(--bg-surface); overflow: hidden;
+}
+.login-provider-logo img,
+.login-provider-logo img[src$='.svg'] {
+  display: block; width: 18px; height: 18px; max-width: 18px; max-height: 18px;
+  object-fit: contain;
+}
+.login-form-content {
+  display: grid; align-content: start; gap: 16px; flex: 1; min-height: 0;
+  padding: 22px 24px; overflow-y: auto; scrollbar-gutter: stable;
+}
+.login-section { display: grid; gap: 12px; width: min(100%, 480px); }
 .login-field { margin: 0 !important; }
 .login-field > label {
   display: block;
@@ -807,30 +843,24 @@ async function submit() {
 .switch { border: 0; padding: 0; }
 .switch-row .hint { margin: 0; line-height: 1.45; }
 
-/* 登录页切换网盘：内容区淡入 + 下滑入位 */
-.login-form-content { animation: login-pane-in 240ms var(--motion-glide); }
+/* 切换服务只做短距离内容入场，避免表单产生卡片式跳动。 */
+.login-form-content { animation: login-pane-in var(--motion-normal) var(--motion-ease); }
 @keyframes login-pane-in {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(4px); }
 }
 
-/* 开关组 chip：多个开关收进一行 */
+/* 连接级开关保持同一行，不再使用额外容器底色。 */
 .switch-chips { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 2px 0; }
 .switch-chip { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-secondary); cursor: pointer; user-select: none; }
 .switch-chip:hover { color: var(--text-primary); }
 .login-state-card {
-  display: flex; align-items: flex-start; gap: 12px;
-  padding: 16px; border: 1px solid var(--border-light);
-  border-radius: var(--radius-sm); background: var(--bg-subtle);
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 12px; border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm); background: var(--bg-surface);
   color: var(--text-secondary); font-size: 13px; line-height: 1.55;
 }
 .login-state-card strong { display: block; color: var(--text-primary); font-size: 13.5px; }
 .login-state-card p { margin: 3px 0 0; }
-.login-state-icon {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 34px; height: 34px; flex: 0 0 34px;
-  border-radius: var(--radius-sm); background: var(--listselectbg); color: var(--color-primary);
-}
-.oauth-box { min-height: 82px; align-items: center; }
 .field-action-row { display: flex; margin-top: 8px; }
 .captcha-image-row {
   display: flex; align-items: center; gap: 10px; margin-top: 8px;
@@ -841,8 +871,7 @@ async function submit() {
   border: 1px solid var(--border-light); border-radius: var(--radius-xs); background: #fff;
 }
 .login-empty-state {
-  padding: 14px; border: 1px dashed var(--border-light); border-radius: var(--radius-sm);
-  color: var(--text-tertiary); font-size: 13px; line-height: 1.5;
+  padding: 8px 0; color: var(--text-secondary); font-size: 13px; line-height: 1.5;
 }
 .login-help {
   display: inline-flex; align-items: center; gap: 5px; justify-self: start;
@@ -852,7 +881,7 @@ async function submit() {
 .login-help:hover { text-decoration: underline; }
 .captcha-box {
   display: block; padding: 12px;
-  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+  background: var(--bg-surface);
   border-color: color-mix(in srgb, var(--color-warning) 28%, var(--border-light));
   font-size: 13px; color: var(--text-secondary); line-height: 1.6;
 }
@@ -865,14 +894,30 @@ async function submit() {
   background:#fff;
 }
 .login-actions {
-  flex-shrink: 0; margin-top: 16px; padding: 14px 0 0;
-  border-top: 1px solid var(--border-lighter);
+  flex-shrink: 0; margin: 0; padding: 12px 24px;
+  border-top: 1px solid var(--border-light); background: var(--bg-surface);
+}
+.login-actions .btn.primary { min-width: 104px; }
+@media (max-width: 760px) {
+  .login-side { width: 176px; }
 }
 @media (max-width: 640px) {
-  .login-side .lp-item { width: auto; text-align: center; }
+  .login-modal-head { min-height: 56px; padding-left: 18px; }
+  .login-side { display: block; padding: 7px 10px; }
+  .login-provider-list { display: flex; overflow-x: auto; overflow-y: hidden; padding: 0; }
+  .login-provider-list { scrollbar-width: none; }
+  .login-provider-list::-webkit-scrollbar { display: none; }
+  .login-side .lp-item { width: auto; min-width: 38px; min-height: 34px; flex: 0 0 auto; justify-content: center; padding: 6px 8px; }
+  .lp-label, .lp-check { display: none; }
+  .login-form-content { padding: 18px; }
+  .login-provider-heading { min-height: 50px; padding: 9px 18px; }
+  .login-actions { padding: 12px 18px; }
   .login-state-card { padding: 14px; }
   .captcha-frame { height:280px; }
   .captcha-head { align-items:stretch; flex-direction:column; }
   .captcha-head .btn { align-self:flex-start; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .login-form-content { animation: none; }
 }
 </style>

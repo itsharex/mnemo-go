@@ -33,6 +33,16 @@ var tokenUpdater TokenUpdater
 
 func SetTokenUpdater(fn TokenUpdater) { tokenUpdater = fn }
 
+// OperationErrorHandler lets the app react to account-scoped provider errors
+// without coupling the drive facade to persistence or UI events. Providers
+// must wrap ErrUnauthorized only when credentials are definitively unusable.
+type OperationErrorHandler func(userID, driveID string, err error)
+
+var operationErrorHandler OperationErrorHandler
+
+// SetOperationErrorHandler installs the application-owned account error hook.
+func SetOperationErrorHandler(fn OperationErrorHandler) { operationErrorHandler = fn }
+
 // CloneToken prevents concurrent provider calls from mutating the store's
 // in-memory account object before the refreshed session is persisted.
 func CloneToken(tok *model.TokenInfo) *model.TokenInfo {
@@ -61,7 +71,33 @@ func persistToken(c Context) error {
 }
 
 func withTokenPersist(opErr error, c Context) error {
-	return errors.Join(opErr, persistToken(c))
+	opErr = classifyCodedAuthenticationError(opErr)
+	result := errors.Join(opErr, persistToken(c))
+	if opErr != nil && operationErrorHandler != nil {
+		operationErrorHandler(c.UserID, c.DriveID, opErr)
+	}
+	return result
+}
+
+// classifyCodedAuthenticationError recognizes structured provider/SDK codes.
+// It intentionally excludes generic HTTP 403 and codes such as AccessDenied:
+// those can describe object policy or scope problems without invalidating the
+// account. AWS Smithy API errors implement ErrorCode, so this also covers S3
+// ExpiredToken/InvalidAccessKeyId without coupling the facade to the S3 SDK.
+func classifyCodedAuthenticationError(err error) error {
+	if err == nil || errors.Is(err, ErrUnauthorized) {
+		return err
+	}
+	var coded interface{ ErrorCode() string }
+	if !errors.As(err, &coded) {
+		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(coded.ErrorCode())) {
+	case "invalid_grant", "invalid_token", "expired_token", "expiredtoken", "invalidtoken", "invalidaccesskeyid", "tokenrefreshrequired":
+		return errors.Join(AuthExpired("网盘登录凭据已失效"), err)
+	default:
+		return err
+	}
 }
 
 // SecretResolver returns the OAuth client credentials for a provider by key

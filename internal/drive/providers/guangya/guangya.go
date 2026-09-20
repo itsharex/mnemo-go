@@ -646,7 +646,7 @@ func loginByRefreshToken(ctx context.Context, refresh string) (*model.TokenInfo,
 
 func refreshSession(ctx context.Context, hc *netx.Client, sess *Session) (*Session, error) {
 	if sess == nil || strings.TrimSpace(sess.RefreshToken) == "" {
-		return sess, errors.New("guangya: refresh_token 为空")
+		return sess, drive.AuthExpired("光鸭云盘 refresh_token 为空")
 	}
 	deviceID := firstNonEmpty(sess.DeviceID, newDeviceID())
 	clientIDValue := firstNonEmpty(sess.ClientID, clientID)
@@ -663,10 +663,18 @@ func refreshSession(ctx context.Context, hc *netx.Client, sess *Session) (*Sessi
 	if err := hc.PostJSON(ctx, accountHost+"/v1/auth/token", headers, map[string]any{
 		"client_id": clientIDValue, "grant_type": "refresh_token", "refresh_token": sess.RefreshToken,
 	}, &resp); err != nil {
+		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "invalid_grant") || strings.Contains(message, "invalid_token") || strings.Contains(message, "refresh_token") && (strings.Contains(message, "expired") || strings.Contains(message, "invalid")) {
+			return nil, drive.AuthExpired("光鸭云盘授权已过期，请重新登录")
+		}
 		return nil, err
 	}
 	if strings.TrimSpace(resp.AccessToken) == "" {
 		msg := firstNonEmpty(resp.ErrorDesc, resp.Error, "刷新光鸭 token 失败")
+		normalized := strings.ToLower(msg)
+		if strings.Contains(normalized, "invalid_grant") || strings.Contains(normalized, "invalid_token") || strings.Contains(normalized, "refresh_token") && (strings.Contains(normalized, "expired") || strings.Contains(normalized, "invalid")) {
+			return nil, drive.AuthExpired("光鸭云盘授权已过期，请重新登录")
+		}
 		return nil, errors.New(msg)
 	}
 	return &Session{

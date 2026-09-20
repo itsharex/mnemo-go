@@ -1,7 +1,7 @@
 <script setup>
 // 文件夹同步页：本地文件夹与网盘目录的双向/单向同步任务管理。
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { ListSyncConfigs, SaveSyncConfig, DeleteSyncConfig, RunSync, CancelSync, ListRunningSyncIDs, onEvent, accountName, providerMetaOf, providerIconUrl, PickDirectory } from '../api'
+import { ListSyncConfigs, SaveSyncConfig, DeleteSyncConfig, PreviewSync, RunSync, RunSyncPlan, CancelSync, ListRunningSyncIDs, onEvent, accountName, providerMetaOf, providerIconUrl, PickDirectory } from '../api'
 import Modal from '../components/Modal.vue'
 import SegTabs from '../components/SegTabs.vue'
 import SelectDirModal from '../components/SelectDirModal.vue'
@@ -22,7 +22,7 @@ const actionLabels = { upload: '上传', download: '下载', 'delete-local': '�
 async function showPreview(job) {
   if (previewBusy.value || running.value.has(job.id)) return
   previewBusy.value = true; previewJob.value = job; preview.value = null; conflictChoices.value = {}
-  try { preview.value = await window.go.app.App.PreviewSync(job.id) }
+  try { preview.value = await PreviewSync(job.id) }
   catch(e) { emit('toast', String(e), 'error'); previewJob.value = null }
   finally { previewBusy.value = false }
 }
@@ -31,7 +31,7 @@ async function executePreview() {
   const job = previewJob.value, plan = preview.value
   previewBusy.value = true
   try {
-    await window.go.app.App.RunSyncPlan(job.id, plan.token, { ...conflictChoices.value })
+    await RunSyncPlan(job.id, plan.token, { ...conflictChoices.value })
     previewJob.value = null; preview.value = null; emit('toast', '同步完成', 'success')
   } catch(e) { preview.value = null; emit('toast', String(e), 'error') }
   finally { previewBusy.value = false }

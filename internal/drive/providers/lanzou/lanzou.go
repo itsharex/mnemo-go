@@ -241,7 +241,7 @@ func (d *Driver) Copy(ctx context.Context, c drive.Context, refs []drive.FileRef
 // re-logged-in with the stored credentials and the token is updated.
 func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *model.TokenInfo) (*model.TokenInfo, error) {
 	if token == nil {
-		return nil, errors.New("蓝奏未登录")
+		return nil, drive.AuthExpired("蓝奏未登录")
 	}
 	cr := parseLanzouCred(token.RefreshToken)
 	baseURL := LANZOU_DEFAULT.BaseURL
@@ -259,7 +259,7 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 		return token, nil
 	}
 	if cr == nil || cr.Type != "account" || cr.Account == "" || cr.Password == "" {
-		return nil, errors.New("蓝奏 Cookie 已失效")
+		return nil, drive.AuthExpired("蓝奏 Cookie 已失效，请重新登录")
 	}
 	_, _, _, err := d.reloginAccount(ctx, c, baseURL)
 	if err != nil {

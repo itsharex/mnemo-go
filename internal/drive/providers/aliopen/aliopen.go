@@ -536,7 +536,7 @@ func (c *client) refresh(ctx context.Context, _ string) error {
 
 func (c *client) refreshToken(ctx context.Context) error {
 	if strings.TrimSpace(c.session.RefreshToken) == "" {
-		return errors.New("aliopen: refresh_token 缺失")
+		return drive.AuthExpired("阿里云盘 refresh_token 缺失")
 	}
 	url := c.session.OAuthTokenURL
 	if c.session.ClientID != "" {
@@ -572,7 +572,12 @@ func (c *client) refreshToken(ctx context.Context) error {
 		aliOpenLimiter.penalize(aliOpenRetryAfter(resp, 8*time.Second))
 	}
 	if resp.StatusCode >= 400 {
-		return aliOpenRequestErrorOf(data, resp.StatusCode)
+		requestErr := aliOpenRequestErrorOf(data, resp.StatusCode)
+		code := strings.ToLower(strings.TrimSpace(aliOpenErrorBodyOf(data).Code))
+		if code == "invalid_grant" || strings.Contains(code, "refreshtoken") || strings.Contains(code, "refresh_token") {
+			return drive.AuthExpired("阿里云盘授权已过期，请重新登录")
+		}
+		return requestErr
 	}
 	var res aliOpenTokenResponse
 	if err := json.Unmarshal(data, &res); err != nil {

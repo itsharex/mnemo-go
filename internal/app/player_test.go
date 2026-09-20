@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
 	"mnemo-go/internal/store"
 	"mnemo-go/internal/transfer/migrate"
@@ -219,6 +220,60 @@ func TestRefreshAccountNowKeepsShortManualGap(t *testing.T) {
 	a.accountRefreshMu.Unlock()
 	if cleared {
 		t.Fatal("manual refresh after the short gap should invalidate the success cache")
+	}
+}
+
+func TestDriveUnauthorizedRemovesOnlyExpiredLocalAccount(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	account := &model.Account{
+		UserID:  "dropbox_expired",
+		DriveID: "dropbox:expired",
+		Token: &model.TokenInfo{
+			TokenFrom: "dropbox",
+			UserName:  "已过期账号",
+		},
+	}
+	if err := st.SaveAccount(account); err != nil {
+		t.Fatalf("SaveAccount: %v", err)
+	}
+	cacheKey := "dropbox|dropbox_expired|dropbox%3Aexpired|list|root|"
+	if err := st.SaveDirectoryCache(cacheKey, []model.File{{FileID: "cached-file"}}); err != nil {
+		t.Fatalf("SaveDirectoryCache: %v", err)
+	}
+	a := &App{store: st}
+
+	a.handleDriveOperationError(account.UserID, account.DriveID, drive.ErrUnauthorized)
+
+	if _, err := st.GetAccount(account.UserID); !os.IsNotExist(err) {
+		t.Fatalf("expired account still exists: %v", err)
+	}
+	if files, err := st.LoadDirectoryCache(cacheKey); err != nil || files != nil {
+		t.Fatalf("expired account directory cache remains: files=%#v err=%v", files, err)
+	}
+}
+
+func TestDriveTransientFailureKeepsLocalAccount(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	account := &model.Account{
+		UserID:  "dropbox_network",
+		DriveID: "dropbox:network",
+		Token:   &model.TokenInfo{TokenFrom: "dropbox"},
+	}
+	if err := st.SaveAccount(account); err != nil {
+		t.Fatalf("SaveAccount: %v", err)
+	}
+	a := &App{store: st}
+
+	a.handleDriveOperationError(account.UserID, account.DriveID, errors.New("network timeout"))
+
+	if _, err := st.GetAccount(account.UserID); err != nil {
+		t.Fatalf("transient failure removed account: %v", err)
 	}
 }
 

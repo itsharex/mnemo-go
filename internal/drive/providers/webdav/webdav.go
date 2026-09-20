@@ -62,7 +62,7 @@ func connAllowsPrivateNetwork(c drive.Context) bool {
 // triggering additional fallback scans.
 func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *model.TokenInfo) (*model.TokenInfo, error) {
 	if token == nil || token.Conn == nil {
-		return nil, errors.New("webdav: 连接不存在，请重新连接")
+		return nil, drive.AuthExpired("WebDAV 连接不存在，请重新连接")
 	}
 	client, err := clientOf(c)
 	if err != nil {
@@ -70,6 +70,9 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	}
 	used, total, err := client.Quota(ctx, "/")
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "webdav:") && strings.Contains(err.Error(), " 401") {
+			return token, drive.AuthExpired("WebDAV 登录凭据无效，请重新连接")
+		}
 		return token, err
 	}
 	if total > 0 {

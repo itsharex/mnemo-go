@@ -2,8 +2,10 @@
 // 全局快捷命令面板 (Ctrl+P / Command+P)：
 // 支持模块跳转、网盘账号快切、快捷命令（刷新/上传/新建文件夹/明暗切换）
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { motion, MotionConfig } from 'motion-v'
 import { accountName, providerIconUrl, providerMetaOf, providerOf } from '../api'
 import UiIcon from './UiIcon.vue'
+import { panelReveal, reducedMotion } from '../motion/presets'
 
 const props = defineProps({
   show: { type: Boolean, default: false },
@@ -130,8 +132,16 @@ function scrollActiveIntoView() {
   <teleport to="body">
     <transition name="modal-fade">
       <div v-if="show" class="modal-mask qo-mask" @click.self="emit('close')">
-        <div class="qo-panel">
-          <!-- 搜索输入框 -->
+        <MotionConfig :reduced-motion="reducedMotion">
+          <motion.div
+            class="qo-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="快捷命令面板"
+            :initial="panelReveal.initial"
+            :animate="panelReveal.animate"
+            :transition="panelReveal.transition"
+          >
           <div class="qo-input-wrap">
             <UiIcon name="search" :size="16" class="qo-search-icon" />
             <input
@@ -145,14 +155,18 @@ function scrollActiveIntoView() {
             <span class="qo-badge">Ctrl+P</span>
           </div>
 
-          <!-- 列表区 -->
-          <div ref="listEl" class="qo-list">
-            <div v-if="!filteredItems.length" class="qo-empty">没有匹配的命令或账号</div>
+          <div ref="listEl" class="qo-list" role="listbox" aria-label="快捷命令">
+            <div v-if="!filteredItems.length" class="qo-empty">
+              <UiIcon name="search" :size="20" />
+              <span>没有匹配的命令或账号</span>
+            </div>
             <div
               v-for="(item, idx) in filteredItems"
               :key="item.id"
               class="qo-item"
               :class="{ active: idx === activeIndex }"
+              role="option"
+              :aria-selected="idx === activeIndex"
               @click="execute(item)"
               @mouseenter="activeIndex = idx"
             >
@@ -165,7 +179,8 @@ function scrollActiveIntoView() {
               <span class="qo-item-group">{{ item.group }}</span>
             </div>
           </div>
-        </div>
+          </motion.div>
+        </MotionConfig>
       </div>
     </transition>
   </teleport>
@@ -177,7 +192,7 @@ function scrollActiveIntoView() {
   padding-top: 12vh;
 }
 .qo-panel {
-  width: 540px;
+  width: 570px;
   max-width: 92vw;
   background: var(--bg-elevated);
   border: 1px solid var(--border-light);
@@ -191,7 +206,8 @@ function scrollActiveIntoView() {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 16px;
+  min-height: 58px;
+  padding: 12px 17px;
   border-bottom: 1px solid var(--border-light);
   background: var(--bg-surface);
 }
@@ -208,40 +224,46 @@ function scrollActiveIntoView() {
 }
 .qo-input::placeholder { color: var(--control-placeholder); }
 .qo-badge {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 650;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
   background: var(--bg-subtle);
   color: var(--text-tertiary);
   border: 1px solid var(--border-lighter);
   flex-shrink: 0;
 }
 .qo-list {
-  max-height: 340px;
+  max-height: min(400px, 55vh);
   overflow-y: auto;
-  padding: 6px;
+  padding: 8px;
 }
 .qo-empty {
-  padding: 32px;
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+  padding: 40px 32px;
   text-align: center;
-  font-size: 13.5px;
+  font-size: 13px;
   color: var(--text-tertiary);
 }
 .qo-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 12px;
+  min-height: 54px;
+  padding: 9px 11px;
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background-color var(--motion-fast) var(--motion-ease);
+  transition: background-color var(--motion-fast) var(--motion-ease), box-shadow var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-spring);
 }
+.qo-item:hover { background: var(--bg-hover); transform: translateX(2px); }
 .qo-item.active {
   background: var(--listselectbg);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 20%, transparent);
 }
 .qo-item-icon { color: var(--color-primary); flex-shrink: 0; }
-.qo-item-img { width: 16px; height: 16px; object-fit: contain; flex-shrink: 0; }
+.qo-item-img { width: 18px; height: 18px; object-fit: contain; flex-shrink: 0; }
 .qo-item-text {
   flex: 1;
   min-width: 0;
@@ -250,8 +272,8 @@ function scrollActiveIntoView() {
   gap: 2px;
 }
 .qo-item-title {
-  font-size: 13.5px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -266,7 +288,8 @@ function scrollActiveIntoView() {
   text-overflow: ellipsis;
 }
 .qo-item-group {
-  font-size: 11px;
+  font-size: 10.5px;
+  font-weight: 600;
   color: var(--text-tertiary);
   padding: 1px 6px;
   border-radius: 999px;

@@ -83,7 +83,7 @@ func (d *Driver) reloginDownload(ctx context.Context, c drive.Context) error {
 	}
 	cr := parseCred(c.Token.RefreshToken)
 	if cr == nil || cr.Username == "" || cr.Password == "" {
-		return errors.New("登录凭证已失效，无法自动重登")
+		return drive.AuthExpired("优享版蓝奏云登录凭证已失效，无法自动重登")
 	}
 	login, err := ilanzouLogin(ctx, cr.Username, cr.Password, cr.UUID)
 	if err != nil {

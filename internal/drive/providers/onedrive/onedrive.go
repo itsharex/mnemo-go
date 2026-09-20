@@ -611,11 +611,11 @@ func refreshOneDriveToken(ctx context.Context, clientID, clientSecret, refreshTo
 // account requests.
 func refreshOneDriveAccessToken(ctx context.Context, token *model.TokenInfo) error {
 	if token == nil {
-		return errors.New("OneDrive 未登录")
+		return drive.AuthExpired("OneDrive 未登录")
 	}
 	refreshToken := strings.TrimSpace(token.RefreshToken)
 	if refreshToken == "" {
-		return errors.New("onedrive: missing refresh_token")
+		return drive.AuthExpired("OneDrive 缺少 refresh_token")
 	}
 	configuredID := strings.TrimSpace(drive.Secret("onedrive_client_id"))
 	clientID := strings.TrimSpace(token.DeviceID)
@@ -629,6 +629,9 @@ func refreshOneDriveAccessToken(ctx context.Context, token *model.TokenInfo) err
 
 	fresh, err := refreshOneDriveToken(ctx, clientID, clientSecret, refreshToken)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "invalid_grant") {
+			return drive.AuthExpired("OneDrive 授权已过期，请重新登录")
+		}
 		return err
 	}
 

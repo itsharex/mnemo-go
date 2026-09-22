@@ -181,14 +181,12 @@ body {
 .rail-list {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
   scrollbar-width: none;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
 }
 .rail-list::-webkit-scrollbar { width: 0; height: 0; }
-.rail-stage { position: relative; min-height: 100%; }
-.rail-items { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; min-height: 100%; }
-.account-rail.expanded .rail-items { align-items: stretch; padding: 0 2px; }
-.rail-active-pill { position: absolute; z-index: 0; top: 0; left: 0; border-radius: 10px; pointer-events: none; background: color-mix(in srgb, var(--color-primary) 11%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 18%, transparent); }
+.account-rail.expanded .rail-list { align-items: stretch; padding: 0 2px; }
 .rail-item {
-  position: relative; z-index: 1; display: flex; align-items: center; justify-content: center;
+  display: flex; align-items: center; justify-content: center;
   width: var(--icon-box); min-width: var(--icon-box); height: var(--icon-box); min-height: var(--icon-box);
   padding: 0; border: 0; border-radius: 10px;
   background: transparent; color: var(--text-primary); cursor: pointer; text-align: left;
@@ -249,14 +247,21 @@ body.rail-drag-active { cursor: grabbing; user-select: none; }
 .rail-item.bump-up .rail-inner { animation: rail-bump-up .4s cubic-bezier(.3, 1.35, .5, 1) both; }
 
 .rail-item.active {
-  background: transparent;
-  box-shadow: none;
+  background: var(--listselectbg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 20%, transparent);
+  animation: rail-active-in var(--motion-normal) var(--motion-ease);
 }
+.rail-item.active .rail-icon {
+  background: color-mix(in srgb, var(--color-primary) 16%, var(--bg-subtle));
+  border-color: color-mix(in srgb, var(--color-primary) 58%, var(--border-lighter));
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--color-primary) 20%, transparent);
+}
+@keyframes rail-active-in { from { opacity: .62; transform: scale(.97); } }
 .rail-icon {
   width: var(--icon-box); height: var(--icon-box); border-radius: 10px; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
   background: var(--bg-subtle); border: 1px solid var(--border-lighter); overflow: hidden;
-  transition: width 260ms var(--rail-ease), height 260ms var(--rail-ease), border-radius 260ms var(--rail-ease), transform .22s var(--rail-ease);
+  transition: width 260ms var(--rail-ease), height 260ms var(--rail-ease), border-radius 260ms var(--rail-ease), transform .22s var(--rail-ease), background-color var(--motion-fast) var(--motion-ease), border-color var(--motion-fast) var(--motion-ease), box-shadow var(--motion-fast) var(--motion-ease);
 }
 .account-rail.expanded .rail-icon { width: 32px; height: 32px; border-radius: 8px; }
 .rail-item:hover .rail-icon { transform: scale(1.03); }

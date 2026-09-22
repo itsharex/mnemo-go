@@ -1,8 +1,6 @@
 <script setup>
 // 账号快切栏（复刻旧版 AccountRail）：默认 60px 窄图标栏，悬停展开为 220px 显示名称与用量。
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { motion } from 'motion-v'
-import { selectionGlide } from '../motion/presets'
+import { computed, ref, onBeforeUnmount, watch } from 'vue'
 import { providerOf, accountName, providerIconUrl, providerMetaOf } from '../api'
 import { useOrderedAccounts, setPref } from '../appearance'
 import ContextMenu from './ContextMenu.vue'
@@ -19,7 +17,6 @@ const emit = defineEmits(['select', 'add', 'remove', 'info', 'rename'])
 const expanded = ref(false)
 const railEl = ref(null)
 const menu = ref(null)
-const activePill = ref({ x: 0, y: 0, width: 0, height: 0, visible: false })
 let hovering = false
 let keyboardFocus = false
 let cancelDrag = null
@@ -31,28 +28,6 @@ onBeforeUnmount(() => {
   clearTimeout(enterTimer)
   clearTimeout(leaveTimer)
   clearTimeout(clickTimer)
-  railEl.value?.removeEventListener('transitionend', scheduleActivePill)
-})
-
-// 选中背景独立于账号按钮，用共享元素在两项之间滑动；避免新旧两项仅各自淡入淡出。
-function syncActivePill() {
-  const stage = railEl.value?.querySelector('.rail-stage')
-  const active = stage?.querySelector('.rail-item.active')
-  if (!stage || !active) { activePill.value = { ...activePill.value, visible: false }; return }
-  const stageRect = stage.getBoundingClientRect()
-  const itemRect = active.getBoundingClientRect()
-  activePill.value = {
-    x: Math.round(itemRect.left - stageRect.left),
-    y: Math.round(itemRect.top - stageRect.top),
-    width: Math.round(itemRect.width),
-    height: Math.round(itemRect.height),
-    visible: true,
-  }
-}
-function scheduleActivePill() { nextTick(syncActivePill) }
-onMounted(() => {
-  scheduleActivePill()
-  railEl.value?.addEventListener('transitionend', scheduleActivePill)
 })
 
 // ---------- 手动拖拽排序（顺序存 localStorage prefs.accountOrder） ----------
@@ -293,7 +268,6 @@ function scheduleCollapse() {
 watch(menu, (value) => {
   if (!value && !hovering) onRailLeave()
 })
-watch([() => props.current?.user_id, expanded, orderedAccounts], scheduleActivePill, { flush: 'post' })
 watch(() => props.accounts.map(a => a.user_id).join('\n'), () => {
   cancelDrag?.()
   if (menu.value && !props.accounts.some(a => a.user_id === menu.value.acc.user_id)) menu.value = null
@@ -390,16 +364,8 @@ function onMenu(action) {
     @mouseleave="onRailLeave"
     @focusout="scheduleCollapse"
   >
-    <div class="rail-list" :class="{ reordering: dragIdx >= 0 }">
-      <div class="rail-stage">
-        <motion.div
-          class="rail-active-pill"
-          :initial="false"
-          :animate="{ x: activePill.x, y: activePill.y, width: activePill.width, height: activePill.height, opacity: activePill.visible ? 1 : 0 }"
-          :transition="selectionGlide"
-        />
-      <TransitionGroup name="rail" tag="div" class="rail-items">
-        <button
+    <TransitionGroup name="rail" tag="div" class="rail-list" :class="{ reordering: dragIdx >= 0 }">
+      <button
         v-for="(acc, i) in orderedAccounts"
         :key="acc.user_id"
         type="button"
@@ -430,13 +396,11 @@ function onMenu(action) {
             <span v-if="hasQuota(acc)" class="rail-quota"><i :style="{ width: quotaPct(acc) + '%' }"></i></span>
           </span>
         </span>
-        </button>
-        <div v-if="!accounts.length" class="rail-empty" key="__empty">
-          <span v-show="expanded">尚未登录网盘账号</span>
-        </div>
-      </TransitionGroup>
+      </button>
+      <div v-if="!accounts.length" class="rail-empty" key="__empty">
+        <span v-show="expanded">尚未登录网盘账号</span>
       </div>
-    </div>
+    </TransitionGroup>
 
     <button type="button" class="rail-add" :title="'添加网盘账号'" @click="emit('add')" @keydown="onRailKey($event)">
       <UiIcon name="plus" :size="17" class="rail-add-icon" />

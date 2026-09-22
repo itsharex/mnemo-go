@@ -1558,7 +1558,8 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 .pp-progress-fill { right: auto; width: var(--played); background: var(--color-primary); }
 .pp-progress-thumb { position: absolute; top: 50%; right: -5px; width: 10px; height: 10px; transform: translateY(-50%); border-radius: 50%; background: var(--color-primary); opacity: 0; transition: opacity 140ms ease; }
 .pp-progress:hover .pp-progress-thumb, .pp-progress:focus-within .pp-progress-thumb { opacity: 1; }
-.pp-progress:focus-within { outline: 2px solid var(--border-focus); outline-offset: 2px; border-radius: 4px; }
+/* 拖动后 range 会保留焦点；只显示进度圆点，避免在视频画面上留下白色外圈。 */
+.pp-progress:focus-within { outline: none; }
 .pp-progress-input { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .pp-scrub { position: absolute; bottom: 24px; padding: 6px 10px; transform: translateX(-50%); color: var(--text-primary); background: var(--bg-elevated); border: 1px solid var(--border-light); border-radius: var(--radius-sm); box-shadow: var(--shadow-sm); font-size: 12px; font-variant-numeric: tabular-nums; pointer-events: none; }
 .pp-controls, .pp-group { display: flex; align-items: center; min-width: 0; }

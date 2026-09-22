@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -343,18 +342,22 @@ func (d *Driver) downloadInfo(ctx context.Context, c drive.Context, fileID strin
 	return dlURL, 0, nil
 }
 
-// followRedirect performs one GET with redirects disabled and returns the
-// Location when the server replies 3xx.
+// followRedirect 只探测下载入口的第一跳 3xx 响应。不能跟随跳转或读取响应
+// 正文：最终地址通常就是大文件本身，提前读取会让真正下载前多等待一次完整传输。
 func followRedirect(ctx context.Context, rawURL string) (string, bool) {
 	hc := netx.NewClient(60 * time.Second)
+	hc.HTTP.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	resp, err := hc.Do(ctx, http.MethodGet, rawURL, map[string]string{"User-Agent": "Mozilla/5.0"}, nil)
 	if err != nil {
 		return "", false
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return resp.Header.Get("Location"), true
+		if location := resp.Header.Get("Location"); location != "" {
+			return location, true
+		}
 	}
 	return "", false
 }

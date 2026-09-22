@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
@@ -126,6 +128,39 @@ func TestExpireTimeFromURL(t *testing.T) {
 	real := "https://d.pcs.189.cn/a?&expires=1710000000&x=1"
 	if got := expireTimeFromURL(real); got != 1710000000*1000 {
 		t.Fatalf("189-style expire = %d", got)
+	}
+}
+
+func TestFollowRedirectDoesNotFetchDownloadBody(t *testing.T) {
+	targetHit := make(chan struct{}, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case targetHit <- struct{}{}:
+		default:
+		}
+		// 如果错误地自动跟随跳转，会一直卡在模拟的大文件响应上，直到上下文取消。
+		<-r.Context().Done()
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/large-file", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	got, ok := followRedirect(ctx, origin.URL)
+	if !ok || got != target.URL+"/large-file" {
+		t.Fatalf("followRedirect = %q, %v", got, ok)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("下载跳转探测耗时过长: %v", elapsed)
+	}
+	select {
+	case <-targetHit:
+		t.Fatal("下载跳转探测不应请求最终文件内容")
+	default:
 	}
 }
 

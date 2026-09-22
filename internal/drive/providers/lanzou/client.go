@@ -55,10 +55,29 @@ var fetchThrottle = &throttle{}
 
 // fetchResult is one raw HTTP response.
 type fetchResult struct {
-	text     string
-	status   int
-	headers  http.Header
-	location string
+	text        string
+	status      int
+	headers     http.Header
+	location    string
+	bodySkipped bool
+}
+
+// isLanzouDirectDownloadResponse 识别已经开始传输的二进制下载响应。下载
+// 链接探测只需要响应头，读取正文会造成用户点击下载后的无效等待。
+func isLanzouDirectDownloadResponse(headers http.Header) bool {
+	if strings.Contains(strings.ToLower(headers.Get("Content-Disposition")), "attachment") {
+		return true
+	}
+	contentType := strings.ToLower(headers.Get("Content-Type"))
+	if contentType == "" {
+		return false
+	}
+	for _, marker := range []string{"text/", "json", "xml", "html", "javascript"} {
+		if strings.Contains(contentType, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchText performs one request through the acw_sc__v2 challenge retry loop
@@ -110,16 +129,21 @@ func fetchTextRaw(ctx context.Context, method, rawURL string, headers map[string
 		return nil, err
 	}
 	defer resp.Body.Close()
+	result := &fetchResult{
+		status:   resp.StatusCode,
+		headers:  resp.Header,
+		location: resp.Header.Get("Location"),
+	}
+	if manualRedirect && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && isLanzouDirectDownloadResponse(resp.Header) {
+		result.bodySkipped = true
+		return result, nil
+	}
 	text, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	return &fetchResult{
-		text:     string(text),
-		status:   resp.StatusCode,
-		headers:  resp.Header,
-		location: resp.Header.Get("Location"),
-	}, nil
+	result.text = string(text)
+	return result, nil
 }
 
 // cred is the parsed refresh_token payload (mirrors legacy parseLanzouCred).

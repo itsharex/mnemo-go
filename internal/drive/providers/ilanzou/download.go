@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"mnemo-go/internal/drive"
 )
@@ -121,6 +122,10 @@ func resolveILanzouDownload(ctx context.Context, fileID, accountUserID, token, u
 		}
 		return downloadInfo{Error: msg}, resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
 	}
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && isILanzouDirectDownloadResponse(resp.Header) {
+		// 个别网关直接返回文件而非 302/JSON；无需预读正文，交给下载器。
+		return downloadInfo{URL: rawURL, Headers: map[string]string{"Referer": ILANZOU_CONF.Site + "/", "User-Agent": ua}}, false
+	}
 	// This endpoint resolves a URL rather than serving the file. Some gateways
 	// label its JSON as text/plain; never pass an error document to the downloader.
 	if location == "" && resp.StatusCode == http.StatusOK {
@@ -156,4 +161,20 @@ func resolveILanzouDownload(ctx context.Context, fileID, accountUserID, token, u
 		URL:     u,
 		Headers: map[string]string{"Referer": ILANZOU_CONF.Site + "/", "User-Agent": ua},
 	}, false
+}
+
+func isILanzouDirectDownloadResponse(headers http.Header) bool {
+	if strings.Contains(strings.ToLower(headers.Get("Content-Disposition")), "attachment") {
+		return true
+	}
+	contentType := strings.ToLower(headers.Get("Content-Type"))
+	if contentType == "" {
+		return false
+	}
+	for _, marker := range []string{"text/", "json", "xml", "html", "javascript"} {
+		if strings.Contains(contentType, marker) {
+			return false
+		}
+	}
+	return true
 }

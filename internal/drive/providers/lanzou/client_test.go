@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
@@ -117,6 +118,31 @@ func TestFetchTextAcwRetry(t *testing.T) {
 	}
 	if !strings.Contains(gotCookie, "base=1") {
 		t.Errorf("original cookie lost in %q", gotCookie)
+	}
+}
+
+func TestManualDownloadProbeDoesNotReadBinaryBody(t *testing.T) {
+	withNoThrottle(t)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", "attachment; filename=large.bin")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	result, err := fetchTextRaw(ctx, http.MethodGet, srv.URL, nil, nil, true)
+	if err != nil || result == nil || !result.bodySkipped {
+		t.Fatalf("下载探测 = %#v, %v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("二进制下载探测耗时过长: %v", elapsed)
 	}
 }
 

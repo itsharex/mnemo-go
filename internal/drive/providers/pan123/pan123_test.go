@@ -23,6 +23,26 @@ import (
 	"mnemo-go/internal/netx"
 )
 
+func TestPan123DirectDownloadResponseDetection(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers http.Header
+		want    bool
+	}{
+		{name: "附件", headers: http.Header{"Content-Disposition": []string{"attachment; filename=file.bin"}}, want: true},
+		{name: "二进制", headers: http.Header{"Content-Type": []string{"application/octet-stream"}}, want: true},
+		{name: "中转 JSON", headers: http.Header{"Content-Type": []string{"application/json"}}, want: false},
+		{name: "验证页 HTML", headers: http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, want: false},
+		{name: "未知", headers: http.Header{}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPan123DirectDownloadResponse(tc.headers); got != tc.want {
+				t.Fatalf("isPan123DirectDownloadResponse() = %v，want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFavoritesReadAllPagesAndWriteNativeStatus(t *testing.T) {
 	d := &Driver{}
 	p, ok := any(d).(drive.RemoteFavorites)

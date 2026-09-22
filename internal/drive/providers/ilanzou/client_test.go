@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/model"
@@ -37,6 +38,34 @@ func TestDownloadResolverJSONAndTokenEncoding(t *testing.T) {
 	info, _ := resolveILanzouDownload(context.Background(), "8", "9", "user:token+&", "device")
 	if info.Error != "" || info.URL != srv.URL+"/cdn/file.bin" {
 		t.Fatalf("resolver = %+v", info)
+	}
+}
+
+func TestDownloadResolverDoesNotReadDirectBinaryBody(t *testing.T) {
+	withNoThrottle(t)
+	oldBase := ILANZOU_CONF.Base
+	t.Cleanup(func() { ILANZOU_CONF.Base = oldBase })
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", "attachment; filename=large.bin")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+	ILANZOU_CONF.Base = srv.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	info, auth := resolveILanzouDownload(ctx, "8", "9", "token", "device")
+	if auth || info.Error != "" || !strings.HasPrefix(info.URL, srv.URL+"/") {
+		t.Fatalf("下载解析 = %+v, auth=%v", info, auth)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("二进制下载探测耗时过长: %v", elapsed)
 	}
 }
 

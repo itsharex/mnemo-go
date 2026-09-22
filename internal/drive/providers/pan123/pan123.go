@@ -1213,6 +1213,24 @@ func extractPan123RedirectURL(bodyText, baseURL string) string {
 	return ""
 }
 
+// isPan123DirectDownloadResponse 区分下载入口返回的 HTML/JSON 中转页与
+// 已经开始传输的二进制文件。后者不应在解析下载地址时读取正文。
+func isPan123DirectDownloadResponse(headers http.Header) bool {
+	if strings.Contains(strings.ToLower(headers.Get("Content-Disposition")), "attachment") {
+		return true
+	}
+	contentType := strings.ToLower(headers.Get("Content-Type"))
+	if contentType == "" {
+		return false
+	}
+	for _, marker := range []string{"text/", "json", "xml", "html", "javascript"} {
+		if strings.Contains(contentType, marker) {
+			return false
+		}
+	}
+	return true
+}
+
 var hrefRe = regexp.MustCompile(`(?i)href\s*=\s*["'](https?:[^"']+)["']`)
 
 // decodePan123ParamsURL mirrors the legacy Buffer.from(value, "base64")
@@ -1309,6 +1327,8 @@ func (d *Driver) alistLink(ctx context.Context, c drive.Context, f pan123File) (
 		if loc != "" {
 			linkURL = loc
 		}
+	case resp2.StatusCode < 300 && isPan123DirectDownloadResponse(resp2.Header):
+		// 入口已经是直链。不要预读文件正文，交给下载器处理。
 	case resp2.StatusCode < 300:
 		body, _ := io.ReadAll(io.LimitReader(resp2.Body, 1<<20))
 		if redirect := extractPan123RedirectURL(string(body), downloadURL); redirect != "" {

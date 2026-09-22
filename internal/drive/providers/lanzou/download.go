@@ -150,6 +150,9 @@ func lanzouResolveShareDownload(ctx context.Context, shareID, pwd, shareBase, co
 	if res2.status == 302 && location != "" {
 		return shareDownload{url: location, name: name}, nil
 	}
+	if res2.bodySkipped {
+		return shareDownload{url: downloadURL, name: name}, nil
+	}
 
 	// verification page: parse the form, el=2, POST baseUrl/ajax.php
 	vParam, err := htmlJsonToMap(removeJSComment(removeNotes(res2.text)))

@@ -19,6 +19,7 @@ import PanView from '../views/PanView.vue'
 
 const api = vi.hoisted(() => ({
   listDir: vi.fn().mockResolvedValue([]),
+  listDirSilently: vi.fn((...args) => api.listDir(...args)),
   GetDirectoryCache: vi.fn().mockResolvedValue(null),
   SaveDirectoryCache: vi.fn().mockResolvedValue(undefined),
   ListFavorites: vi.fn().mockResolvedValue([]),

@@ -12,7 +12,7 @@ const bridge = vi.hoisted(() => ({
 
 vi.mock('../wailsjs/go/app/App', () => bridge)
 
-import { ClearCache, GetDirectoryCache, SaveDirectoryCache, listDir, login, prewarmRootDirectories } from './api'
+import { ClearCache, GetDirectoryCache, SaveDirectoryCache, listDir, listDirSilently, login, prewarmRootDirectories } from './api'
 
 beforeEach(() => {
   bridge.GetDirectoryCache.mockReset()
@@ -58,6 +58,19 @@ describe('Wails 缓存 RPC 队列', () => {
       await expect(listDir('user', 'drive', 'root')).rejects.toThrow('没有权限完成此操作，请检查账号或文件权限')
       expect(notices).toEqual([expect.objectContaining({ category: 'permission', type: 'warn', message: '没有权限完成此操作，请检查账号或文件权限' })])
       expect(JSON.stringify(notices)).not.toContain('request_id')
+    } finally {
+      window.removeEventListener('mnemo:drive-notice', listener)
+    }
+  })
+
+  it('后台目录读取失败不发送全局错误通知', async () => {
+    bridge.ListDir.mockRejectedValueOnce(new Error('temporary session refresh'))
+    const notices = []
+    const listener = event => notices.push(event.detail)
+    window.addEventListener('mnemo:drive-notice', listener)
+    try {
+      await expect(listDirSilently('user', 'drive', 'root')).rejects.toThrow('temporary session refresh')
+      expect(notices).toEqual([])
     } finally {
       window.removeEventListener('mnemo:drive-notice', listener)
     }

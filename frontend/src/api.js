@@ -113,6 +113,9 @@ export function setAccountCustomMeta(userId, customName, customIcon) {
 }
 
 export function listDir(userId, driveId, dirId) { return driveCall('加载目录', App.ListDir(userId, driveId, dirId)) }
+// 启动恢复、后台预取等非用户发起的目录读取不能抢占界面错误提示；调用方仍会
+// 接收到原始失败，以便在当前视图内保留加载状态或安排重试。
+export function listDirSilently(userId, driveId, dirId) { return App.ListDir(userId, driveId, dirId) }
 export function search(userId, driveId, kw) { return driveCall('搜索文件', App.SearchFiles(userId, driveId, kw)) }
 export function listTrash(userId, driveId) { return driveCall('加载回收站', App.ListTrash(userId, driveId)) }
 export function mkdir(userId, driveId, parentId, name) { return driveCall('创建文件夹', App.Mkdir(userId, driveId, parentId, name)) }

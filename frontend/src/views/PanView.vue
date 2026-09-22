@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
 import {
-  listDir, listTrash, search, mkdir, rename, trash, remove, restore,
+  listDir, listDirSilently, listTrash, search, mkdir, rename, trash, remove, restore,
   move, copy, createShare, uploadFiles, validateUploadFiles, migrateFiles, PreviewMigration, download,
   AddFavorite, RemoveFavorite, ListFavorites, OfflineDownload, PickDirectory, PickFiles,
   formatBytes, formatTime, formatTimeParts, iconOf, extOf, openKindOf, copyText,
@@ -300,7 +300,7 @@ watch([loading, files], () => {
   })
 })
 
-async function load(id) {
+async function load(id, options = {}) {
   if (!props.account) return
   cancelDirectoryPrefetch()
   const seq = ++loadSeq
@@ -336,7 +336,7 @@ async function load(id) {
     let list
     if (snapMode === 'trash') list = (await listTrash(snapUid, snapDid)) || []
     else if (snapMode === 'search') list = snapKw ? (await search(snapUid, snapDid, snapKw.trim())) || [] : []
-    else list = await requestDirectory(snapUid, snapDid, id, epoch)
+    else list = await requestDirectory(snapUid, snapDid, id, epoch, options)
     networkDone = true
     recordAccountHealth(snapUid)
     // 时序保护：过期响应（账号/目录已切换或有更新请求）直接丢弃
@@ -375,13 +375,28 @@ function updateTreeSnapshot(id, list, snapUid = uid.value, snapDid = did.value) 
   }
 }
 
-function requestDirectory(user, drive, id, epoch = cacheEpoch) {
-  const key = `${epoch}|${dirCacheKey(user, drive, 'list', id, '')}`
+const STARTUP_DIRECTORY_RETRY_DELAY_MS = 1000
+
+function requestDirectory(user, drive, id, epoch = cacheEpoch, options = {}) {
+  const silent = options.silent === true
+  // 静默启动读取与用户手动读取不共享失败请求：后者必须继续走统一错误提示。
+  const key = `${silent ? 'silent' : 'interactive'}|${epoch}|${dirCacheKey(user, drive, 'list', id, '')}`
   if (directoryRequests.has(key)) return directoryRequests.get(key)
-  const pending = Promise.resolve().then(() => listDir(user, drive, id)).then(result => {
-    const list = result || []
-    if (!validDirectory(list)) throw new Error('目录数据包含空白或重复的文件 ID，请刷新重试')
-    return list
+  const request = silent ? listDirSilently : listDir
+  const pending = Promise.resolve().then(async () => {
+    // 某些网盘在应用刚启动时仍在刷新令牌。仅自动读取短暂重试一次，既避免
+    // 误报，也不会把真实的长期故障隐藏成无限请求。
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const result = await request(user, drive, id)
+        const list = result || []
+        if (!validDirectory(list)) throw new Error('目录数据包含空白或重复的文件 ID，请刷新重试')
+        return list
+      } catch (cause) {
+        if (!silent || attempt > 0 || epoch !== cacheEpoch || user !== uid.value || drive !== did.value) throw cause
+        await new Promise(resolve => setTimeout(resolve, STARTUP_DIRECTORY_RETRY_DELAY_MS))
+      }
+    }
   })
   directoryRequests.set(key, pending)
   pending.finally(() => { if (directoryRequests.get(key) === pending) directoryRequests.delete(key) }).catch(() => {})
@@ -413,14 +428,14 @@ function drainDirectoryPrefetch() {
     if (item.user !== uid.value || item.drive !== did.value || item.epoch !== cacheEpoch) continue
     prefetchActive++
     // A one-level warm-up only: results do not enqueue grandchildren.
-    listDirectorySnapshot(item.id).catch(() => {}).finally(() => {
+    listDirectorySnapshot(item.id, { silent: true }).catch(() => {}).finally(() => {
       prefetchActive--
       drainDirectoryPrefetch()
     })
   }
 }
 
-async function listDirectorySnapshot(id) {
+async function listDirectorySnapshot(id, options = {}) {
   const snapUid = uid.value, snapDid = did.value
   const epoch = cacheEpoch
   const key = dirCacheKey(snapUid, snapDid, 'list', id, '')
@@ -433,7 +448,7 @@ async function listDirectorySnapshot(id) {
     updateTreeSnapshot(id, persisted, snapUid, snapDid)
     return persisted
   }
-  const list = await requestDirectory(snapUid, snapDid, id, epoch)
+  const list = await requestDirectory(snapUid, snapDid, id, epoch, options)
   if (epoch !== cacheEpoch || snapUid !== uid.value || snapDid !== did.value) return []
   cacheDir(key, list)
   if (epoch === cacheEpoch) persistDir(key, list, epoch).catch(() => {})
@@ -548,14 +563,14 @@ function goUp() {
   load(dirId.value)
 }
 
-function goHome() {
+function goHome(options = {}) {
   mode.value = 'list'
   pathStack.value = []
   dirId.value = rootKey.value
   treeSelected.value = dirId.value
   keyword.value = ''
   selected.value = []
-  load(dirId.value)
+  load(dirId.value, options)
 }
 
 const locationHistory = createNavigationHistory()
@@ -687,20 +702,20 @@ async function toggleTree(idOrNode, name) {
 }
 
 // 幂等展开（加载子目录），用于根节点默认展开
-async function expandTree(id, name) {
+async function expandTree(id, name, options = {}) {
   if (expanded.value[id] && tree.value[id]) return
   expanded.value[id] = true
   const snapUid = uid.value, snapDid = did.value
   const epoch = cacheEpoch
   if (!tree.value[id] && props.account) {
     try {
-      const list = await listDirectorySnapshot(id)
+      const list = await listDirectorySnapshot(id, options)
       if (epoch !== cacheEpoch || snapUid !== uid.value || snapDid !== did.value) return
       updateTreeSnapshot(id, list, snapUid, snapDid)
     } catch (e) {
       if (epoch === cacheEpoch && snapUid === uid.value && snapDid === did.value) {
         expanded.value[id] = false
-        emit('toast', `目录树加载失败：${String(e && e.message ? e.message : e)}`, 'error')
+        if (!options.silent) emit('toast', `目录树加载失败：${String(e && e.message ? e.message : e)}`, 'error')
       }
     }
   }
@@ -1359,10 +1374,10 @@ watch(() => [props.account?.user_id || '', props.account?.drive_id || '', rootKe
     for (const id of saved.expanded || []) expanded.value[id] = true
     expanded.value[rootKey.value] = true
     // 预载展开节点的子目录，让树直接呈现上次的展开形态
-    for (const id of Object.keys(expanded.value).slice(0, TREE_PREFETCH_LIMIT)) if (!tree.value[id]) expandTree(id)
-    load(saved.dirId)
+    for (const id of Object.keys(expanded.value).slice(0, TREE_PREFETCH_LIMIT)) if (!tree.value[id]) expandTree(id, '', { silent: true })
+    load(saved.dirId, { silent: true })
   } else {
-    goHome()
+    goHome({ silent: true })
     expanded.value[rootKey.value] = true
   }
   loadFavorites()

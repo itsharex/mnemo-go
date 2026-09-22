@@ -125,36 +125,40 @@ onBeforeUnmount(() => { alive = false; ++sequence; offState?.() })
   <Modal title="更新" width="500px" @close="emit('close')">
     <div class="upd-body">
       <p v-if="info?.currentVersion" class="upd-meta upd-current">当前版本 {{ info.currentVersion }}</p>
-      <div v-if="state === 'checking'" class="upd-state" role="status"><span class="spin"></span><span>正在检查更新…</span></div>
-      <div v-else-if="state === 'idle'" class="upd-state">
-        <UiIcon name="check" :size="30" /><p class="upd-title">已是最新正式版</p>
-        <button class="btn" @click="check">重新检查</button>
-      </div>
-      <div v-else-if="state === 'available' || state === 'canceled'" class="upd-state">
-        <UiIcon name="download" :size="30" />
-        <p class="upd-title">{{ state === 'canceled' ? '下载已取消' : '发现新版本' }} <b>{{ info?.version }}</b></p>
-        <p v-if="info?.size" class="upd-meta">更新包 {{ fmtBytes(info.size) }}</p>
-        <p v-if="!canInstall" class="upd-meta">下载后手动安装，现有应用保持运行。</p>
-        <div class="upd-actions"><button class="btn primary" @click="startDownload">{{ state === 'canceled' ? '重新下载' : '下载更新' }}</button><button class="btn" @click="emit('close')">稍后</button></div>
-      </div>
-      <div v-else-if="state === 'downloading' || state === 'verifying'" class="upd-state" role="status">
-        <p class="upd-title">{{ state === 'verifying' ? '正在校验更新包…' : '正在下载更新…' }}</p>
-        <div class="upd-progress" role="progressbar" :aria-valuenow="pct()" aria-valuemin="0" aria-valuemax="100"><div class="upd-bar" :style="{ width: pct() + '%' }"></div></div>
-        <p class="upd-meta">{{ fmtBytes(progress.downloaded) }} / {{ progress.total > 0 ? fmtBytes(progress.total) : '大小未知' }}<template v-if="progress.total > 0"> · {{ pct() }}%</template></p>
-        <p class="upd-meta">关闭此窗口后仍会继续下载，可从设置中重新打开。</p>
-        <button class="btn" :disabled="canceling" @click="cancelDownload">{{ canceling ? '取消中…' : '取消下载' }}</button>
-      </div>
-      <div v-else-if="state === 'done'" class="upd-state">
-        <UiIcon name="check" :size="30" /><p class="upd-title">下载完成，校验通过</p>
-        <p class="upd-meta">{{ fmtBytes(progress.downloaded) }}</p>
-        <div class="upd-actions"><button v-if="canInstall" class="btn primary" @click="install">安装并重启</button><button class="btn" @click="openFolder">打开目录</button></div>
-        <p v-if="!canInstall" class="upd-meta">退出当前应用后，使用下载的更新包手动安装。</p>
-      </div>
-      <div v-else-if="state === 'applying'" class="upd-state" role="status"><span class="spin"></span><span>正在启动安装程序，请完成系统授权…</span></div>
-      <div v-else-if="state === 'error'" class="upd-state">
-        <UiIcon name="warning" :size="30" /><p class="upd-title">更新未完成</p>
-        <div class="upd-actions"><button v-if="canInstall && updatePath" class="btn primary" @click="install">重试安装</button><button v-if="info?.available" class="btn" @click="startDownload">重新下载</button><button class="btn" @click="check">重新检查</button></div>
-      </div>
+      <Transition name="update-state" mode="out-in">
+        <div :key="state">
+          <div v-if="state === 'checking'" class="upd-state" role="status"><span class="spin"></span><span>正在检查更新…</span></div>
+          <div v-else-if="state === 'idle'" class="upd-state">
+            <UiIcon name="check" :size="30" /><p class="upd-title">已是最新正式版</p>
+            <button class="btn" @click="check">重新检查</button>
+          </div>
+          <div v-else-if="state === 'available' || state === 'canceled'" class="upd-state">
+            <UiIcon name="download" :size="30" />
+            <p class="upd-title">{{ state === 'canceled' ? '下载已取消' : '发现新版本' }} <b>{{ info?.version }}</b></p>
+            <p v-if="info?.size" class="upd-meta">更新包 {{ fmtBytes(info.size) }}</p>
+            <p v-if="!canInstall" class="upd-meta">下载后手动安装，现有应用保持运行。</p>
+            <div class="upd-actions"><button class="btn primary" @click="startDownload">{{ state === 'canceled' ? '重新下载' : '下载更新' }}</button><button class="btn" @click="emit('close')">稍后</button></div>
+          </div>
+          <div v-else-if="state === 'downloading' || state === 'verifying'" class="upd-state" role="status">
+            <p class="upd-title">{{ state === 'verifying' ? '正在校验更新包…' : '正在下载更新…' }}</p>
+            <div class="upd-progress" role="progressbar" :aria-valuenow="pct()" aria-valuemin="0" aria-valuemax="100"><div class="upd-bar" :style="{ width: pct() + '%' }"></div></div>
+            <p class="upd-meta">{{ fmtBytes(progress.downloaded) }} / {{ progress.total > 0 ? fmtBytes(progress.total) : '大小未知' }}<template v-if="progress.total > 0"> · {{ pct() }}%</template></p>
+            <p class="upd-meta">关闭此窗口后仍会继续下载，可从设置中重新打开。</p>
+            <button class="btn" :disabled="canceling" @click="cancelDownload">{{ canceling ? '取消中…' : '取消下载' }}</button>
+          </div>
+          <div v-else-if="state === 'done'" class="upd-state">
+            <UiIcon name="check" :size="30" /><p class="upd-title">下载完成，校验通过</p>
+            <p class="upd-meta">{{ fmtBytes(progress.downloaded) }}</p>
+            <div class="upd-actions"><button v-if="canInstall" class="btn primary" @click="install">安装并重启</button><button class="btn" @click="openFolder">打开目录</button></div>
+            <p v-if="!canInstall" class="upd-meta">退出当前应用后，使用下载的更新包手动安装。</p>
+          </div>
+          <div v-else-if="state === 'applying'" class="upd-state" role="status"><span class="spin"></span><span>正在启动安装程序，请完成系统授权…</span></div>
+          <div v-else-if="state === 'error'" class="upd-state">
+            <UiIcon name="warning" :size="30" /><p class="upd-title">更新未完成</p>
+            <div class="upd-actions"><button v-if="canInstall && updatePath" class="btn primary" @click="install">重试安装</button><button v-if="info?.available" class="btn" @click="startDownload">重新下载</button><button class="btn" @click="check">重新检查</button></div>
+          </div>
+        </div>
+      </Transition>
       <p v-if="errorMsg" class="upd-err" role="alert">{{ errorMsg }}</p>
       <details v-if="info?.notes" class="upd-notes" open><summary>更新内容</summary><pre>{{ info.notes }}</pre></details>
       <button v-if="info?.releaseUrl" class="tbtn upd-release" @click="openRelease">查看发布页</button>
@@ -172,10 +176,16 @@ onBeforeUnmount(() => { alive = false; ++sequence; offState?.() })
 .upd-current { text-align: center; }
 .upd-err { font-size: var(--fs-aux); color: var(--color-danger); margin: 12px 0; overflow-wrap: anywhere; }
 .upd-progress { width: 100%; height: 6px; background: var(--bg-subtle); border-radius: var(--radius-full); overflow: hidden; }
-.upd-bar { height: 100%; background: var(--color-primary); transition: width 150ms linear; }
+.upd-bar { height: 100%; background: var(--color-primary); transition: width var(--motion-normal) var(--motion-ease); }
 .upd-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .upd-notes { margin-top: 12px; padding: 12px; border-radius: var(--radius-md); background: var(--bg-subtle); }
 .upd-notes summary { cursor: pointer; font-size: var(--fs-aux); }
 .upd-notes pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; font: inherit; font-size: var(--fs-aux); line-height: 1.7; }
 .upd-release { display: block; margin: 12px auto 0; }
+.update-state-enter-active, .update-state-leave-active { transition: opacity var(--motion-fast) var(--motion-ease), transform var(--motion-normal) var(--motion-glide); }
+.update-state-enter-from { opacity: 0; transform: translateY(5px); }
+.update-state-leave-to { opacity: 0; transform: translateY(-3px); }
+@media (prefers-reduced-motion: reduce) {
+  .update-state-enter-active, .update-state-leave-active, .upd-bar { transition-duration: 1ms; }
+}
 </style>

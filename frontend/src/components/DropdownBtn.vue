@@ -53,4 +53,5 @@ function onSelect(action) {
 .dropbtn.open { background: var(--bg-hover); color: var(--text-primary); }
 .dropbtn-caret { opacity: 0.7; margin-left: 1px; transition: transform var(--motion-fast) var(--motion-ease); }
 .dropbtn.open .dropbtn-caret { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .dropbtn-caret { transition-duration: 1ms; } }
 </style>

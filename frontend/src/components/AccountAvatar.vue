@@ -209,7 +209,9 @@ onMounted(() => {
   display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border-light); position: relative; cursor: pointer;
   flex-shrink: 0;
+  transition: border-color var(--motion-fast) var(--motion-ease), box-shadow var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-spring);
 }
+.acc-ava:hover > .ava-circle { border-color: color-mix(in srgb, var(--color-primary) 42%, var(--border-light)); box-shadow: 0 4px 12px color-mix(in srgb, var(--color-primary) 14%, transparent); transform: translateY(-1px) scale(1.03); }
 .ava-circle.sm { width: 36px; height: 36px; }
 .ava-img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .ava-text { font-size: 12px; font-weight: 600; }
@@ -238,4 +240,5 @@ onMounted(() => {
 .ap-qstatus { margin-top: 7px; color: var(--color-warning); font-size: 11px; text-align: center; }
 .ap-qupdated { margin-top: 5px; color: var(--text-tertiary); font-size: 10.5px; text-align: center; }
 .ap-refresh { margin-top: 8px; width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+@media (prefers-reduced-motion: reduce) { .ava-circle, .ap-bar-fill { transition-duration: 1ms; } }
 </style>

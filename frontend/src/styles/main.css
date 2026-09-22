@@ -910,6 +910,16 @@ body.rail-drag-active { cursor: grabbing; user-select: none; }
   --toast-icon-color: #ffffff;
 }
 
+/* 全局无障碍兜底：所有组件都遵循系统“减少动态效果”偏好。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+}
+
 .toast .t-icon {
   width: 20px; height: 20px; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;

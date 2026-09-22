@@ -116,10 +116,11 @@ defineExpose({
 <style scoped>
 .workspace-controls { gap: 8px; }
 .workspace-controls .btn { display: inline-flex; align-items: center; gap: 6px; }
-.workspace-pane { position: relative; min-width: 0; }
+.workspace-pane { position: relative; min-width: 0; transition: box-shadow var(--motion-normal) var(--motion-ease), background-color var(--motion-fast) var(--motion-ease); }
 .workspace-pane-enter { animation: workspace-pane-enter var(--motion-normal) var(--motion-ease); }
 @keyframes workspace-pane-enter { from { opacity: 0; transform: translateX(6px); } }
-.cloud-drop-active { outline: 2px dashed var(--color-primary); outline-offset: -4px; }
-.cloud-drop-hint { position: absolute; bottom: 16px; left: 50%; translate: -50% 0; padding: 8px 14px; border-radius: var(--radius-full); background: var(--bg-elevated); color: var(--color-primary); box-shadow: var(--shadow-modal); font-size: 12px; text-align: center; pointer-events: none; z-index: 10; }
+.cloud-drop-active { outline: 2px dashed var(--color-primary); outline-offset: -4px; box-shadow: inset 0 0 0 4px color-mix(in srgb, var(--color-primary) 9%, transparent); }
+.cloud-drop-hint { position: absolute; bottom: 16px; left: 50%; translate: -50% 0; padding: 8px 14px; border-radius: var(--radius-full); background: var(--bg-elevated); color: var(--color-primary); box-shadow: var(--shadow-modal); font-size: 12px; text-align: center; pointer-events: none; z-index: 10; animation: workspace-drop-hint var(--motion-normal) var(--motion-spring); }
+@keyframes workspace-drop-hint { from { opacity: 0; transform: translateY(5px) scale(.96); } }
 @media (prefers-reduced-motion: reduce) { .workspace-pane-enter { animation: none; } }
 </style>

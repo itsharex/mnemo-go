@@ -1542,8 +1542,9 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 .pp-sub { flex-shrink: 0; color: var(--pp-dim); font-size: 11px; }
 .pp-top-actions { display: flex; align-self: stretch; flex-shrink: 0; }
 .pp-window-controls { display: flex; align-items: stretch; --wails-draggable: no-drag; }
-.pp-btn { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--radius-sm); color: var(--text-secondary); background: transparent; font: inherit; cursor: pointer; transition: background 140ms ease, color 140ms ease; --wails-draggable: no-drag; }
+.pp-btn { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--radius-sm); color: var(--text-secondary); background: transparent; font: inherit; cursor: pointer; transition: background var(--motion-fast) var(--motion-ease), color var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-spring); --wails-draggable: no-drag; }
 .pp-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.pp-btn:active:not(:disabled) { transform: scale(.94); }
 .pp-btn:disabled { opacity: .3; cursor: default; }
 .pp-btn.active { background: var(--listselectbg); color: var(--color-primary); }
 .pp-btn:focus-visible, .pp-tool:focus-visible, .pp-pop-item:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
@@ -1556,7 +1557,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 .pp-progress::before { content: ''; background: var(--bg-subtle); }
 .pp-progress-buffer { right: auto; width: var(--buffered); background: var(--control-border); }
 .pp-progress-fill { right: auto; width: var(--played); background: var(--color-primary); }
-.pp-progress-thumb { position: absolute; top: 50%; right: -5px; width: 10px; height: 10px; transform: translateY(-50%); border-radius: 50%; background: var(--color-primary); opacity: 0; transition: opacity 140ms ease; }
+.pp-progress-thumb { position: absolute; top: 50%; right: -5px; width: 10px; height: 10px; transform: translateY(-50%); border-radius: 50%; background: var(--color-primary); opacity: 0; transition: opacity var(--motion-fast) var(--motion-ease); }
 .pp-progress:hover .pp-progress-thumb, .pp-progress:focus-within .pp-progress-thumb { opacity: 1; }
 /* 拖动后 range 会保留焦点；只显示进度圆点，避免在视频画面上留下白色外圈。 */
 .pp-progress:focus-within { outline: none; }
@@ -1572,7 +1573,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 .pp-time { margin-left: 8px; color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pp-time i { margin: 0 7px; color: var(--text-tertiary); font-style: normal; }
 .pp-vol { display: flex; align-items: center; margin-left: 8px; }
-.pp-vol-slider { display: flex; align-items: center; width: 0; overflow: hidden; transition: width 160ms ease; }
+.pp-vol-slider { display: flex; align-items: center; width: 0; overflow: hidden; transition: width var(--motion-normal) var(--motion-ease); }
 .pp-vol:hover .pp-vol-slider, .pp-vol:focus-within .pp-vol-slider { width: 112px; }
 .pp-vol-slider input { width: 64px; height: 3px; margin: 0 4px; accent-color: var(--color-primary); cursor: pointer; }
 .pp-vol-value { width: 36px; color: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -1587,8 +1588,9 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 .pp-retry { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 1px solid #ffffff38; border-radius: 8px; color: #fff; background: #ffffff0c; cursor: pointer; font: inherit; }
 .pp-retry:hover { background: #ffffff20; }
 .pp-retry-solid { background: var(--color-primary); border-color: transparent; }
-.pp-center { position: absolute; z-index: 2; top: 50%; left: 50%; transform: translate(-50%,-50%); display: flex; align-items: center; justify-content: center; width: 64px; height: 64px; padding: 0; border: 1px solid #ffffff40; border-radius: 50%; color: #fff; background: #12141bcc; cursor: pointer; transition: background 160ms ease; }
+.pp-center { position: absolute; z-index: 2; top: 50%; left: 50%; transform: translate(-50%,-50%); display: flex; align-items: center; justify-content: center; width: 64px; height: 64px; padding: 0; border: 1px solid #ffffff40; border-radius: 50%; color: #fff; background: #12141bcc; cursor: pointer; transition: background var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-spring); }
 .pp-center:hover { background: #252934e8; }
+.pp-center:active { transform: translate(-50%,-50%) scale(.94); }
 .pp-center :deep(svg) { width: 26px; height: 26px; }
 .pp-center-fade-enter-active, .pp-center-fade-leave-active { transition: opacity 160ms ease; }
 .pp-center-fade-enter-from, .pp-center-fade-leave-to { opacity: 0; }
@@ -1598,7 +1600,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 .pp-osd-enter-active, .pp-osd-leave-active { transition: opacity 160ms ease; }
 .pp-osd-enter-from, .pp-osd-leave-to { opacity: 0; }
 .pp-menu-root { position: relative; }
-.pp-pop { position: absolute; z-index: 20; right: 0; bottom: calc(100% + 14px); min-width: 208px; max-width: min(320px, calc(100vw - 32px)); max-height: min(52vh, 380px); overflow-y: auto; padding: 6px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-elevated); color: var(--text-primary); box-shadow: var(--shadow-lg); scrollbar-width: thin; animation: pp-pop-in 140ms ease; }
+.pp-pop { position: absolute; z-index: 20; right: 0; bottom: calc(100% + 14px); min-width: 208px; max-width: min(320px, calc(100vw - 32px)); max-height: min(52vh, 380px); overflow-y: auto; padding: 6px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-elevated); color: var(--text-primary); box-shadow: var(--shadow-lg); scrollbar-width: thin; animation: pp-pop-in var(--motion-fast) var(--motion-ease); }
 @keyframes pp-pop-in { from { opacity: 0; transform: translateY(4px); } }
 .pp-pop-title { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; font-size: 11px; color: var(--text-tertiary); }
 .pp-pop-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
@@ -1620,7 +1622,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 /* 全屏时保留画布空间，工具栏在鼠标活动或键盘聚焦时显示。 */
 .player-panel.fullscreen { --bg-surface: #12151bef; --bg-elevated: #20242e; --bg-hover: #ffffff12; --bg-subtle: #ffffff16; --text-primary: #f3f4f7; --text-secondary: #c5c9d3; --text-tertiary: #9ba2b1; --border-light: #ffffff18; --control-border: #ffffff38; --listselectbg: #ffffff18; }
 .fullscreen .pp-stage { inset: 0; }
-.pp-topbar, .pp-bottom { transition: opacity 200ms ease; }
+.pp-topbar, .pp-bottom { transition: opacity var(--motion-normal) var(--motion-ease); }
 .player-panel .hidden { opacity: 0; pointer-events: none; }
 .player-panel .hidden:has(:focus-visible) { opacity: 1; pointer-events: auto; }
 @media (max-width: 900px) { .pp-sub { display: none; } .pp-vol:hover .pp-vol-slider, .pp-vol:focus-within .pp-vol-slider { width: 76px; } .pp-vol-value { display: none; } }

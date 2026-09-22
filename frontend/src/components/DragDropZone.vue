@@ -108,6 +108,7 @@ onBeforeUnmount(() => {
 .drag-active {
   outline: 2px dashed var(--color-primary);
   outline-offset: -2px;
+  transition: outline-color var(--motion-fast) var(--motion-ease), outline-offset var(--motion-fast) var(--motion-spring);
 }
 .drag-overlay {
   position: absolute;
@@ -130,7 +131,7 @@ onBeforeUnmount(() => {
   color: var(--color-primary);
 }
 .drag-icon {
-  animation: pulse 1.4s ease infinite;
+  animation: pulse 1.4s var(--motion-ease) infinite;
 }
 .drag-title {
   font-size: 16px;
@@ -141,4 +142,5 @@ onBeforeUnmount(() => {
   font-size: 13px;
   color: var(--text-tertiary);
 }
+@media (prefers-reduced-motion: reduce) { .drag-active { transition: none; } .drag-icon { animation: none; } }
 </style>

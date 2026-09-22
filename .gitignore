@@ -19,3 +19,4 @@ internal/engine/**/*.exe
 .workflow/
 mnemo-darwin-check
 mnemo-linux-check
+.mcp.json

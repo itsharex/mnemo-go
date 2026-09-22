@@ -36,7 +36,8 @@ func (s Settings) CloseToTrayEnabled() bool { return s.CloseToTray == nil || *s.
 // DefaultSettings returns sane defaults.
 func DefaultSettings() Settings {
 	return Settings{
-		Theme:                  "dark",
+		// 首次启动交由系统决定明暗模式；用户显式选择后才持久化覆盖。
+		Theme:                  "system",
 		DefaultTab:             "pan",
 		MaxConcurrentDownloads: 3,
 		MaxDownloadSpeed:       0,

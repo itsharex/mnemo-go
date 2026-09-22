@@ -56,6 +56,9 @@ func TestOpenAndSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSettings: %v", err)
 	}
+	if s.Theme != "system" {
+		t.Errorf("default Theme = %q, want system", s.Theme)
+	}
 	if s.MaxConcurrentDownloads <= 0 {
 		t.Error("default MaxConcurrentDownloads should be positive")
 	}

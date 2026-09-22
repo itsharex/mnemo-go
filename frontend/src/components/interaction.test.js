@@ -266,6 +266,15 @@ describe('关键交互组件', () => {
     expect(items[0].classes()).toContain('active-enter-up')
     expect(items[0].attributes('data-switch-direction')).toBe('up')
   })
+  it('展开账号栏后仍可正常切换账号', async () => {
+    vi.useFakeTimers()
+    const accounts = [{ user_id: 'pikpak:one' }, { user_id: 'pikpak:two' }]
+    const wrapper = mountAttached(AccountRail, { props: { accounts, current: accounts[0] } })
+    await wrapper.get('.account-rail').trigger('mouseenter')
+    await vi.advanceTimersByTimeAsync(250)
+    await wrapper.findAll('.rail-item')[1].trigger('click')
+    expect(wrapper.emitted('select')?.[0]).toEqual([accounts[1]])
+  })
   it('系统默认下载目录显示实际路径，可直接打开并用于文件夹选择器', async () => {
     api.GetSettings.mockResolvedValue({ downloadDir: '' })
     api.GetLogPath.mockResolvedValue('')

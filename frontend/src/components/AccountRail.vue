@@ -16,18 +16,26 @@ const emit = defineEmits(['select', 'add', 'remove', 'info', 'rename'])
 
 const expanded = ref(false)
 const railEl = ref(null)
+const listEl = ref(null)
 const menu = ref(null)
+const activeIndicator = ref({ visible: false, x: 0, y: 0, width: 0, height: 0 })
+const indicatorReady = ref(false)
 let hovering = false
 let keyboardFocus = false
 let cancelDrag = null
 let clickTimer = null
 let enterTimer = null
 let leaveTimer = null
+let indicatorTimer = null
+let indicatorFrame = 0
 onBeforeUnmount(() => {
   cancelDrag?.()
   clearTimeout(enterTimer)
   clearTimeout(leaveTimer)
   clearTimeout(clickTimer)
+  clearTimeout(indicatorTimer)
+  cancelAnimationFrame(indicatorFrame)
+  window.removeEventListener('resize', onWindowResize)
 })
 
 // ---------- 手动拖拽排序（顺序存 localStorage prefs.accountOrder） ----------
@@ -44,6 +52,49 @@ const displayAccounts = computed(() => new Map(props.accounts.map(acc => [acc.us
   icon: providerIconUrl(providerMetaOf(acc, props.providers)),
 }])))
 
+const activeIndicatorStyle = computed(() => ({
+  width: activeIndicator.value.width + 'px',
+  height: activeIndicator.value.height + 'px',
+  transform: `translate3d(${activeIndicator.value.x}px, ${activeIndicator.value.y}px, 0)`,
+}))
+
+function hideActiveIndicator() {
+  activeIndicator.value = { ...activeIndicator.value, visible: false }
+  indicatorReady.value = false
+}
+
+// 仅在状态稳定后读取一次实际项目位置。尺寸无效时完全不渲染，杜绝残留的小方块。
+function syncActiveIndicator(animate = false) {
+  const listRoot = listEl.value?.$el || listEl.value
+  if (!expanded.value || !railEl.value || !listRoot || !props.current?.user_id || dragActive) {
+    hideActiveIndicator()
+    return
+  }
+  const item = listRoot.querySelector('.rail-item[data-selected="true"]')
+  if (!item) return
+  const railRect = railEl.value.getBoundingClientRect()
+  const itemRect = item.getBoundingClientRect()
+  if (itemRect.width < 1 || itemRect.height < 1) return
+  const next = {
+    visible: true,
+    x: Math.round(itemRect.left - railRect.left),
+    y: Math.round(itemRect.top - railRect.top),
+    width: Math.round(itemRect.width),
+    height: Math.round(itemRect.height),
+  }
+  if (!activeIndicator.value.visible || !animate) {
+    indicatorReady.value = false
+    activeIndicator.value = next
+    cancelAnimationFrame(indicatorFrame)
+    indicatorFrame = requestAnimationFrame(() => { indicatorReady.value = true })
+    return
+  }
+  activeIndicator.value = next
+}
+
+function onListScroll() { syncActiveIndicator(false) }
+function onWindowResize() { syncActiveIndicator(false) }
+
 // 账号切换只让新选中的图标沿切换方向轻微滑入。
 // 不测量 DOM、不移动其他项目，展开/收起时也不会产生错位或掉帧。
 watch(() => props.current?.user_id, (nextID, previousID) => {
@@ -57,7 +108,8 @@ watch(() => props.current?.user_id, (nextID, previousID) => {
     userId: nextID,
     direction: nextIndex > previousIndex ? 'down' : 'up',
   }
-})
+  syncActiveIndicator(true)
+}, { flush: 'post' })
 
 function onItemPointerDown(e, acc) {
   keyboardFocus = false
@@ -260,6 +312,17 @@ function onItemClick(acc) {
 
 let dragActive = false
 
+watch(expanded, (value) => {
+  clearTimeout(indicatorTimer)
+  if (!value) {
+    hideActiveIndicator()
+    return
+  }
+  // 等侧栏和项目同时展开完成后再展示，避免中间几何留下残影。
+  indicatorTimer = setTimeout(() => syncActiveIndicator(false), 320)
+})
+window.addEventListener('resize', onWindowResize)
+
 // 悬停快速平滑展开，移出后延迟收起；拖拽期间冻结展开状态，避免中途布局突变
 function onRailEnter() {
   hovering = true
@@ -287,6 +350,7 @@ watch(menu, (value) => {
 watch(() => props.accounts.map(a => a.user_id).join('\n'), () => {
   cancelDrag?.()
   if (menu.value && !props.accounts.some(a => a.user_id === menu.value.acc.user_id)) menu.value = null
+  setTimeout(() => syncActiveIndicator(false), 0)
 })
 
 function onRailKey(e, acc) {
@@ -380,7 +444,7 @@ function onMenu(action) {
     @mouseleave="onRailLeave"
     @focusout="scheduleCollapse"
   >
-    <TransitionGroup name="rail" tag="div" class="rail-list" :class="{ reordering: dragIdx >= 0 }">
+    <TransitionGroup ref="listEl" name="rail" tag="div" class="rail-list" :class="{ reordering: dragIdx >= 0 }" @scroll="onListScroll">
       <button
         v-for="(acc, i) in orderedAccounts"
         :key="acc.user_id"
@@ -419,7 +483,7 @@ function onMenu(action) {
         <span v-show="expanded">尚未登录网盘账号</span>
       </div>
     </TransitionGroup>
-
+    <span v-if="activeIndicator.visible" class="rail-active-indicator" :class="{ ready: indicatorReady }" :style="activeIndicatorStyle" aria-hidden="true"></span>
     <button type="button" class="rail-add" :title="'添加网盘账号'" @click="emit('add')" @keydown="onRailKey($event)">
       <UiIcon name="plus" :size="17" class="rail-add-icon" />
       <span class="rail-add-text">添加网盘</span>

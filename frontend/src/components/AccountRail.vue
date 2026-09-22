@@ -38,10 +38,26 @@ let suppressClick = false
 
 const savedAccounts = useOrderedAccounts(() => props.accounts)
 const orderedAccounts = computed(() => liveList.value || savedAccounts.value)
+const activeSwitch = ref({ userId: '', direction: '' })
 const displayAccounts = computed(() => new Map(props.accounts.map(acc => [acc.user_id, {
   name: accountName(acc),
   icon: providerIconUrl(providerMetaOf(acc, props.providers)),
 }])))
+
+// 账号切换只让新选中的图标沿切换方向轻微滑入。
+// 不测量 DOM、不移动其他项目，展开/收起时也不会产生错位或掉帧。
+watch(() => props.current?.user_id, (nextID, previousID) => {
+  if (!nextID || !previousID || nextID === previousID) {
+    activeSwitch.value = { userId: '', direction: '' }
+    return
+  }
+  const nextIndex = orderedAccounts.value.findIndex(acc => acc.user_id === nextID)
+  const previousIndex = orderedAccounts.value.findIndex(acc => acc.user_id === previousID)
+  activeSwitch.value = {
+    userId: nextID,
+    direction: nextIndex > previousIndex ? 'down' : 'up',
+  }
+})
 
 function onItemPointerDown(e, acc) {
   keyboardFocus = false
@@ -370,8 +386,9 @@ function onMenu(action) {
         :key="acc.user_id"
         type="button"
         class="rail-item"
-        :class="{ active: current && current.user_id === acc.user_id, dragging: dragIdx === i, ['bump-' + (bumpMap[acc.user_id] || {}).dir]: bumpMap[acc.user_id] }"
+        :class="{ active: current && current.user_id === acc.user_id, ['active-enter-' + activeSwitch.direction]: activeSwitch.userId === acc.user_id, dragging: dragIdx === i, ['bump-' + (bumpMap[acc.user_id] || {}).dir]: bumpMap[acc.user_id] }"
         :data-selected="current?.user_id === acc.user_id ? 'true' : 'false'"
+        :data-switch-direction="activeSwitch.userId === acc.user_id ? activeSwitch.direction : undefined"
         :style="dragIdx >= 0 && dragIdx !== i ? { transitionDelay: Math.min(Math.abs(i - dragIdx) * 35, 140) + 'ms' } : null"
         :title="`${labelOfAcc(acc)} · ${accountName(acc)}`"
         :aria-label="`${labelOfAcc(acc)} · ${accountName(acc)}`"

@@ -255,6 +255,17 @@ describe('关键交互组件', () => {
     expect(items[0].attributes('data-selected')).toBe('true')
     expect(items[1].attributes('data-selected')).toBe('false')
   })
+  it('账号上下切换时仅为新选中账号标记进入方向', async () => {
+    const accounts = [{ user_id: 'pikpak:top' }, { user_id: 'pikpak:bottom' }]
+    const wrapper = mountAttached(AccountRail, { props: { accounts, current: accounts[0] } })
+    await wrapper.setProps({ current: accounts[1] })
+    const items = wrapper.findAll('.rail-item')
+    expect(items[1].classes()).toContain('active-enter-down')
+    expect(items[1].attributes('data-switch-direction')).toBe('down')
+    await wrapper.setProps({ current: accounts[0] })
+    expect(items[0].classes()).toContain('active-enter-up')
+    expect(items[0].attributes('data-switch-direction')).toBe('up')
+  })
   it('系统默认下载目录显示实际路径，可直接打开并用于文件夹选择器', async () => {
     api.GetSettings.mockResolvedValue({ downloadDir: '' })
     api.GetLogPath.mockResolvedValue('')

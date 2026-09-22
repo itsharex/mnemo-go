@@ -76,13 +76,13 @@ body {
   align-items: center;
   margin-left: 2px;
   padding-left: 7px;
-  border-left: 1px solid var(--border-light);
   --wails-draggable: no-drag;
 }
 .window-actions {
   display: inline-flex;
   align-items: stretch;
   height: 100%;
+  gap: 0;
   margin-left: 6px;
   --wails-draggable: no-drag;
 }
@@ -257,15 +257,16 @@ body.rail-drag-active { cursor: grabbing; user-select: none; }
   box-shadow: 0 3px 10px color-mix(in srgb, var(--color-primary) 20%, transparent);
 }
 /* 收起时图标刚好填满按钮，普通的按钮底色会被图标遮住。
-   选中态因此直接落在图标容器上：稳定的双色环和更高对比的底色，
-   不改变任何项目尺寸，也不依赖正在过渡的滑块位置。 */
+   选中态直接落在图标容器上；只保留一层边框与底色，不改变项目尺寸。 */
 .account-rail:not(.expanded) .rail-item.active .rail-icon {
-  background: color-mix(in srgb, var(--color-primary) 26%, var(--bg-subtle));
+  background: color-mix(in srgb, var(--color-primary) 20%, var(--bg-subtle));
   border-color: var(--color-primary);
-  outline: 2px solid color-mix(in srgb, var(--color-primary) 72%, transparent);
-  outline-offset: 2px;
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--color-primary) 32%, transparent);
+  box-shadow: none;
 }
+@keyframes rail-active-enter-down { from { transform: translateY(-4px) scale(.94); } 68% { transform: translateY(1px) scale(1.01); } }
+@keyframes rail-active-enter-up { from { transform: translateY(4px) scale(.94); } 68% { transform: translateY(-1px) scale(1.01); } }
+.rail-item.active-enter-down .rail-icon { animation: rail-active-enter-down 280ms var(--motion-spring); }
+.rail-item.active-enter-up .rail-icon { animation: rail-active-enter-up 280ms var(--motion-spring); }
 @keyframes rail-active-in { from { opacity: .62; transform: scale(.97); } }
 .rail-icon {
   width: var(--icon-box); height: var(--icon-box); border-radius: 10px; flex-shrink: 0;
@@ -517,27 +518,29 @@ body.rail-drag-active { cursor: grabbing; user-select: none; }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
   min-height: 52px;
-  padding: 12px 0 0 20px;
+  padding: 0 0 0 20px;
 }
 .modal-head h3 { font-size: 16px; font-weight: 700; }
+.modal-head-actions { display: flex; align-self: stretch; align-items: stretch; margin-left: auto; }
+.modal-head-extra { display: flex; align-items: center; }
 .modal-window-controls {
   display: inline-flex;
   align-self: stretch;
   align-items: stretch;
   flex: none;
-  margin-top: -12px;
+  gap: 0;
+  margin: 0;
   --wails-draggable: no-drag;
 }
 .modal-window-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  min-height: 44px;
+  width: 44px; height: 52px;
+  min-height: 0;
   margin: 0;
   padding: 0;
   border: 0;
-  border-left: 1px solid var(--border-lighter);
   border-radius: 0;
   color: var(--text-secondary);
   background: transparent;

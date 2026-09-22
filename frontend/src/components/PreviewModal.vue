@@ -1042,13 +1042,17 @@ function decodeText(buf) {
         <span class="pv-topbar-sub">{{ formatBytes(activeFile.size) }}<template v-if="kind === 'image' && natural.w"> · {{ natural.w }} × {{ natural.h }}</template></span>
       </div>
       <div class="pv-topbar-actions" aria-label="窗口控制">
-        <label v-if="kind === 'audio'" class="pv-background-option" title="关闭窗口后继续播放，可从托盘菜单重新打开">
-          <input type="checkbox" :checked="backgroundAudio" @change="emit('background-audio', $event.target.checked)" />关闭后继续播放
-        </label>
-        <button v-if="kind === 'audio' && backgroundAudio" type="button" class="pv-ctl-btn" title="停止播放并关闭窗口" aria-label="停止播放并关闭窗口" @click="emit('stop-close')"><UiIcon name="stop" :size="16" /></button>
-        <button type="button" class="pv-ctl-btn pv-window-btn" title="最小化" aria-label="最小化窗口" @click="winMinimise"><UiIcon name="window-minimize" :size="14" /></button>
-        <button type="button" class="pv-ctl-btn pv-window-btn" :title="winMax ? '还原窗口' : '最大化窗口'" :aria-label="winMax ? '还原窗口' : '最大化窗口'" @click="winToggleMax"><UiIcon :name="winMax ? 'window-restore' : 'window-maximize'" :size="14" /></button>
-        <button type="button" class="pv-ctl-btn pv-window-btn pv-window-close" title="关闭 (Esc)" aria-label="关闭预览" @click="handleCloseRequest"><UiIcon name="close" :size="14" /></button>
+        <div class="pv-topbar-extra">
+          <label v-if="kind === 'audio'" class="pv-background-option" title="关闭窗口后继续播放，可从托盘菜单重新打开">
+            <input type="checkbox" :checked="backgroundAudio" @change="emit('background-audio', $event.target.checked)" />关闭后继续播放
+          </label>
+          <button v-if="kind === 'audio' && backgroundAudio" type="button" class="pv-ctl-btn" title="停止播放并关闭窗口" aria-label="停止播放并关闭窗口" @click="emit('stop-close')"><UiIcon name="stop" :size="16" /></button>
+        </div>
+        <div class="pv-window-controls">
+          <button type="button" class="pv-ctl-btn pv-window-btn" title="最小化" aria-label="最小化窗口" @click="winMinimise"><UiIcon name="window-minimize" :size="14" /></button>
+          <button type="button" class="pv-ctl-btn pv-window-btn" :title="winMax ? '还原窗口' : '最大化窗口'" :aria-label="winMax ? '还原窗口' : '最大化窗口'" @click="winToggleMax"><UiIcon :name="winMax ? 'window-restore' : 'window-maximize'" :size="14" /></button>
+          <button type="button" class="pv-ctl-btn pv-window-btn pv-window-close" title="关闭 (Esc)" aria-label="关闭预览" @click="handleCloseRequest"><UiIcon name="close" :size="14" /></button>
+        </div>
       </div>
     </header>
 
@@ -1728,6 +1732,8 @@ function decodeText(buf) {
   background: var(--pv-media-surface); box-shadow: var(--pv-media-shadow);
   --wails-draggable: no-drag;
 }
+.pv-topbar-extra, .pv-window-controls { display: flex; align-items: stretch; gap: 0; }
+.pv-window-controls { align-self: stretch; margin-left: auto; --wails-draggable: no-drag; }
 
 /* 左右翻页箭头 */
 .pv-edge {
@@ -1776,10 +1782,9 @@ function decodeText(buf) {
 .pv-ctl-btn:disabled { opacity: .38; cursor: not-allowed; }
 .pv-ctl-btn:focus-visible, .pv-edge:focus-visible, .pv-ctl-zoom:focus-visible { outline: 2px solid var(--pv-media-active); outline-offset: 2px; }
 .pv-ctl-btn.active { color: var(--pv-media-active-fg); background: var(--pv-media-active); border-color: transparent; }
-.pv-window-btn { width: 40px; height: 34px; border: 0; border-left: 1px solid var(--pv-media-border); border-radius: 0; }
-.pv-window-btn:first-child { border-left: 0; }
-.pv-window-btn:hover:not(:disabled) { color: var(--pv-media-fg); background: var(--pv-media-surface-hover); border-color: var(--pv-media-border); }
-.pv-window-close:hover:not(:disabled) { color: #fff; background: #c43d4b; border-color: #c43d4b; }
+.pv-window-btn { width: 40px; height: 34px; border: 0; border-radius: 0; }
+.pv-window-btn:hover:not(:disabled) { color: var(--pv-media-fg); background: var(--pv-media-surface-hover); }
+.pv-window-close:hover:not(:disabled) { color: #fff; background: #c43d4b; }
 .pv-ctl-text { font-size: 17px; line-height: 1; padding-bottom: 2px; }
 .pv-ctl-ratio { font-size: 11px; font-weight: 700; letter-spacing: .04em; width: auto; min-width: 34px; padding: 0 7px; }
 .pv-ctl-counter, .pv-ctl-zoom { font-size: 12px; color: var(--pv-media-fg); font-variant-numeric: tabular-nums; white-space: nowrap; }

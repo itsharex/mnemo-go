@@ -1541,7 +1541,7 @@ const bufPct = computed(() => duration.value > 0 ? Math.min(100, (buffered.value
 .pp-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; line-height: 1.5; }
 .pp-sub { flex-shrink: 0; color: var(--pp-dim); font-size: 11px; }
 .pp-top-actions { display: flex; align-self: stretch; flex-shrink: 0; }
-.pp-window-controls { display: flex; align-items: stretch; --wails-draggable: no-drag; }
+.pp-window-controls { display: flex; align-items: stretch; gap: 0; margin-left: auto; --wails-draggable: no-drag; }
 .pp-btn { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--radius-sm); color: var(--text-secondary); background: transparent; font: inherit; cursor: pointer; transition: background var(--motion-fast) var(--motion-ease), color var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-spring); --wails-draggable: no-drag; }
 .pp-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
 .pp-btn:active:not(:disabled) { transform: scale(.94); }

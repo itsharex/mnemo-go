@@ -67,8 +67,8 @@ html.dark.preview-window {
 .preview-window .preview-modal svg { color: #fff !important; stroke: #fff; fill: none; stroke-width: 1.6; }
 .preview-window .preview-modal .pv-abtn-main { background: #ffffff16; }
 .preview-window .preview-modal .modal-head { height: 56px; min-height: 56px; padding: 0 0 0 16px; border-bottom: 1px solid #ffffff14; --wails-draggable: drag; }
-.preview-window .preview-modal .modal-window-controls { height: 56px; align-self: stretch; }
-.preview-window .preview-modal .modal-window-btn { height: 56px; border-radius: 0; }
+.preview-window .preview-modal .modal-window-controls { height: 56px; align-self: stretch; gap: 0; margin: 0; }
+.preview-window .preview-modal .modal-window-btn { height: 56px; border: 0; border-radius: 0; }
 .preview-window .preview-modal .pv-head-icon { display: none; }
 .preview-window .preview-modal .pv-head-title { font-size: 13px; font-weight: 500; }
 .preview-window .preview-modal .pv-head-sub { font-size: 10px; }

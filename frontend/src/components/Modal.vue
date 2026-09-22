@@ -118,17 +118,19 @@ onBeforeUnmount(() => {
             <slot name="head">
               <h3>{{ title }}</h3>
             </slot>
-            <div class="modal-window-controls" aria-label="窗口控制">
-              <slot name="head-extra" />
-              <button type="button" class="modal-window-btn" title="最小化" aria-label="最小化窗口" @click="minimiseWindow">
-                <UiIcon name="window-minimize" :size="14" />
-              </button>
-              <button type="button" class="modal-window-btn" :title="windowMaximized ? '还原窗口' : '最大化窗口'" :aria-label="windowMaximized ? '还原窗口' : '最大化窗口'" @click="toggleWindowMaximise">
-                <UiIcon :name="windowMaximized ? 'window-restore' : 'window-maximize'" :size="14" />
-              </button>
-              <button type="button" class="modal-window-btn modal-window-close" title="关闭 (Esc)" aria-label="关闭对话框" @click="emit('close')">
-                <UiIcon name="close" :size="15" />
-              </button>
+            <div class="modal-head-actions">
+              <div class="modal-head-extra"><slot name="head-extra" /></div>
+              <div class="modal-window-controls" aria-label="窗口控制">
+                <button type="button" class="modal-window-btn" title="最小化" aria-label="最小化窗口" @click="minimiseWindow">
+                  <UiIcon name="window-minimize" :size="14" />
+                </button>
+                <button type="button" class="modal-window-btn" :title="windowMaximized ? '还原窗口' : '最大化窗口'" :aria-label="windowMaximized ? '还原窗口' : '最大化窗口'" @click="toggleWindowMaximise">
+                  <UiIcon :name="windowMaximized ? 'window-restore' : 'window-maximize'" :size="14" />
+                </button>
+                <button type="button" class="modal-window-btn modal-window-close" title="关闭 (Esc)" aria-label="关闭对话框" @click="emit('close')">
+                  <UiIcon name="close" :size="15" />
+                </button>
+              </div>
             </div>
           </div>
           <div :class="bodyClass">

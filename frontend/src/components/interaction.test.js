@@ -261,6 +261,20 @@ describe('关键交互组件', () => {
     expect(api.PickDirectory).toHaveBeenCalledWith('选择下载文件夹', 'D:/系统下载')
   })
 
+  it('设置页合并相关分类，并使用可访问的开关按钮', async () => {
+    api.GetSettings.mockResolvedValue({})
+    api.GetLogPath.mockResolvedValue('')
+    api.GetDownloadDirectory.mockResolvedValue('D:/系统下载')
+    const wrapper = mountAttached(SettingsView)
+    await flushPromises()
+    expect(wrapper.findAll('.settings-nav .sn-item')).toHaveLength(6)
+    expect(wrapper.get('#sg-maintenance').text()).toContain('日志等级')
+    expect(wrapper.find('#sg-network').exists()).toBe(false)
+    const switches = wrapper.findAll('button.switch')
+    expect(switches.length).toBeGreaterThan(0)
+    expect(switches.every(item => item.attributes('role') === 'switch')).toBe(true)
+  })
+
   it('恢复默认下载位置保存空配置，并更新当前生效路径', async () => {
     api.GetSettings.mockResolvedValue({ downloadDir: 'E:/自定义下载' })
     api.GetLogPath.mockResolvedValue('')

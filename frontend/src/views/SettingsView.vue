@@ -1,7 +1,9 @@
 <script setup>
 import packageInfo from '../../package.json'
-// 设置页：左侧导航 + 右侧平面行式布局，极简干净无冗余说明
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+// 设置页：简短分组导航 + 右侧紧凑设置卡片
+import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { motion, MotionConfig } from 'motion-v'
+import { panelReveal, reducedMotion } from '../motion/presets'
 import { GetSettings, SaveSettings, GetDownloadDirectory, OpenDownloadDirectory, ClearCache, PickDirectory, RevealInFolder, GetLogPath, ClearLogs, ExportLogs } from '../api'
 import { Environment } from '../../wailsjs/runtime/runtime'
 import { getPrefs, setPref } from '../appearance'
@@ -108,15 +110,14 @@ const bodyEl = ref(null)
 const activeNav = ref('general')
 
 const groups = [
-  { id: 'general', label: '基础', icon: 'settings' },
-  { id: 'pan', label: '文件', icon: 'cloud' },
-  { id: 'transfer', label: '传输', icon: 'download' },
-  { id: 'player', label: '播放', icon: 'play' },
-  { id: 'network', label: '连接', icon: 'cloud-down' },
-  { id: 'cache', label: '缓存', icon: 'database' },
-  { id: 'logs', label: '日志', icon: 'doc' },
-  { id: 'update', label: '更新', icon: 'refresh' },
+  { id: 'general', label: '外观与基础', detail: '主题与启动', icon: 'settings' },
+  { id: 'pan', label: '文件与浏览', detail: '视图与排序', icon: 'cloud' },
+  { id: 'transfer', label: '传输与连接', detail: '路径、限速、代理', icon: 'download' },
+  { id: 'player', label: '媒体播放', detail: '续播与字幕', icon: 'play' },
+  { id: 'maintenance', label: '数据与维护', detail: '缓存与日志', icon: 'database' },
+  { id: 'update', label: '关于与更新', detail: '版本与更新', icon: 'refresh' },
 ]
+const activeNavIndex = computed(() => Math.max(0, groups.findIndex(group => group.id === activeNav.value)))
 
 // 纯前端偏好
 const prefs = ref(getPrefs())
@@ -335,9 +336,11 @@ async function exportLogs() {
 </script>
 
 <template>
-  <div class="settings-layout">
+  <MotionConfig :reduced-motion="reducedMotion">
+  <motion.div class="settings-layout settings-view" :initial="panelReveal.initial" :animate="panelReveal.animate" :transition="panelReveal.transition">
     <ConfirmModal v-if="pendingBackup" title="恢复偏好" message="将覆盖备份中的偏好并合并收藏，是否继续？账号凭据不会更改。" @cancel="pendingBackup = null" @ok="restorePrefs" />
-    <aside class="settings-nav">
+    <aside class="settings-nav" aria-label="设置分类">
+      <motion.div class="sn-active-pill" :animate="{ y: activeNavIndex * 54 }" :transition="{ type: 'spring', stiffness: 420, damping: 30, mass: 0.65 }" />
       <button
         v-for="g in groups"
         :key="g.id"
@@ -347,7 +350,7 @@ async function exportLogs() {
         @click="scrollTo(g.id)"
       >
         <UiIcon :name="g.icon" :size="16" />
-        <span>{{ g.label }}</span>
+        <span class="sn-copy"><b>{{ g.label }}</b><small>{{ g.detail }}</small></span>
       </button>
     </aside>
 
@@ -358,9 +361,13 @@ async function exportLogs() {
       </div>
       <div v-if="loadingSettings" role="status">正在加载设置…</div>
       <div v-show="loaded" class="settings-column">
+        <header class="settings-intro">
+          <p>设置</p>
+          <span>个性化你的 Mnemo 使用方式</span>
+        </header>
         <!-- 1. 基础 -->
         <section class="settings-group" id="sg-general">
-          <header class="sg-heading"><h2>基础</h2></header>
+          <header class="sg-heading"><div><h2>外观与基础</h2><p>主题、启动行为与个人偏好</p></div></header>
           <div class="sg-card">
             <div class="sg-row"><div class="sg-text"><span class="sg-label">偏好备份</span><span class="sg-desc">备份外观、账号名称与图标、排序和收藏，不含登录凭据</span></div><div class="sg-control"><button class="btn" :disabled="backupBusy" @click="exportPrefs">导出</button><button class="btn" :disabled="backupBusy" @click="readBackup">恢复</button></div></div>
             <div class="sg-row">
@@ -420,7 +427,7 @@ async function exportLogs() {
                 <span class="sg-label">最小化到托盘</span>
               </div>
               <div class="sg-control">
-                <div class="switch" :class="{ on: settings.closeToTray !== false }" @click="toggle('closeToTray')"></div>
+                <button type="button" class="switch" role="switch" :aria-checked="settings.closeToTray !== false" :class="{ on: settings.closeToTray !== false }" @click="toggle('closeToTray')"></button>
               </div>
             </div>
 
@@ -430,7 +437,7 @@ async function exportLogs() {
                 <button v-if="prefs.downloadSound" class="tbtn xs" @click="playTestSound">
                   <UiIcon name="play" :size="12" />试听
                 </button>
-                <div class="switch" :class="{ on: prefs.downloadSound }" @click="onPref('downloadSound', !prefs.downloadSound)"></div>
+                <button type="button" class="switch" role="switch" :aria-checked="prefs.downloadSound" :class="{ on: prefs.downloadSound }" @click="onPref('downloadSound', !prefs.downloadSound)"></button>
               </div>
             </div>
           </div>
@@ -438,7 +445,7 @@ async function exportLogs() {
 
         <!-- 2. 文件 -->
         <section class="settings-group" id="sg-pan">
-          <header class="sg-heading"><h2>文件</h2></header>
+          <header class="sg-heading"><div><h2>文件与浏览</h2><p>目录展示和默认排序方式</p></div></header>
           <div class="sg-card">
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">默认视图</span></div>
@@ -471,7 +478,7 @@ async function exportLogs() {
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">目录树悬停预览</span></div>
               <div class="sg-control">
-                <div class="switch" :class="{ on: prefs.hoverPreview }" @click="onPref('hoverPreview', !prefs.hoverPreview)"></div>
+                <button type="button" class="switch" role="switch" :aria-checked="prefs.hoverPreview" :class="{ on: prefs.hoverPreview }" @click="onPref('hoverPreview', !prefs.hoverPreview)"></button>
               </div>
             </div>
           </div>
@@ -479,7 +486,7 @@ async function exportLogs() {
 
         <!-- 3. 传输 -->
         <section class="settings-group" id="sg-transfer">
-          <header class="sg-heading"><h2>传输</h2></header>
+          <header class="sg-heading"><div><h2>传输与连接</h2><p>下载路径、带宽和网络代理</p></div></header>
           <div class="sg-card">
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">下载保存目录</span><span class="sg-desc">留空跟随系统下载位置</span></div>
@@ -562,9 +569,25 @@ async function exportLogs() {
             </div>
 
             <div class="sg-row">
+              <div class="sg-text">
+                <span class="sg-label">代理服务器</span>
+                <span class="sg-desc">留空表示直连</span>
+              </div>
+              <div class="sg-control">
+                <input
+                  class="input"
+                  v-model="settings.proxy"
+                  placeholder="http://127.0.0.1:7890"
+                  @blur="onInputCommit"
+                  @keydown.enter="onInputCommit"
+                />
+              </div>
+            </div>
+
+            <div class="sg-row">
               <div class="sg-text"><span class="sg-label">保留传输记录</span></div>
               <div class="sg-control">
-                <div class="switch" :class="{ on: settings.keepTasks }" @click="toggle('keepTasks')"></div>
+                <button type="button" class="switch" role="switch" :aria-checked="settings.keepTasks" :class="{ on: settings.keepTasks }" @click="toggle('keepTasks')"></button>
               </div>
             </div>
           </div>
@@ -572,12 +595,12 @@ async function exportLogs() {
 
         <!-- 4. 播放 -->
         <section class="settings-group" id="sg-player">
-          <header class="sg-heading"><h2>播放</h2></header>
+          <header class="sg-heading"><div><h2>媒体播放</h2><p>续播、音量和字幕行为</p></div></header>
           <div class="sg-card">
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">断点续播</span></div>
               <div class="sg-control">
-                <div class="switch" :class="{ on: settings.playbackResume }" @click="toggle('playbackResume')"></div>
+                <button type="button" class="switch" role="switch" :aria-checked="settings.playbackResume" :class="{ on: settings.playbackResume }" @click="toggle('playbackResume')"></button>
               </div>
             </div>
 
@@ -623,44 +646,22 @@ async function exportLogs() {
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">播放完自动收起</span></div>
               <div class="sg-control">
-                <div class="switch" :class="{ on: prefs.autoCloseOnEnd }" @click="onPref('autoCloseOnEnd', !prefs.autoCloseOnEnd)"></div>
+                <button type="button" class="switch" role="switch" :aria-checked="prefs.autoCloseOnEnd" :class="{ on: prefs.autoCloseOnEnd }" @click="onPref('autoCloseOnEnd', !prefs.autoCloseOnEnd)"></button>
               </div>
             </div>
 
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">自动挂载同名字幕</span></div>
               <div class="sg-control">
-                <div class="switch" :class="{ on: prefs.autoLoadSubtitles }" @click="onPref('autoLoadSubtitles', !prefs.autoLoadSubtitles)"></div>
+                <button type="button" class="switch" role="switch" :aria-checked="prefs.autoLoadSubtitles" :class="{ on: prefs.autoLoadSubtitles }" @click="onPref('autoLoadSubtitles', !prefs.autoLoadSubtitles)"></button>
               </div>
             </div>
           </div>
         </section>
 
-        <!-- 5. 连接 -->
-        <section class="settings-group" id="sg-network">
-          <header class="sg-heading"><h2>连接</h2></header>
-          <div class="sg-card">
-            <div class="sg-row">
-              <div class="sg-text">
-                <span class="sg-label">代理服务器</span>
-                <span class="sg-desc">留空表示直连</span>
-              </div>
-              <div class="sg-control">
-                <input
-                  class="input"
-                  v-model="settings.proxy"
-                  placeholder="http://127.0.0.1:7890"
-                  @blur="onInputCommit"
-                  @keydown.enter="onInputCommit"
-                />
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- 6. 缓存 -->
-        <section class="settings-group" id="sg-cache">
-          <header class="sg-heading"><h2>缓存</h2></header>
+        <!-- 5. 数据与维护 -->
+        <section class="settings-group" id="sg-maintenance">
+          <header class="sg-heading"><div><h2>数据与维护</h2><p>本地缓存和诊断日志</p></div></header>
           <div class="sg-card">
             <div class="sg-row">
               <div class="sg-text">
@@ -675,13 +676,6 @@ async function exportLogs() {
                 </button>
               </div>
             </div>
-          </div>
-        </section>
-
-        <!-- 7. 日志 -->
-        <section class="settings-group" id="sg-logs">
-          <header class="sg-heading"><h2>日志</h2></header>
-          <div class="sg-card">
             <div class="sg-row">
               <div class="sg-text">
                 <span class="sg-label">日志等级</span>
@@ -725,20 +719,20 @@ async function exportLogs() {
 
         <!-- 8. 更新 -->
         <section class="settings-group" id="sg-update">
-          <header class="sg-heading"><h2>更新</h2></header>
+          <header class="sg-heading"><div><h2>关于与更新</h2><p>版本信息和更新策略</p></div></header>
           <div class="sg-card">
             <div class="sg-row"><div class="sg-text"><span class="sg-label">当前版本</span><span class="sg-desc">只检查正式版更新</span></div><div class="sg-control">{{ packageInfo.version }}</div></div>
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">自动检查更新</span></div>
               <div class="sg-control">
-                <div class="switch" :class="{ on: settings.autoUpdate }" @click="toggle('autoUpdate')"></div>
+                <button type="button" class="switch" role="switch" :aria-checked="settings.autoUpdate" :class="{ on: settings.autoUpdate }" @click="toggle('autoUpdate')"></button>
               </div>
             </div>
 
             <div class="sg-row">
               <div class="sg-text"><span class="sg-label">更新前确认</span></div>
               <div class="sg-control">
-                <div class="switch" :class="{ on: settings.confirmUpdate }" @click="toggle('confirmUpdate')"></div>
+                <button type="button" class="switch" role="switch" :aria-checked="settings.confirmUpdate" :class="{ on: settings.confirmUpdate }" @click="toggle('confirmUpdate')"></button>
               </div>
             </div>
 
@@ -754,7 +748,8 @@ async function exportLogs() {
         </section>
       </div>
     </div>
-  </div>
+  </motion.div>
+  </MotionConfig>
 </template>
 
 <style scoped>
@@ -774,12 +769,16 @@ async function exportLogs() {
   color: var(--text-secondary);
   font-size: 13px;
   cursor: pointer;
-  transition: all var(--motion-fast) var(--motion-ease);
+  box-shadow: 0 1px 1px color-mix(in srgb, var(--text-primary) 5%, transparent);
+  transition: border-color var(--motion-fast) var(--motion-ease), background var(--motion-fast) var(--motion-ease), color var(--motion-fast) var(--motion-ease), box-shadow var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-spring);
 }
 .theme-card:hover {
   border-color: var(--color-primary);
   color: var(--text-primary);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 14px color-mix(in srgb, var(--color-primary) 16%, transparent);
 }
+.theme-card:active { transform: scale(.96); }
 .theme-card.active {
   border-color: var(--color-primary);
   background: var(--listselectbg);
@@ -813,12 +812,27 @@ async function exportLogs() {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 35%, transparent);
   animation: check-pop 240ms var(--motion-spring);
 }
+.settings-view :deep(.btn), .settings-view :deep(.tbtn) {
+  transition: background-color var(--motion-fast) var(--motion-ease), color var(--motion-fast) var(--motion-ease), border-color var(--motion-fast) var(--motion-ease), box-shadow var(--motion-fast) var(--motion-ease), transform var(--motion-fast) var(--motion-spring);
+}
+.settings-view :deep(.btn:hover), .settings-view :deep(.tbtn:hover) { transform: translateY(-1px); box-shadow: 0 5px 12px color-mix(in srgb, var(--text-primary) 10%, transparent); }
+.settings-view :deep(.btn:active), .settings-view :deep(.tbtn:active) { transform: scale(.96); }
+.settings-view :deep(.btn:focus-visible), .settings-view :deep(.tbtn:focus-visible), .theme-card:focus-visible, .pill-btn:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
 .sg-control-grow { flex: 1; min-width: 0; }
 .sg-control-grow .input { flex: 1; min-width: 160px; }
-.sg-range { width: 140px; cursor: pointer; accent-color: var(--color-primary); }
+.sg-range { width: 140px; height: 5px; cursor: pointer; accent-color: var(--color-primary); }
+.sg-range::-webkit-slider-thumb {
+  width: 16px; height: 16px; border: 2px solid var(--text-inverse); border-radius: 50%;
+  background: var(--color-primary); box-shadow: 0 2px 5px color-mix(in srgb, var(--color-primary) 45%, transparent);
+  transition: transform var(--motion-fast) var(--motion-spring);
+}
+.sg-range::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .sg-value-num { min-width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
 .log-path {
   display: block; max-width: 320px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .theme-card, .pill-btn, .settings-view :deep(.btn), .settings-view :deep(.tbtn), .sg-range::-webkit-slider-thumb { transition-duration: 1ms; }
 }
 </style>

@@ -18,18 +18,16 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	if token == nil {
 		return nil, drive.AuthExpired("天翼云盘未登录")
 	}
-	sess, err := sessionOf(token)
-	if err != nil {
+	if _, err := sessionOf(token); err != nil {
 		return nil, err
 	}
 	cc := c
 	cc.Token = token
-	isFamily, _ := cloudInfo(sess)
 	raw, err := d.request(ctx, cc, apiURL+"/portal/getUserSizeInfo.action", reqOptions{method: "GET", family: boolPtr(false)})
 	if err != nil {
 		return nil, err
 	}
-	usedSize, totalSize, ok := parsePan189Capacity(raw, isFamily)
+	usedSize, totalSize, ok := parsePan189Capacity(raw, false)
 	if !ok {
 		return nil, errors.New("天翼容量接口未返回有效空间信息")
 	}

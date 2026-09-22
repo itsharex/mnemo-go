@@ -30,7 +30,7 @@ func (d *Driver) RapidUploadByHash(ctx context.Context, c drive.Context, req dri
 	if err != nil {
 		return nil, err
 	}
-	isFamily, familyID := cloudInfo(sess)
+	isFamily, familyID := cloudInfoForID(sess, req.ParentID)
 	parentFolderID := toFolderID(req.ParentID)
 
 	// createUploadFile: 个人云 form / 家庭云 params。
@@ -59,6 +59,7 @@ func (d *Driver) RapidUploadByHash(ctx context.Context, c drive.Context, req dri
 			},
 		}
 	}
+	opts.family = boolPtr(isFamily)
 	raw, err := d.request(ctx, c, createURL, opts)
 	if err != nil {
 		return nil, err
@@ -109,7 +110,8 @@ func (d *Driver) RapidUploadByHash(ctx context.Context, c drive.Context, req dri
 	if committed.ID == "" {
 		return &drive.RapidUploadResult{Reuse: true, Message: "秒传命中"}, nil
 	}
-	return &drive.RapidUploadResult{Reuse: true, FileID: committed.ID, Message: "秒传命中"}, nil
+	space, _ := pan189SpaceID(req.ParentID)
+	return &drive.RapidUploadResult{Reuse: true, FileID: pan189FileID(space, committed.ID), Message: "秒传命中"}, nil
 }
 
 // ResolveTransferHash returns the md5 content hash of a source file

@@ -63,10 +63,11 @@ type App struct {
 	updateState    UpdateStatus
 	updateApplying bool
 
-	migrate      *migrate.Engine
-	schedStop    chan struct{} // sync scheduler stop, closed on Shutdown
-	shutdownOnce sync.Once
-	forceQuit    atomic.Bool
+	migrate         *migrate.Engine
+	schedStop       chan struct{} // 同步调度器停止信号，由 Shutdown 关闭
+	keepAliveCancel context.CancelFunc
+	shutdownOnce    sync.Once
+	forceQuit       atomic.Bool
 
 	accountRefreshMu         sync.Mutex
 	accountRefreshLast       map[string]time.Time
@@ -414,6 +415,7 @@ func (a *App) startup(ctx context.Context) {
 	if message := a.StartSyncScheduler(); message != "" {
 		logging.Warn("sync scheduler startup failed", "error", message)
 	}
+	a.startAccountKeepAlive()
 	a.emit("app:ready", map[string]any{"port": mediaProxy.Port})
 }
 
@@ -441,12 +443,16 @@ func (a *App) Shutdown(ctx context.Context) {
 		logging.Info("application shutdown started")
 		captcha.Close()
 		a.stateMu.Lock()
-		migrations, downloads, uploads, mediaProxy, stop := a.migrate, a.dl, a.uploads, a.preview, a.schedStop
+		migrations, downloads, uploads, mediaProxy, stop, keepAliveCancel := a.migrate, a.dl, a.uploads, a.preview, a.schedStop, a.keepAliveCancel
 		a.schedStop = nil
+		a.keepAliveCancel = nil
 		if stop != nil {
 			close(stop)
 		}
 		a.stateMu.Unlock()
+		if keepAliveCancel != nil {
+			keepAliveCancel()
+		}
 		a.cancelAllSyncRuns()
 		if migrations != nil {
 			migrations.CancelAll()
@@ -937,6 +943,11 @@ func markQuotaRefreshFailure(acc *model.Account, err error) {
 	if acc.Usage.Type == "unlimited" {
 		return
 	}
+	if errors.Is(err, drive.ErrUnauthorized) {
+		acc.Usage.Status = "expired"
+		acc.Usage.Description = "登录已失效，请重新登录"
+		return
+	}
 	message := strings.ToLower(fmt.Sprint(err))
 	for _, marker := range []string{"429", "too many", "rate limit", "risk", "captcha", "风控", "频繁", "限流"} {
 		if strings.Contains(message, marker) {
@@ -999,6 +1010,12 @@ func (a *App) markAccountRefreshFailure(userID string, err error) {
 // provider, persists the updated token, and returns the refreshed account.
 // The frontend calls this during startup or an explicit user refresh.
 func (a *App) RefreshAccount(userID string) (*model.Account, error) {
+	return a.refreshAccount(context.Background(), userID, true)
+}
+
+// refreshAccount 执行一次账号刷新。只有驱动明确返回 ErrUnauthorized 时才会
+// 移除本机账号；网络异常、限流和服务端错误仍会保留账号并进入冷却期。
+func (a *App) refreshAccount(ctx context.Context, userID string, removeOnUnauthorized bool) (*model.Account, error) {
 	started := time.Now()
 	logging.Debug("account refresh started", "account_id", redactID(userID))
 	st, err := a.storeOrError()
@@ -1022,9 +1039,9 @@ func (a *App) RefreshAccount(userID string) (*model.Account, error) {
 			syncAccountUsage(current)
 			return current, nil
 		}
-		tok, refreshErr := drive.RefreshAccount(userID, current.DriveID)
+		tok, refreshErr := drive.RefreshAccountContext(ctx, userID, current.DriveID)
 		if refreshErr != nil {
-			if errors.Is(refreshErr, drive.ErrUnauthorized) {
+			if removeOnUnauthorized && errors.Is(refreshErr, drive.ErrUnauthorized) {
 				a.handleDriveOperationError(userID, current.DriveID, refreshErr)
 				return nil, fmt.Errorf("网盘登录已失效，账号已从本机移除: %w", refreshErr)
 			}

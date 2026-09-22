@@ -301,6 +301,74 @@ func TestApplyPan139QuotaPreservesLastKnownValueOnMissingQuota(t *testing.T) {
 	}
 }
 
+func TestPan139RootListsPersonalAndFamilyVirtualFolders(t *testing.T) {
+	items, next, err := (&Driver{}).ListPage(t.Context(), drive.Context{DriveID: "pan139:test"}, RootID, "")
+	if err != nil || next != "" {
+		t.Fatalf("root list error=%v next=%q", err, next)
+	}
+	if len(items) != 2 || items[0].FileID != Pan139PersonalRoot || items[0].Name != "个人云" || items[1].FileID != Pan139FamilyRoot || items[1].Name != "家庭云" {
+		t.Fatalf("unexpected virtual roots: %+v", items)
+	}
+}
+
+func TestPan139FamilyListUsesFamilyServiceHeaders(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	authorization := encodeAuthorization("pc", "13800138000", fmt.Sprintf("token|a|b|%d", time.Now().Add(30*24*time.Hour).UnixMilli()))
+	netx.TestTransportHook = pan139RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "yun.139.com" || req.URL.Path != "/orchestration/familyCloud-rebuild/content/v1.2/queryContentList" {
+			return nil, fmt.Errorf("unexpected request %s", req.URL)
+		}
+		if req.Header.Get("X-Yun-Svc-Type") != "2" || req.Header.Get("x-SvcType") != "2" {
+			return nil, fmt.Errorf("family service headers missing: %#v", req.Header)
+		}
+		return pan139Response(req, http.StatusOK, nil, `{"success":true,"data":{"path":"/","cloudCatalogList":[{"catalogID":"folder-1","catalogName":"家庭资料"}],"cloudContentList":[{"contentID":"file-1","contentName":"家庭照片.jpg","contentSize":"42"}],"totalCount":2}}`), nil
+	})
+	c := drive.Context{DriveID: "pan139:test", Token: &model.TokenInfo{AccessToken: authorization, RefreshToken: mustJSON(map[string]string{"authorization": authorization, "account": "13800138000", "personalCloudHost": "https://personal.test", "familyCloudId": "family-1"})}}
+	items, next, err := (&Driver{}).ListPage(t.Context(), c, Pan139FamilyRoot, "")
+	if err != nil || next != "" || len(items) != 2 {
+		t.Fatalf("family list items=%+v next=%q error=%v", items, next, err)
+	}
+	if items[0].FileID != pan139FileID(pan139FamilySpace, "folder-1") || items[1].FileID != pan139FileID(pan139FamilySpace, "file-1") {
+		t.Fatalf("family ids lost namespace: %+v", items)
+	}
+}
+
+func TestPan139DiscoversAndStoresFamilyCloudID(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	authorization := encodeAuthorization("pc", "13800138000", fmt.Sprintf("token|a|b|%d", time.Now().Add(30*24*time.Hour).UnixMilli()))
+	netx.TestTransportHook = pan139RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "group.yun.139.com" || req.URL.Path != "/hcy/family/adapter/orchestration/familyCloud-rebuild/cloudManage/v1.0/queryFamilyCloud" {
+			return nil, fmt.Errorf("unexpected request %s", req.URL)
+		}
+		if req.Header.Get("X-Yun-Svc-Type") != "2" || req.Header.Get("Authorization") != "Basic "+authorization {
+			return nil, fmt.Errorf("family discovery request missing credentials: %#v", req.Header)
+		}
+		var body struct {
+			PageInfo struct {
+				PageNum  int `json:"pageNum"`
+				PageSize int `json:"pageSize"`
+			} `json:"pageInfo"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			return nil, err
+		}
+		if body.PageInfo.PageNum != 1 || body.PageInfo.PageSize != 100 {
+			return nil, fmt.Errorf("unexpected family page request: %+v", body.PageInfo)
+		}
+		return pan139Response(req, http.StatusOK, nil, `{"success":true,"data":{"familyCloudList":[{"cloudID":"family-1"}]}}`), nil
+	})
+	token := &model.TokenInfo{AccessToken: authorization, RefreshToken: mustJSON(map[string]string{"authorization": authorization, "account": "13800138000", "personalCloudHost": "https://personal.test", "keep": "metadata"})}
+	id, err := (&Driver{}).discoverPan139FamilyCloudID(t.Context(), drive.Context{Token: token})
+	if err != nil || id != "family-1" {
+		t.Fatalf("family id=%q err=%v", id, err)
+	}
+	if got := pan139FamilyCloudID(drive.Context{Token: token}); got != "family-1" || !strings.Contains(token.RefreshToken, "metadata") {
+		t.Fatalf("family ID or metadata was not persisted: %s", token.RefreshToken)
+	}
+}
+
 func TestPan139SMSPublicKeyEncryptsAccountName(t *testing.T) {
 	ciphertext, err := rsaEncryptPan139LoginName("13800138000")
 	if err != nil {

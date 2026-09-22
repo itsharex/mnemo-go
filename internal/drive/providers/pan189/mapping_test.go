@@ -27,10 +27,10 @@ func TestToFolderID(t *testing.T) {
 }
 
 func TestDisplayParent(t *testing.T) {
-	if got := displayParent(Pan189DefaultFolder); got != PAN189Root {
-		t.Errorf("displayParent(-11) = %q, want %q", got, PAN189Root)
+	if got := displayParent(Pan189DefaultFolder); got != PAN189PersonalRoot {
+		t.Errorf("displayParent(-11) = %q, want %q", got, PAN189PersonalRoot)
 	}
-	if got := displayParent("abc"); got != "abc" {
+	if got := displayParent("abc"); got != pan189FileID(spacePersonal, "abc") {
 		t.Errorf("displayParent(abc) = %q", got)
 	}
 }
@@ -41,12 +41,12 @@ func TestMapFile(t *testing.T) {
 		ID: "f1", Name: "a.txt", Size: 1024, MD5: "D41D8CD98F00B204E9800998ECF8427E",
 		LastOpTime: "2024-01-02 15:04:05", CreateDate: "2024-01-01 00:00:00",
 		SmallURL: "https://img/s.png", LargeURL: "https://img/l.png",
-	}, "pan189:uid", "-11")
-	if f.FileID != "f1" || f.Name != "a.txt" {
+	}, "pan189:uid", spacePersonal, "-11")
+	if f.FileID != pan189FileID(spacePersonal, "f1") || f.Name != "a.txt" {
 		t.Fatalf("basic mapping wrong: %+v", f)
 	}
-	if f.ParentFileID != PAN189Root {
-		t.Fatalf("parent should be pan189_root, got %q", f.ParentFileID)
+	if f.ParentFileID != PAN189PersonalRoot {
+		t.Fatalf("parent should be pan189_personal_root, got %q", f.ParentFileID)
 	}
 	if f.IsDir {
 		t.Fatal("a.txt should be a file")
@@ -69,8 +69,8 @@ func TestMapFile(t *testing.T) {
 	}
 
 	// folder in a nested directory keeps the real parent
-	dir := mapFile(pan189File{ID: "d1", Name: "folder", IsFolder: true, LastOpTime: "2024-03-04 05:06:07"}, "pan189:uid", "p1")
-	if !dir.IsDir || dir.ParentFileID != "p1" {
+	dir := mapFile(pan189File{ID: "d1", Name: "folder", IsFolder: true, LastOpTime: "2024-03-04 05:06:07"}, "pan189:uid", spacePersonal, "p1")
+	if !dir.IsDir || dir.ParentFileID != pan189FileID(spacePersonal, "p1") {
 		t.Fatalf("folder mapping wrong: %+v", dir)
 	}
 	if dir.ContentHash != "" {
@@ -79,7 +79,7 @@ func TestMapFile(t *testing.T) {
 }
 
 func TestMapFileThumbnailFallback(t *testing.T) {
-	f := mapFile(pan189File{ID: "f1", Name: "x.jpg", LargeURL: "https://img/l.png"}, "pan189:uid", "p1")
+	f := mapFile(pan189File{ID: "f1", Name: "x.jpg", LargeURL: "https://img/l.png"}, "pan189:uid", spacePersonal, "p1")
 	if f.Thumbnail != "https://img/l.png" {
 		t.Fatalf("thumbnail fallback = %q", f.Thumbnail)
 	}

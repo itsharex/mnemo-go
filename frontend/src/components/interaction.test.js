@@ -69,7 +69,7 @@ const api = vi.hoisted(() => ({
   onEvent: vi.fn(() => () => {}),
   ClosePikPakCaptcha: vi.fn(),
   ShowPikPakCaptcha: vi.fn(),
-  refreshAccount: vi.fn(),
+  refreshAccountSilently: vi.fn(),
   refreshAccountNow: vi.fn(),
   accountName: vi.fn((account) => account?.user_id || ''),
   providerMetaOf: vi.fn(() => ({ key: 'webdav', label: 'WebDAV' })),
@@ -521,7 +521,7 @@ describe('关键交互组件', () => {
     expect(wrapper.text()).not.toContain('重新加载的文件.txt')
     vi.unstubAllGlobals()
   })
-  it('账号登录失效后提示本地清理，并从原网盘重新登录', async () => {
+  it('账号登录失效后提示本地清理，但不自动打开重新登录窗口', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
     const handlers = new Map()
     api.onEvent.mockImplementation((name, fn) => { handlers.set(name, fn); return () => handlers.delete(name) })
@@ -538,15 +538,10 @@ describe('关键交互组件', () => {
     handlers.get('account:expired')({ userId: 'dropbox_expired', provider: 'dropbox', accountName: '工作盘' })
     await flushPromises()
 
-    expect(document.body.textContent).toContain('Dropbox 登录已失效')
+    expect(document.body.textContent).toContain('Dropbox')
     expect(document.body.textContent).toContain('已从本机移除')
     expect(document.body.textContent).toContain('云端文件不会被删除')
-    const relogin = [...document.querySelectorAll('.modal button')].find(button => button.textContent.trim() === '重新登录')
-    expect(relogin).toBeTruthy()
-    relogin.click()
-    await flushPromises()
-    expect(wrapper.findComponent(LoginModal).props('initialProvider')).toBe('dropbox')
-    expect(document.querySelector('.lp-item.active')?.textContent).toContain('Dropbox')
+    expect(wrapper.findComponent(LoginModal).exists()).toBe(false)
     vi.unstubAllGlobals()
   })
   it('手动检查无更新时明确显示当前版本，不自动关闭', async () => {
@@ -1248,7 +1243,7 @@ describe('关键交互组件', () => {
     expect(document.body.querySelector('[role="switch"]').getAttribute('aria-checked')).toBe('false')
   })
 
-  it('普通蓝奏和天翼云使用内置选择项及安全默认值', async () => {
+  it('普通蓝奏使用内置选择项，天翼云不再要求选择云空间', async () => {
     localStorage.setItem('login_provider', 'lanzou')
     const lanzou = mountAttached(LoginModal, {
       props: {
@@ -1279,19 +1274,13 @@ describe('关键交互组件', () => {
           ID: 'pan189', Meta: { label: '天翼云盘' }, Login: { fields: [
             { key: 'username', type: 'text', label: '账号', required: true },
             { key: 'password', type: 'password', label: '密码', required: true },
-            { key: 'cloud_type', type: 'select', label: '云空间', options: [
-              { value: 'personal', label: '个人云' },
-              { value: 'family', label: '家庭云' },
-            ] },
           ] },
         }],
       },
       global: { stubs: { UiIcon: true } },
     })
     await nextTick()
-    const cloudType = pan189.findComponent(UiSelect)
-    expect(cloudType.props('modelValue')).toBe('personal')
-    expect(cloudType.props('options')).toContainEqual({ value: 'family', label: '家庭云' })
+    expect(pan189.findAllComponents(UiSelect)).toHaveLength(0)
   })
 
   it.each(['pan139', 'pan189'])('%s 可主动选择短信登录且不要求密码', async (id) => {
@@ -1345,7 +1334,7 @@ describe('关键交互组件', () => {
     const wrapper = mountAttached(LoginModal, {
       props: {
         providers: [{
-          ID: 'pan139', Meta: { label: '139 云盘' }, Login: { fields: [
+          ID: 'pan139', Meta: { label: '移动云盘' }, Login: { fields: [
             { key: 'login_mode', type: 'select', label: '登录方式', required: true, options: [] },
             { key: 'username', type: 'text', label: '手机号/账号', required: true },
             { key: 'password', type: 'password', label: '密码', required: false },
@@ -1459,13 +1448,13 @@ describe('关键交互组件', () => {
 
   it('账号容量在启动同步，并支持右上角手动同步', async () => {
     vi.useFakeTimers()
-    api.refreshAccount.mockResolvedValue({ user_id: 'quota-dedupe', token: {}, usage: { size: 100, used: 20 } })
+    api.refreshAccountSilently.mockResolvedValue({ user_id: 'quota-dedupe', token: {}, usage: { size: 100, used: 20 } })
     api.refreshAccountNow.mockResolvedValue({ user_id: 'quota-dedupe', token: {}, usage: { size: 100, used: 20 } })
     const account = { user_id: 'quota-dedupe', token: {}, usage: null }
     const wrapper = mountAttached(AccountAvatar, { props: { account, providers: [] }, global: { stubs: { UiIcon: true } } })
 
     await vi.runAllTicks()
-    expect(api.refreshAccount).toHaveBeenCalledTimes(1)
+    expect(api.refreshAccountSilently).toHaveBeenCalledTimes(1)
     expect(api.refreshAccountNow).not.toHaveBeenCalled()
     await wrapper.get('.acc-ava').trigger('mouseenter')
     await vi.advanceTimersByTimeAsync(120)

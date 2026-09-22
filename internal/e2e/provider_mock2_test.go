@@ -1290,7 +1290,7 @@ func TestPan139ListMock(t *testing.T) {
 		RefreshToken: `{"authorization":"` + authorization + `","account":"account","personalCloudHost":"https://api.mail.10086.cn"}`,
 	})
 
-	names := listNames(t, uid, did, "pan139_root")
+	names := listNames(t, uid, did, "pan139_personal_root")
 	if len(names) != 2 || names[0] != "data.zip" {
 		t.Fatalf("pan139 names: %v", names)
 	}
@@ -1417,7 +1417,7 @@ func TestPan139FileOperationsMock(t *testing.T) {
 		RefreshToken: `{"authorization":"` + authorization + `","account":"account","personalCloudHost":"https://api.mail.10086.cn"}`,
 	})
 
-	page, err := drive.ListDirPage(uid, did, "pan139_root", "", nil)
+	page, err := drive.ListDirPage(uid, did, "pan139_personal_root", "", nil)
 	if err != nil || page == nil || len(page.Items) != 1 || page.NextMarker != "cursor-2" {
 		t.Fatalf("list page = %#v, err=%v", page, err)
 	}
@@ -1429,17 +1429,17 @@ func TestPan139FileOperationsMock(t *testing.T) {
 	if err != nil || download.URL != "https://cdn.example.com/movie.mp4" || download.Size != 9 {
 		t.Fatalf("download = %#v, err=%v", download, err)
 	}
-	folder, err := drive.Mkdir(uid, did, "pan139_root", "docs")
-	if err != nil || folder.FileID != "202" || folder.Error != "" {
+	folder, err := drive.Mkdir(uid, did, "pan139_personal_root", "docs")
+	if err != nil || folder.FileID != "pan139:personal:202" || folder.Error != "" {
 		t.Fatalf("mkdir = %#v, err=%v", folder, err)
 	}
 	if _, err := drive.RenameBatch(uid, did, []drive.FileRef{{ID: "101"}}, []string{"renamed.mp4"}); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	if _, err := drive.MoveBatch(uid, did, []drive.FileRef{{ID: "101"}}, "pan139_root", ""); err != nil {
+	if _, err := drive.MoveBatch(uid, did, []drive.FileRef{{ID: "101"}}, "pan139_personal_root", ""); err != nil {
 		t.Fatalf("move: %v", err)
 	}
-	if _, err := drive.CopyBatch(uid, did, []drive.FileRef{{ID: "101"}}, "pan139_root", ""); err != nil {
+	if _, err := drive.CopyBatch(uid, did, []drive.FileRef{{ID: "101"}}, "pan139_personal_root", ""); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 	if _, err := drive.TrashBatch(uid, did, []string{"101"}); err != nil {

@@ -640,16 +640,12 @@ func pickMatch(text, pattern string) string {
 	return m[1]
 }
 
-// login189 implements the provider AuthFunc (账户+密码; optionally 家庭云).
-// Form keys: username / password / cloud_type (personal|family) /
-// validate_code (captcha retry).
+// login189 implements the provider AuthFunc. A successful login keeps both
+// personal and family sessions and the driver exposes them as two root entries.
+// Form keys: username / password / validate_code (captcha retry).
 func login189(ctx context.Context, req drive.AuthRequest) (*model.TokenInfo, error) {
 	username := strings.TrimSpace(req.Config["username"])
 	password := req.Config["password"]
-	cloudType := strings.ToLower(strings.TrimSpace(req.Config["cloud_type"]))
-	if cloudType != CloudFamily {
-		cloudType = CloudPersonal
-	}
 	validateCode := req.Config["validate_code"]
 
 	var session *Session
@@ -667,39 +663,33 @@ func login189(ctx context.Context, req drive.AuthRequest) (*model.TokenInfo, err
 		uid = username
 	}
 
-	if cloudType == CloudFamily {
-		if session.FamilySessionKey == "" || session.FamilySessionSecret == "" {
-			return nil, errors.New("该账号未开通家庭云，请先在官方 App 中创建或加入家庭")
-		}
+	// Family cloud is optional for an account. Its absence must not prevent the
+	// personal account from being added; the virtual family root will explain
+	// the missing entitlement when opened.
+	if session.FamilySessionKey != "" && session.FamilySessionSecret != "" {
 		families, err := getFamilyList(ctx, session)
 		if err != nil {
-			return nil, err
-		}
-		if len(families) == 0 {
-			return nil, errors.New("该账号未加入任何家庭云，请先在官方 App 中创建或加入家庭")
-		}
-		family := families[0]
-		for _, f := range families {
-			if f.RemarkName != "" && strings.Contains(uid, f.RemarkName) {
-				family = f
-				break
+			// A transient family-list failure must not make a valid personal
+			// login unusable. Keep the session; opening 家庭云 can retry later.
+			_ = err
+		} else if len(families) > 0 {
+			family := families[0]
+			for _, f := range families {
+				if f.RemarkName != "" && strings.Contains(uid, f.RemarkName) {
+					family = f
+					break
+				}
+			}
+			session.FamilyID = family.FamilyID
+			session.FamilyName = family.RemarkName
+			if session.FamilyName == "" {
+				session.FamilyName = "家庭云"
 			}
 		}
-		session.CloudType = CloudFamily
-		session.FamilyID = family.FamilyID
-		session.FamilyName = family.RemarkName
-		if session.FamilyName == "" {
-			session.FamilyName = "家庭云"
-		}
-	} else {
-		session.CloudType = CloudPersonal
 	}
+	session.CloudType = CloudPersonal
 
-	isFamily := session.CloudType == CloudFamily
 	accountID := uid
-	if isFamily {
-		accountID = uid + "_family"
-	}
 	name := uid
 	tok := &model.TokenInfo{
 		TokenFrom:         providerID,

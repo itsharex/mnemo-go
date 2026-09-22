@@ -70,6 +70,30 @@ func persistToken(c Context) error {
 	return tokenUpdater(c.UserID, c.DriveID, CloneToken(c.Token))
 }
 
+// ReloadToken replaces a provider operation's token contents with the newest
+// persisted copy. Providers that rotate credentials while serializing their
+// own requests use it after obtaining that serialization lock, preventing a
+// queued request from retrying with a stale cloned refresh token.
+func ReloadToken(c Context) error {
+	if tokenResolver == nil || c.Token == nil {
+		return nil
+	}
+	latest, err := tokenResolver(c.UserID, c.DriveID)
+	if err != nil {
+		return err
+	}
+	if latest == nil {
+		return ErrUnauthorized
+	}
+	*c.Token = *CloneToken(latest)
+	return nil
+}
+
+// PersistToken writes a provider-rotated token before its account-scoped
+// serialization lock is released. The normal facade defer remains in place
+// as a final safeguard for callers that do not need immediate persistence.
+func PersistToken(c Context) error { return persistToken(c) }
+
 func withTokenPersist(opErr error, c Context) error {
 	opErr = classifyCodedAuthenticationError(opErr)
 	result := errors.Join(opErr, persistToken(c))
@@ -378,10 +402,12 @@ func GetFileInfo(userID, driveID, fileID string) (info any, err error) {
 	return d.GetInfo(context.Background(), c, fileID)
 }
 
-// RefreshAccount refreshes an account's quota + profile from the provider and
-// returns the updated token (or the original on unsupported/error). Silent +
-// low-frequency caller (frontend avatar/quota popover refresh).
-func RefreshAccount(userID, driveID string) (token *model.TokenInfo, err error) {
+// RefreshAccountContext 刷新账号会话、容量和资料，并保留调用方的取消信号。
+// 返回更新后的令牌；不支持刷新时由驱动返回原令牌或 nil。
+func RefreshAccountContext(ctx context.Context, userID, driveID string) (token *model.TokenInfo, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	d, c, err := driverAndCtx(userID, driveID)
 	if err != nil {
 		return nil, err
@@ -390,12 +416,17 @@ func RefreshAccount(userID, driveID string) (token *model.TokenInfo, err error) 
 	if tok == nil {
 		return nil, ErrUnknownProvider
 	}
-	token, err = d.RefreshAccount(context.Background(), c, tok)
+	token, err = d.RefreshAccount(ctx, c, tok)
 	if token != nil && token != c.Token {
 		c.Token = token
 	}
 	err = withTokenPersist(err, c)
 	return token, err
+}
+
+// RefreshAccount 刷新账号会话、容量和资料。前台调用不需要传入上下文。
+func RefreshAccount(userID, driveID string) (token *model.TokenInfo, err error) {
+	return RefreshAccountContext(context.Background(), userID, driveID)
 }
 
 // ValidateUploadItems applies an optional provider upload policy before local

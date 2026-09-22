@@ -19,12 +19,12 @@ import (
 )
 
 // uploadBase returns the personal/family upload root.
-func (d *Driver) uploadBase(ctx context.Context, c drive.Context) (string, error) {
+func (d *Driver) uploadBase(ctx context.Context, c drive.Context, parentID string) (string, error) {
 	sess, err := sessionOf(c.Token)
 	if err != nil {
 		return "", err
 	}
-	isFamily, _ := cloudInfo(sess)
+	isFamily, _ := cloudInfoForID(sess, parentID)
 	base := uploadURL + "/person"
 	if isFamily {
 		base = uploadURL + "/family"
@@ -39,12 +39,13 @@ type uploadInitResult struct {
 }
 
 // initMultiUpload creates the upload session (AList initMultiUpload).
-func (d *Driver) initMultiUpload(ctx context.Context, c drive.Context, base, parentFolderID, fileName string, size, slice int64, count int, fileMD5, sliceMD5 string) (*uploadInitResult, error) {
+func (d *Driver) initMultiUpload(ctx context.Context, c drive.Context, base, parentID, fileName string, size, slice int64, count int, fileMD5, sliceMD5 string) (*uploadInitResult, error) {
 	sess, err := sessionOf(c.Token)
 	if err != nil {
 		return nil, err
 	}
-	_, familyID := cloudInfo(sess)
+	isFamily, familyID := cloudInfoForID(sess, parentID)
+	parentFolderID := toFolderID(parentID)
 	params := map[string]string{
 		"parentFolderId": parentFolderID,
 		"fileName":       url.QueryEscape(fileName),
@@ -62,7 +63,7 @@ func (d *Driver) initMultiUpload(ctx context.Context, c drive.Context, base, par
 	if familyID != "" {
 		params["familyId"] = familyID
 	}
-	raw, err := d.request(ctx, c, base+"/initMultiUpload", reqOptions{method: "GET", params: params})
+	raw, err := d.request(ctx, c, base+"/initMultiUpload", reqOptions{method: "GET", params: params, family: boolPtr(isFamily)})
 	if err != nil {
 		return nil, err
 	}
@@ -80,11 +81,16 @@ func (d *Driver) initMultiUpload(ctx context.Context, c drive.Context, base, par
 }
 
 // commitMultiUploadFile finalises the upload (AList commitMultiUploadFile).
-func (d *Driver) commitMultiUploadFile(ctx context.Context, c drive.Context, base, uploadFileID, fileMD5, sliceMD5 string, overwrite bool) (string, error) {
+func (d *Driver) commitMultiUploadFile(ctx context.Context, c drive.Context, base, parentID, uploadFileID, fileMD5, sliceMD5 string, overwrite bool) (string, error) {
 	opertype := "1"
 	if overwrite {
 		opertype = "3"
 	}
+	sess, err := sessionOf(c.Token)
+	if err != nil {
+		return "", err
+	}
+	isFamily, _ := cloudInfoForID(sess, parentID)
 	raw, err := d.request(ctx, c, base+"/commitMultiUploadFile", reqOptions{
 		method: "GET",
 		params: map[string]string{
@@ -95,6 +101,7 @@ func (d *Driver) commitMultiUploadFile(ctx context.Context, c drive.Context, bas
 			"isLog":        "0",
 			"opertype":     opertype,
 		},
+		family: boolPtr(isFamily),
 	})
 	if err != nil {
 		return "", err
@@ -116,10 +123,16 @@ func (d *Driver) commitMultiUploadFile(ctx context.Context, c drive.Context, bas
 
 // getUploadURLs fetches one part's pre-signed PUT url + headers. The response
 // maps the requested part index to its entry under uploadUrls/data.
-func (d *Driver) getUploadURLs(ctx context.Context, c drive.Context, base, uploadFileID, partInfo string, partIndex int) (string, map[string]string, error) {
+func (d *Driver) getUploadURLs(ctx context.Context, c drive.Context, base, parentID, uploadFileID, partInfo string, partIndex int) (string, map[string]string, error) {
+	sess, err := sessionOf(c.Token)
+	if err != nil {
+		return "", nil, err
+	}
+	isFamily, _ := cloudInfoForID(sess, parentID)
 	raw, err := d.request(ctx, c, base+"/getMultiUploadUrls", reqOptions{
 		method: "GET",
 		params: map[string]string{"uploadFileId": uploadFileID, "partInfo": partInfo},
+		family: boolPtr(isFamily),
 	})
 	if err != nil {
 		return "", nil, err
@@ -301,7 +314,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	if count < 1 {
 		count = 1
 	}
-	parentFolderID := toFolderID(ui.Info.ParentFileID)
+	parentID := ui.Info.ParentFileID
 	fileName := ui.Info.Name
 
 	// 单遍预计算 整文件MD5 + 各分片MD5 + partInfo（对齐 AList FastUpload）。
@@ -318,7 +331,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 		sliceMD5Hex = strings.ToUpper(hexEncode(md5Sum([]byte(strings.Join(sliceMD5Hexs, "\n")))))
 	}
 
-	base, err := d.uploadBase(ctx, c)
+	base, err := d.uploadBase(ctx, c, parentID)
 	if err != nil {
 		return err
 	}
@@ -326,11 +339,11 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	// Resume before initializing a new remote session. The service creates a
 	// new uploadFileId on every init request, so loading state afterwards can
 	// never resume the saved session.
-	sessionKey := pan189UploadSessionKey(c, parentFolderID, fileName, size, fileMD5Hex)
+	sessionKey := pan189UploadSessionKey(c, parentID, fileName, size, fileMD5Hex)
 	savedSessionID, savedParts := drive.LoadUploadSessionState(sessionKey)
 	uploadFileID, uploadedSet := restorePan189UploadState(savedSessionID, savedParts, count)
 	if uploadFileID == "" {
-		initRes, err := d.initMultiUpload(ctx, c, base, parentFolderID, fileName, size, slice, count, fileMD5Hex, sliceMD5Hex)
+		initRes, err := d.initMultiUpload(ctx, c, base, parentID, fileName, size, slice, count, fileMD5Hex, sliceMD5Hex)
 		if err != nil {
 			return err
 		}
@@ -340,12 +353,13 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 		}
 		if initRes.FileDataExists == 1 {
 			// 服务端按 MD5 命中已存在文件，免上传提交。
-			fileID, err := d.commitMultiUploadFile(ctx, c, base, uploadFileID, fileMD5Hex, sliceMD5Hex, false)
+			fileID, err := d.commitMultiUploadFile(ctx, c, base, parentID, uploadFileID, fileMD5Hex, sliceMD5Hex, false)
 			if err != nil {
 				return err
 			}
 			drive.ClearUploadSession(sessionKey)
-			ui.Upload.FileID = fileID
+			space, _ := pan189SpaceID(parentID)
+			ui.Upload.FileID = pan189FileID(space, fileID)
 			setUploadState(ui, size, size)
 			return nil
 		}
@@ -368,7 +382,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 		if uploadedSet[i] {
 			continue
 		}
-		uploadURLStr, headers, err := d.getUploadURLs(ctx, c, base, uploadFileID, partInfo, i)
+		uploadURLStr, headers, err := d.getUploadURLs(ctx, c, base, parentID, uploadFileID, partInfo, i)
 		if err != nil {
 			return err
 		}
@@ -385,12 +399,13 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 		setUploadState(ui, uploaded, size)
 	}
 
-	fileID, err := d.commitMultiUploadFile(ctx, c, base, uploadFileID, fileMD5Hex, sliceMD5Hex, false)
+	fileID, err := d.commitMultiUploadFile(ctx, c, base, parentID, uploadFileID, fileMD5Hex, sliceMD5Hex, false)
 	if err != nil {
 		return err
 	}
 	drive.ClearUploadSession(sessionKey)
-	ui.Upload.FileID = fileID
+	space, _ := pan189SpaceID(parentID)
+	ui.Upload.FileID = pan189FileID(space, fileID)
 	setUploadState(ui, size, size)
 	return nil
 }

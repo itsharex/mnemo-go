@@ -123,7 +123,7 @@ const PRESET_ICONS = [
   { id: 'dropbox.svg', label: 'Dropbox' },
   { id: 'pan123.svg', label: '123 云盘' },
   { id: 'pan189.svg', label: '天翼云盘' },
-  { id: 'pan139.svg', label: '139 云盘' },
+  { id: 'pan139.svg', label: '移动云盘' },
   { id: 'lanzou.svg', label: '蓝奏云' },
   { id: 'ilanzou.svg', label: '优享蓝奏' },
   { id: 'guangya.svg', label: '光鸭云' },
@@ -274,14 +274,7 @@ function handleAccountExpired(event) {
   }
   refresh()
   const subject = account ? `「${account}」` : '该账号'
-  askConfirm(
-    `${subject}的登录凭据已过期，账号已从本机移除；云端文件不会被删除。重新登录后即可继续使用。`,
-    () => {
-      loginProvider.value = provider
-      showLogin.value = true
-    },
-    { title: `${providerName} 登录已失效`, okText: '重新登录', cancelText: '稍后' },
-  )
+  toast(`${providerName}${subject}的登录凭据已过期，账号已从本机移除；云端文件不会被删除，请在需要时重新登录。`, 'warn')
 }
 
 function closeLogin() {

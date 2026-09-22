@@ -43,10 +43,6 @@ func init() {
 			{Key: "username", Type: "text", Label: "手机号/邮箱", Required: true},
 			{Key: "password", Type: "password", Label: "密码", Required: true},
 			{Key: "sms_code", Type: "text", Label: "短信验证码", Required: false},
-			{Key: "cloud_type", Type: "select", Label: "云空间", Required: false, Options: []drive.LoginOption{
-				{Value: CloudPersonal, Label: "个人云"},
-				{Value: CloudFamily, Label: "家庭云"},
-			}},
 			{Key: "validate_code", Type: "text", Label: "图形验证码（需要时填写）", Required: false, Hint: "登录提示需要验证码时，输入图片中的字符后重试"},
 		}},
 		Factory: func() drive.Driver { return &Driver{} },
@@ -68,11 +64,18 @@ func (d *Driver) RootID() string                   { return PAN189Root }
 // listPage fetches one page (pageNum starts at 1). done mirrors the legacy
 // "no items → last page" heuristic.
 func (d *Driver) listPage(ctx context.Context, c drive.Context, dirID string, pageNum int) ([]model.File, bool, error) {
+	if dirID == PAN189Root || dirID == "" || dirID == "root" || dirID == "/" {
+		if pageNum > 1 {
+			return nil, true, nil
+		}
+		return pan189RootEntries(c.DriveID), true, nil
+	}
 	sess, err := sessionOf(c.Token)
 	if err != nil {
 		return nil, true, err
 	}
-	isFamily, familyID := cloudInfo(sess)
+	space, _ := pan189SpaceID(dirID)
+	isFamily, familyID := cloudInfoForID(sess, dirID)
 	parent := toFolderID(dirID)
 	var (
 		rawURL string
@@ -93,7 +96,7 @@ func (d *Driver) listPage(ctx context.Context, c drive.Context, dirID string, pa
 			"orderBy": "filename", "descending": "false",
 		}
 	}
-	raw, err := d.request(ctx, c, rawURL, reqOptions{method: "GET", query: query})
+	raw, err := d.request(ctx, c, rawURL, reqOptions{method: "GET", query: query, family: boolPtr(isFamily)})
 	if err != nil {
 		return nil, true, err
 	}
@@ -120,10 +123,13 @@ func (d *Driver) listPage(ctx context.Context, c drive.Context, dirID string, pa
 		if err := json.Unmarshal(rf, &f); err != nil {
 			return nil, true, fmt.Errorf("pan189: 文件夹解析失败: %w", err)
 		}
+		if strings.TrimSpace(string(f.ID)) == "" {
+			return nil, true, errors.New("pan189: 目录响应包含空白或重复的文件 ID")
+		}
 		items = append(items, mapFile(pan189File{
 			ID: string(f.ID), Name: f.Name, LastOpTime: f.LastOpTime, CreateDate: f.CreateDate,
 			IsFolder: true,
-		}, c.DriveID, parent))
+		}, c.DriveID, space, parent))
 	}
 	for _, rf := range res.FileListAO.FileList {
 		var f struct {
@@ -141,11 +147,14 @@ func (d *Driver) listPage(ctx context.Context, c drive.Context, dirID string, pa
 		if err := json.Unmarshal(rf, &f); err != nil {
 			return nil, true, fmt.Errorf("pan189: 文件解析失败: %w", err)
 		}
+		if strings.TrimSpace(string(f.ID)) == "" {
+			return nil, true, errors.New("pan189: 目录响应包含空白或重复的文件 ID")
+		}
 		items = append(items, mapFile(pan189File{
 			ID: string(f.ID), Name: f.Name, Size: f.Size, MD5: f.MD5,
 			LastOpTime: f.LastOpTime, CreateDate: f.CreateDate,
 			SmallURL: f.Icon.SmallURL, LargeURL: f.Icon.LargeURL,
-		}, c.DriveID, parent))
+		}, c.DriveID, space, parent))
 	}
 	seen := make(map[string]bool, len(items))
 	for _, item := range items {
@@ -208,6 +217,15 @@ func markerNext(pageNum int, done bool) string {
 func (d *Driver) GetInfo(ctx context.Context, c drive.Context, fileID string) (any, error) {
 	if fileID == PAN189Root || fileID == "-11" || fileID == "root" || fileID == "/" {
 		f := driveutil.NewFile(c.DriveID, PAN189Root, "", "天翼云盘", true, 0, 0)
+		f.Icon = "iconfile-folder"
+		return f, nil
+	}
+	if fileID == PAN189PersonalRoot || fileID == PAN189FamilyRoot {
+		name := "个人云"
+		if fileID == PAN189FamilyRoot {
+			name = "家庭云"
+		}
+		f := driveutil.NewFile(c.DriveID, fileID, PAN189Root, name, true, 0, 0)
 		f.Icon = "iconfile-folder"
 		return f, nil
 	}
@@ -285,7 +303,7 @@ func expireTimeFromURL(downloadURL string) int64 {
 }
 
 func (d *Driver) downloadInfo(ctx context.Context, c drive.Context, fileID string) (string, int64, error) {
-	id := toFolderID(fileID)
+	_, id := pan189SpaceID(fileID)
 	if id == Pan189DefaultFolder {
 		return "", 0, errors.New("文件夹不能直接下载")
 	}
@@ -293,7 +311,7 @@ func (d *Driver) downloadInfo(ctx context.Context, c drive.Context, fileID strin
 	if err != nil {
 		return "", 0, err
 	}
-	isFamily, familyID := cloudInfo(sess)
+	isFamily, familyID := cloudInfoForID(sess, fileID)
 	var (
 		rawURL string
 		query  map[string]string
@@ -305,7 +323,7 @@ func (d *Driver) downloadInfo(ctx context.Context, c drive.Context, fileID strin
 		rawURL = apiURL + "/getFileDownloadUrl.action"
 		query = map[string]string{"fileId": id, "dt": "3", "flag": "1"}
 	}
-	raw, err := d.request(ctx, c, rawURL, reqOptions{method: "GET", query: query})
+	raw, err := d.request(ctx, c, rawURL, reqOptions{method: "GET", query: query, family: boolPtr(isFamily)})
 	if err != nil {
 		return "", 0, err
 	}
@@ -374,10 +392,10 @@ func (d *Driver) GetVideoPreview(ctx context.Context, c drive.Context, fileID st
 
 // mapFile converts a raw list entry to the unified model. The root folder
 // (-11) is surfaced as pan189_root; md5 is carried as the content hash.
-func mapFile(it pan189File, driveID, parentID string) model.File {
-	parent := displayParent(parentID)
+func mapFile(it pan189File, driveID, space, parentID string) model.File {
+	parent := pan189FileID(space, parentID)
 	timeUnix := parseTime(it.LastOpTime, it.CreateDate)
-	f := driveutil.NewFile(driveID, it.ID, parent, it.Name, it.IsFolder, it.Size, timeUnix)
+	f := driveutil.NewFile(driveID, pan189FileID(space, it.ID), parent, it.Name, it.IsFolder, it.Size, timeUnix)
 	if !it.IsFolder {
 		f.ContentHash = it.MD5
 		if it.MD5 != "" {
@@ -390,6 +408,19 @@ func mapFile(it pan189File, driveID, parentID string) model.File {
 		}
 	}
 	return f
+}
+
+func pan189RootEntries(driveID string) []model.File {
+	entries := make([]model.File, 0, 2)
+	for _, item := range []struct{ id, name string }{
+		{PAN189PersonalRoot, "个人云"},
+		{PAN189FamilyRoot, "家庭云"},
+	} {
+		f := driveutil.NewFile(driveID, item.id, PAN189Root, item.name, true, 0, 0)
+		f.Icon = "iconfile-folder"
+		entries = append(entries, f)
+	}
+	return entries
 }
 
 // parseTime parses "2006-01-02 15:04:05" (+08:00) or RFC3339, defaulting to

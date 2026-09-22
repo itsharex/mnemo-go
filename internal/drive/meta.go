@@ -25,7 +25,7 @@ var builtinMetas = map[string]Meta{
 	model.ProviderPan123:   {Key: "pan123", Label: "123 云盘", Icon: "drive-icons/pan123.svg"},
 	model.ProviderLanzou:   {Key: "lanzou", Label: "蓝奏云", Icon: "drive-icons/lanzou.svg"},
 	model.ProviderIlanzou:  {Key: "ilanzou", Label: "优享版蓝奏云", Icon: "drive-icons/ilanzou.svg"},
-	model.ProviderPan139:   {Key: "pan139", Label: "139 云盘", Icon: "drive-icons/pan139.svg"},
+	model.ProviderPan139:   {Key: "pan139", Label: "移动云盘", Icon: "drive-icons/pan139.svg"},
 	model.ProviderPan189:   {Key: "pan189", Label: "天翼云盘", Icon: "drive-icons/pan189.svg"},
 	model.ProviderYike:     {Key: "yike", Label: "一刻相册", Icon: "drive-icons/yike.svg"},
 	model.ProviderAliopen:  {Key: "aliopen", Label: "阿里云盘", Icon: "drive-icons/aliopen.svg"},

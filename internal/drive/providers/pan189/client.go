@@ -64,10 +64,22 @@ func saveSession(tok *model.TokenInfo, s *Session) {
 	}
 }
 
-// cloudInfo returns the mounted cloud kind and family id for a session.
+// cloudInfo returns the legacy mounted cloud kind. New operations should use
+// cloudInfoForID so both virtual roots can coexist in one account.
 func cloudInfo(s *Session) (isFamily bool, familyID string) {
 	if s == nil || s.CloudType != "family" {
 		return false, ""
+	}
+	return true, s.FamilyID
+}
+
+func cloudInfoForID(s *Session, fileID string) (isFamily bool, familyID string) {
+	space, _ := pan189SpaceID(fileID)
+	if space != spaceFamily {
+		return false, ""
+	}
+	if s == nil {
+		return true, ""
 	}
 	return true, s.FamilyID
 }
@@ -124,6 +136,33 @@ func (r *rateLimiter) run(ctx context.Context, fn func() error) error {
 
 var pan189Limiter = newRateLimiter(2, 280*time.Millisecond)
 
+// Every drive operation receives a cloned token. A Session/Open-token rotation
+// must therefore be serialized per account and persisted before the next
+// operation reloads it; otherwise two startup requests can independently use
+// the same old refresh token and one may wrongly expire the account.
+var pan189SessionLocks = struct {
+	sync.Mutex
+	byAccount map[string]*sync.Mutex
+}{byAccount: make(map[string]*sync.Mutex)}
+
+func pan189SessionLock(c drive.Context) *sync.Mutex {
+	key := strings.TrimSpace(c.UserID)
+	if key == "" {
+		key = strings.TrimSpace(c.DriveID)
+	}
+	if key == "" {
+		key = "__unknown__"
+	}
+	pan189SessionLocks.Lock()
+	defer pan189SessionLocks.Unlock()
+	lock := pan189SessionLocks.byAccount[key]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		pan189SessionLocks.byAccount[key] = lock
+	}
+	return lock
+}
+
 // reqOptions carries one 189 API request.
 type reqOptions struct {
 	method  string            // GET/POST (default GET)
@@ -160,6 +199,12 @@ func strVal(m map[string]json.RawMessage, key string) string {
 // request performs one signed 189 request, transparently refreshing the
 // session on InvalidSessionKey / userSessionBO is null and retrying once.
 func (d *Driver) request(ctx context.Context, c drive.Context, rawURL string, o reqOptions) (json.RawMessage, error) {
+	lock := pan189SessionLock(c)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := drive.ReloadToken(c); err != nil {
+		return nil, err
+	}
 	var out json.RawMessage
 	err := pan189Limiter.run(ctx, func() error {
 		sess, err := sessionOf(c.Token)
@@ -176,6 +221,9 @@ func (d *Driver) request(ctx context.Context, c drive.Context, rawURL string, o 
 				return err
 			}
 			saveSession(c.Token, next)
+			if err := drive.PersistToken(c); err != nil {
+				return err
+			}
 			res, err = d.doOnce(ctx, c.Token, next, rawURL, o)
 			if err != nil {
 				return err

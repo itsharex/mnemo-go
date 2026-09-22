@@ -15,7 +15,7 @@ const emit = defineEmits(['close', 'toast'])
 const providerId = ref(props.initialProvider || localStorage.getItem('login_provider') || 'pikpak')
 function defaultLoginForm(id) {
   if (id === 'lanzou') return { upload_tier: 'v0' }
-  if (id === 'pan189') return { cloud_type: 'personal', login_mode: 'password' }
+  if (id === 'pan189') return { login_mode: 'password' }
   if (id === 'pan139') return { login_mode: 'password' }
   return {}
 }

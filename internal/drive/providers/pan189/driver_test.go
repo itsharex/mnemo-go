@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 
 	"mnemo-go/internal/drive"
@@ -41,6 +42,16 @@ func TestRegistration(t *testing.T) {
 	}
 	if d.RootID() != PAN189Root {
 		t.Fatalf("root = %q", d.RootID())
+	}
+}
+
+func TestRootListsPersonalAndFamilyVirtualFolders(t *testing.T) {
+	items, done, err := (&Driver{}).listPage(t.Context(), drive.Context{DriveID: "pan189:test"}, PAN189Root, 1)
+	if err != nil || !done {
+		t.Fatalf("root list error=%v done=%v", err, done)
+	}
+	if len(items) != 2 || items[0].FileID != PAN189PersonalRoot || items[0].Name != "个人云" || items[1].FileID != PAN189FamilyRoot || items[1].Name != "家庭云" {
+		t.Fatalf("unexpected virtual roots: %+v", items)
 	}
 }
 
@@ -131,16 +142,102 @@ func TestListPagePreservesDistinctIDs(t *testing.T) {
 				return pan189AuthResponse(req, http.StatusOK, nil, `{"fileListAO":{"folderList":[{"id":9007199254740992,"name":"A","parentId":-11},{"id":9007199254740993,"name":"B","parentId":-11},{"id":"folder-c","name":"C"}],"fileList":[{"id":9007199254740994,"name":"a.txt","size":12},{"id":"file-b","name":"b.txt"}]}}`), nil
 			})
 			sess := &Session{SessionKey: "key", SessionSecret: "secret", CloudType: cloud, FamilyID: "family", FamilySessionKey: "family-key", FamilySessionSecret: "family-secret"}
-			items, done, err := (&Driver{}).listPage(t.Context(), drive.Context{DriveID: "pan189:test", Token: &model.TokenInfo{AccessToken: sess.SessionKey, RefreshToken: mustJSON(sess)}}, PAN189Root, 1)
+			dirID, space := PAN189PersonalRoot, spacePersonal
+			if cloud == CloudFamily {
+				dirID, space = PAN189FamilyRoot, spaceFamily
+			}
+			items, done, err := (&Driver{}).listPage(t.Context(), drive.Context{DriveID: "pan189:test", Token: &model.TokenInfo{AccessToken: sess.SessionKey, RefreshToken: mustJSON(sess)}}, dirID, 1)
 			if err != nil || done || len(items) != 5 {
 				t.Fatalf("listPage = %+v, %v, %v", items, done, err)
 			}
 			for i, want := range []string{"9007199254740992", "9007199254740993", "folder-c", "9007199254740994", "file-b"} {
-				if items[i].FileID != want || items[i].ParentFileID != PAN189Root || items[i].IsDir != (i < 3) {
+				if items[i].FileID != pan189FileID(space, want) || items[i].ParentFileID != pan189FileID(space, Pan189DefaultFolder) || items[i].IsDir != (i < 3) {
 					t.Errorf("item[%d] = %+v, want ID %q", i, items[i], want)
 				}
 			}
 		})
+	}
+}
+
+func TestRequestReloadsPersistedSessionBeforeUsingStaleClone(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+
+	initialSession := &Session{
+		SessionKey: "old-session", SessionSecret: "old-secret",
+		AccessToken: "open-token", RefreshToken: "open-refresh",
+	}
+	persisted := &model.TokenInfo{AccessToken: initialSession.SessionKey, RefreshToken: mustJSON(initialSession)}
+	var persistedMu sync.Mutex
+	drive.SetTokenResolver(func(_, _ string) (*model.TokenInfo, error) {
+		persistedMu.Lock()
+		defer persistedMu.Unlock()
+		return drive.CloneToken(persisted), nil
+	})
+	drive.SetTokenUpdater(func(_, _ string, token *model.TokenInfo) error {
+		persistedMu.Lock()
+		defer persistedMu.Unlock()
+		persisted = drive.CloneToken(token)
+		return nil
+	})
+	t.Cleanup(func() {
+		drive.SetTokenResolver(nil)
+		drive.SetTokenUpdater(nil)
+	})
+
+	var sessionExchanges int
+	var sessionMu sync.Mutex
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/getSessionForPC.action":
+			sessionMu.Lock()
+			sessionExchanges++
+			sessionMu.Unlock()
+			return pan189AuthResponse(req, http.StatusOK, nil, `{"sessionKey":"new-session","sessionSecret":"new-secret"}`), nil
+		case "/listFiles.action":
+			if req.Header.Get("SessionKey") == "old-session" {
+				return pan189AuthResponse(req, http.StatusOK, nil, `{"errorCode":"InvalidSessionKey"}`), nil
+			}
+			if req.Header.Get("SessionKey") != "new-session" {
+				return nil, fmt.Errorf("unexpected session key %q", req.Header.Get("SessionKey"))
+			}
+			return pan189AuthResponse(req, http.StatusOK, nil, `{"fileListAO":{"folderList":[],"fileList":[]}}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s", req.URL.Path)
+		}
+	})
+
+	d := &Driver{}
+	stale := func() drive.Context {
+		return drive.Context{
+			UserID: "pan189:session-reload", DriveID: "pan189:session-reload",
+			Token: &model.TokenInfo{AccessToken: initialSession.SessionKey, RefreshToken: mustJSON(initialSession)},
+		}
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var requests sync.WaitGroup
+	for range 2 {
+		requests.Add(1)
+		go func() {
+			defer requests.Done()
+			<-start
+			_, _, err := d.listPage(t.Context(), stale(), PAN189PersonalRoot, 1)
+			errs <- err
+		}()
+	}
+	close(start)
+	requests.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("stale clone was not reloaded: %v", err)
+		}
+	}
+	sessionMu.Lock()
+	defer sessionMu.Unlock()
+	if sessionExchanges != 1 {
+		t.Fatalf("session exchanges = %d, want 1", sessionExchanges)
 	}
 }
 
@@ -202,7 +299,7 @@ func TestListPageRejectsInvalidIdentity(t *testing.T) {
 			netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 				return pan189AuthResponse(req, http.StatusOK, nil, `{"fileListAO":{"folderList":`+entries+`}}`), nil
 			})
-			items, _, err := (&Driver{}).listPage(t.Context(), drive.Context{Token: &model.TokenInfo{AccessToken: "skey", RefreshToken: mustJSON(sessionForTest())}}, PAN189Root, 1)
+			items, _, err := (&Driver{}).listPage(t.Context(), drive.Context{Token: &model.TokenInfo{AccessToken: "skey", RefreshToken: mustJSON(sessionForTest())}}, PAN189PersonalRoot, 1)
 			if err == nil || len(items) != 0 {
 				t.Fatalf("invalid entries returned items=%+v error=%v", items, err)
 			}

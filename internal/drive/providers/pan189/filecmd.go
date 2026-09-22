@@ -18,9 +18,16 @@ type fileRefItem struct {
 
 // batchRefs keeps the name and kind from the account-scoped listing snapshot.
 // Explicit caller kinds take precedence over the cache.
-func batchRefs(c drive.Context, refs []drive.FileRef) []fileRefItem {
+func batchRefs(c drive.Context, refs []drive.FileRef) (string, []fileRefItem, error) {
 	out := make([]fileRefItem, 0, len(refs))
+	space := ""
 	for _, r := range refs {
+		itemSpace, rawID := pan189SpaceID(r.ID)
+		if space == "" {
+			space = itemSpace
+		} else if space != itemSpace {
+			return "", nil, errors.New("天翼云盘不支持在个人云和家庭云之间混合操作")
+		}
 		isDir := 0
 		name := r.ID
 		if cached, ok := drive.CachedFile(c.UserID, c.DriveID, r.ID); ok {
@@ -35,18 +42,21 @@ func batchRefs(c drive.Context, refs []drive.FileRef) []fileRefItem {
 				isDir = 1
 			}
 		}
-		out = append(out, fileRefItem{FileID: r.ID, FileName: name, IsFolder: isDir})
+		out = append(out, fileRefItem{FileID: rawID, FileName: name, IsFolder: isDir})
 	}
-	return out
+	if space == "" {
+		space = spacePersonal
+	}
+	return space, out, nil
 }
 
 // createBatchTask starts an async batch task (MOVE/COPY/DELETE/CLEAR_RECYCLE).
-func (d *Driver) createBatchTask(ctx context.Context, c drive.Context, taskType, targetFolderID string, items []fileRefItem, other map[string]string) (string, error) {
+func (d *Driver) createBatchTask(ctx context.Context, c drive.Context, space, taskType, targetFolderID string, items []fileRefItem, other map[string]string) (string, error) {
 	sess, err := sessionOf(c.Token)
 	if err != nil {
 		return "", err
 	}
-	isFamily, familyID := cloudInfo(sess)
+	isFamily, familyID := cloudInfoForID(sess, pan189FileID(space, targetFolderID))
 	form := map[string]string{"type": taskType}
 	if b, err := json.Marshal(items); err == nil {
 		form["taskInfos"] = string(b)
@@ -60,7 +70,7 @@ func (d *Driver) createBatchTask(ctx context.Context, c drive.Context, taskType,
 	if isFamily {
 		form["familyId"] = familyID
 	}
-	raw, err := d.request(ctx, c, apiURL+"/batch/createBatchTask.action", reqOptions{method: "POST", form: form})
+	raw, err := d.request(ctx, c, apiURL+"/batch/createBatchTask.action", reqOptions{method: "POST", form: form, family: boolPtr(isFamily)})
 	if err != nil {
 		return "", err
 	}
@@ -113,8 +123,8 @@ func (d *Driver) waitBatchTask(ctx context.Context, c drive.Context, taskType, t
 }
 
 // runBatch starts a batch task and waits for completion.
-func (d *Driver) runBatch(ctx context.Context, c drive.Context, taskType string, items []fileRefItem, targetFolderID string, interval time.Duration, extra map[string]string) ([]string, error) {
-	taskID, err := d.createBatchTask(ctx, c, taskType, targetFolderID, items, extra)
+func (d *Driver) runBatch(ctx context.Context, c drive.Context, space, taskType string, items []fileRefItem, targetFolderID string, interval time.Duration, extra map[string]string) ([]string, error) {
+	taskID, err := d.createBatchTask(ctx, c, space, taskType, targetFolderID, items, extra)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +133,7 @@ func (d *Driver) runBatch(ctx context.Context, c drive.Context, taskType string,
 	}
 	ids := make([]string, 0, len(items))
 	for _, it := range items {
-		ids = append(ids, it.FileID)
+		ids = append(ids, pan189FileID(space, it.FileID))
 	}
 	return ids, nil
 }
@@ -133,7 +143,7 @@ func (d *Driver) Mkdir(ctx context.Context, c drive.Context, parentID, name stri
 	if err != nil {
 		return &drive.MkdirResult{Error: err.Error()}, nil
 	}
-	isFamily, familyID := cloudInfo(sess)
+	isFamily, familyID := cloudInfoForID(sess, parentID)
 	parent := toFolderID(parentID)
 	var (
 		rawURL string
@@ -146,7 +156,7 @@ func (d *Driver) Mkdir(ctx context.Context, c drive.Context, parentID, name stri
 		rawURL = apiURL + "/createFolder.action"
 		query = map[string]string{"folderName": name, "relativePath": "", "parentFolderId": parent}
 	}
-	raw, err := d.request(ctx, c, rawURL, reqOptions{method: "POST", query: query})
+	raw, err := d.request(ctx, c, rawURL, reqOptions{method: "POST", query: query, family: boolPtr(isFamily)})
 	if err != nil {
 		return &drive.MkdirResult{Error: err.Error()}, nil
 	}
@@ -154,7 +164,8 @@ func (d *Driver) Mkdir(ctx context.Context, c drive.Context, parentID, name stri
 		ID json.RawMessage `json:"id"`
 	}
 	_ = json.Unmarshal(raw, &res)
-	return &drive.MkdirResult{FileID: rawIDString(res.ID)}, nil
+	space, _ := pan189SpaceID(parentID)
+	return &drive.MkdirResult{FileID: pan189FileID(space, rawIDString(res.ID))}, nil
 }
 
 // renameOne renames a file or folder depending on isDir (file first, folder
@@ -164,7 +175,7 @@ func (d *Driver) renameOne(ctx context.Context, c drive.Context, fileID, name st
 	if err != nil {
 		return err
 	}
-	isFamily, familyID := cloudInfo(sess)
+	isFamily, familyID := cloudInfoForID(sess, fileID)
 	base := map[string]string{}
 	if isDir {
 		base = map[string]string{"folderId": toFolderID(fileID), "destFolderName": name}
@@ -184,7 +195,7 @@ func (d *Driver) renameOne(ctx context.Context, c drive.Context, fileID, name st
 	} else {
 		rawURL = apiURL + path
 	}
-	_, err = d.request(ctx, c, rawURL, reqOptions{method: method, query: base})
+	_, err = d.request(ctx, c, rawURL, reqOptions{method: method, query: base, family: boolPtr(isFamily)})
 	return err
 }
 
@@ -204,17 +215,24 @@ func (d *Driver) Trash(ctx context.Context, c drive.Context, fileIDs []string) (
 	for _, id := range fileIDs {
 		refs = append(refs, drive.FileRef{ID: id})
 	}
-	return d.runBatch(ctx, c, "DELETE", batchRefs(c, refs), "", 250*time.Millisecond, nil)
-}
-
-func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileRef) ([]string, error) {
-	items := batchRefs(c, refs)
-	// DELETE 任务后补 CLEAR_RECYCLE 清空回收站（对齐 AList Delete 双任务）。
-	ids, err := d.runBatch(ctx, c, "DELETE", items, "", 250*time.Millisecond, nil)
+	space, items, err := batchRefs(c, refs)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := d.runBatch(ctx, c, "CLEAR_RECYCLE", items, "", 250*time.Millisecond, nil); err != nil {
+	return d.runBatch(ctx, c, space, "DELETE", items, "", 250*time.Millisecond, nil)
+}
+
+func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileRef) ([]string, error) {
+	space, items, err := batchRefs(c, refs)
+	if err != nil {
+		return nil, err
+	}
+	// DELETE 任务后补 CLEAR_RECYCLE 清空回收站（对齐 AList Delete 双任务）。
+	ids, err := d.runBatch(ctx, c, space, "DELETE", items, "", 250*time.Millisecond, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := d.runBatch(ctx, c, space, "CLEAR_RECYCLE", items, "", 250*time.Millisecond, nil); err != nil {
 		// 清空回收站失败不阻断删除结果（源文件已删除）
 		_ = err
 	}
@@ -222,11 +240,25 @@ func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileR
 }
 
 func (d *Driver) Move(ctx context.Context, c drive.Context, refs []drive.FileRef, toParentID, _ string) ([]string, error) {
-	items := batchRefs(c, refs)
-	return d.runBatch(ctx, c, "MOVE", items, toFolderID(toParentID), 400*time.Millisecond, map[string]string{"targetFileName": ""})
+	space, items, err := batchRefs(c, refs)
+	if err != nil {
+		return nil, err
+	}
+	targetSpace, target := pan189SpaceID(toParentID)
+	if space != targetSpace {
+		return nil, errors.New("天翼云盘暂不支持在个人云与家庭云之间移动")
+	}
+	return d.runBatch(ctx, c, space, "MOVE", items, target, 400*time.Millisecond, map[string]string{"targetFileName": ""})
 }
 
 func (d *Driver) Copy(ctx context.Context, c drive.Context, refs []drive.FileRef, toParentID, _ string) ([]string, error) {
-	items := batchRefs(c, refs)
-	return d.runBatch(ctx, c, "COPY", items, toFolderID(toParentID), 1*time.Second, map[string]string{"targetFileName": ""})
+	space, items, err := batchRefs(c, refs)
+	if err != nil {
+		return nil, err
+	}
+	targetSpace, target := pan189SpaceID(toParentID)
+	if space != targetSpace {
+		return nil, errors.New("天翼云盘暂不支持在个人云与家庭云之间复制")
+	}
+	return d.runBatch(ctx, c, space, "COPY", items, target, 1*time.Second, map[string]string{"targetFileName": ""})
 }

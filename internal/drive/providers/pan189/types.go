@@ -35,6 +35,11 @@ func (id *listEntryID) UnmarshalJSON(data []byte) error {
 const (
 	// PAN189Root is the canonical root folder id surfaced to the UI.
 	PAN189Root = "pan189_root"
+	// PAN189PersonalRoot and PAN189FamilyRoot are virtual directories. They
+	// intentionally do not map to remote folders: one 189 account owns both
+	// spaces and the UI must expose them side-by-side after login.
+	PAN189PersonalRoot = "pan189_personal_root"
+	PAN189FamilyRoot   = "pan189_family_root"
 	// Pan189DefaultFolder is the server-side root folder id (-11).
 	Pan189DefaultFolder = "-11"
 
@@ -50,6 +55,12 @@ const (
 	version     = "6.2"
 	pc          = "TELEPC"
 	channelID   = "web_cloud.189.cn"
+)
+
+const (
+	spacePersonal = "personal"
+	spaceFamily   = "family"
+	spacePrefix   = "pan189:"
 )
 
 const ua189 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -87,21 +98,56 @@ type pan189File struct {
 	LargeURL   string `json:"largeUrl"`
 }
 
-// toFolderID normalises a UI file id into the server-side folder id:
-// roots (-11 / pan189_root / root / /) become the default folder.
-func toFolderID(id string) string {
+// pan189SpaceID decodes a virtual UI id. Legacy unqualified IDs remain
+// personal-cloud IDs so existing accounts, task records and bookmarks keep
+// working after the two-root migration.
+func pan189SpaceID(id string) (space, raw string) {
 	v := strings.TrimSpace(id)
-	if v == "" || v == PAN189Root || v == "root" || v == "/" {
-		return Pan189DefaultFolder
+	switch v {
+	case PAN189PersonalRoot:
+		return spacePersonal, Pan189DefaultFolder
+	case PAN189FamilyRoot:
+		return spaceFamily, Pan189DefaultFolder
+	case "", PAN189Root, "root", "/":
+		return spacePersonal, Pan189DefaultFolder
 	}
-	return v
+	for _, candidate := range []string{spacePersonal, spaceFamily} {
+		prefix := spacePrefix + candidate + ":"
+		if strings.HasPrefix(v, prefix) {
+			return candidate, strings.TrimPrefix(v, prefix)
+		}
+	}
+	return spacePersonal, v
+}
+
+func pan189FileID(space, raw string) string {
+	if raw == "" || raw == Pan189DefaultFolder {
+		if space == spaceFamily {
+			return PAN189FamilyRoot
+		}
+		return PAN189PersonalRoot
+	}
+	return spacePrefix + space + ":" + raw
+}
+
+func pan189ParentID(space, raw string) string {
+	if raw == Pan189DefaultFolder {
+		return pan189FileID(space, raw)
+	}
+	return pan189FileID(space, raw)
+}
+
+// toFolderID normalises a UI file id into the server-side folder id.
+func toFolderID(id string) string {
+	_, raw := pan189SpaceID(id)
+	return raw
 }
 
 // displayParent maps a server-side parent folder id back to the UI space:
 // the root folder (-11) is surfaced as pan189_root.
 func displayParent(parentID string) string {
 	if parentID == Pan189DefaultFolder {
-		return PAN189Root
+		return PAN189PersonalRoot
 	}
-	return parentID
+	return pan189FileID(spacePersonal, parentID)
 }

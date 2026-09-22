@@ -281,6 +281,9 @@ export async function prewarmRootDirectories(accounts, providers) {
 
 // ---------- account ----------
 export function refreshAccount(userId) { return driveCall('刷新账号', App.RefreshAccount(userId)) }
+// 容量状态会在启动和账号切换时后台同步；这不是用户显式操作，失败只应
+// 记录到账号健康状态，不能触发全局错误弹窗。
+export function refreshAccountSilently(userId) { return App.RefreshAccount(userId) }
 export function refreshAccountNow(userId) { return driveCall('检查账号', App.RefreshAccountNow(userId)) }
 
 // ---------- preview / player ----------

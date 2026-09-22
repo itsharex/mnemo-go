@@ -21,18 +21,18 @@ func (d *Driver) CreateShare(ctx context.Context, c drive.Context, params drive.
 	if strings.TrimSpace(params.Password) != "" {
 		return nil, errors.New("天翼云盘分享提取码由服务端生成，暂不支持自定义")
 	}
-	session, err := sessionOf(c.Token)
-	if err != nil {
+	if _, err := sessionOf(c.Token); err != nil {
 		return nil, err
 	}
-	if session.CloudType == CloudFamily {
+	space, rawFileID := pan189SpaceID(params.FileIDs[0])
+	if space == spaceFamily {
 		return nil, errors.New("天翼家庭云暂不支持创建公开分享链接")
 	}
 	expireTime, err := pan189ShareExpireTime(params.Expiration)
 	if err != nil {
 		return nil, err
 	}
-	fileID := strings.TrimSpace(params.FileIDs[0])
+	fileID := strings.TrimSpace(rawFileID)
 	raw, err := d.request(ctx, c, webURL+pan189CreateSharePath, reqOptions{
 		method: "GET",
 		query: map[string]string{

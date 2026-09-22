@@ -2,7 +2,7 @@
 // 网盘账号头像（右上角）：圆形头像(object-fit:cover 裁掉黑边)；
 // 悬停弹窗显示已用/剩余/总容量；启动时或用户手动触发容量同步。
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { refreshAccount, refreshAccountNow, accountName, providerIconUrl, providerMetaOf, formatBytes } from '../api'
+import { refreshAccountSilently, refreshAccountNow, accountName, providerIconUrl, providerMetaOf, formatBytes } from '../api'
 import { recordAccountHealth } from '../workspace'
 import UiIcon from './UiIcon.vue'
 
@@ -11,7 +11,7 @@ const refreshInflight = new Map()
 function refreshAccountOnce(userID, force = false) {
   if (!userID) return Promise.resolve(null)
   if (refreshInflight.has(userID)) return refreshInflight.get(userID)
-  const promise = (force ? refreshAccountNow(userID) : refreshAccount(userID)).finally(() => refreshInflight.delete(userID))
+  const promise = (force ? refreshAccountNow(userID) : refreshAccountSilently(userID)).finally(() => refreshInflight.delete(userID))
   refreshInflight.set(userID, promise)
   return promise
 }

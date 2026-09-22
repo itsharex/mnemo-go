@@ -244,6 +244,17 @@ describe('关键交互组件', () => {
     expect(wrapper.text()).toContain('总空间不限量')
     expect(wrapper.find('.rail-quota').exists()).toBe(false)
   })
+  it('账号栏收起时仍为当前账号保留明确选中标记', () => {
+    const current = { user_id: 'pikpak:current' }
+    const wrapper = mountAttached(AccountRail, {
+      props: { accounts: [current, { user_id: 'pikpak:other' }], current },
+    })
+    const items = wrapper.findAll('.rail-item')
+    expect(wrapper.get('.account-rail').classes()).not.toContain('expanded')
+    expect(items[0].classes()).toContain('active')
+    expect(items[0].attributes('data-selected')).toBe('true')
+    expect(items[1].attributes('data-selected')).toBe('false')
+  })
   it('系统默认下载目录显示实际路径，可直接打开并用于文件夹选择器', async () => {
     api.GetSettings.mockResolvedValue({ downloadDir: '' })
     api.GetLogPath.mockResolvedValue('')

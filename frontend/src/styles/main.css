@@ -256,6 +256,16 @@ body.rail-drag-active { cursor: grabbing; user-select: none; }
   border-color: color-mix(in srgb, var(--color-primary) 58%, var(--border-lighter));
   box-shadow: 0 3px 10px color-mix(in srgb, var(--color-primary) 20%, transparent);
 }
+/* 收起时图标刚好填满按钮，普通的按钮底色会被图标遮住。
+   选中态因此直接落在图标容器上：稳定的双色环和更高对比的底色，
+   不改变任何项目尺寸，也不依赖正在过渡的滑块位置。 */
+.account-rail:not(.expanded) .rail-item.active .rail-icon {
+  background: color-mix(in srgb, var(--color-primary) 26%, var(--bg-subtle));
+  border-color: var(--color-primary);
+  outline: 2px solid color-mix(in srgb, var(--color-primary) 72%, transparent);
+  outline-offset: 2px;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--color-primary) 32%, transparent);
+}
 @keyframes rail-active-in { from { opacity: .62; transform: scale(.97); } }
 .rail-icon {
   width: var(--icon-box); height: var(--icon-box); border-radius: 10px; flex-shrink: 0;

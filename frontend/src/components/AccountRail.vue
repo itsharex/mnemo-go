@@ -371,6 +371,7 @@ function onMenu(action) {
         type="button"
         class="rail-item"
         :class="{ active: current && current.user_id === acc.user_id, dragging: dragIdx === i, ['bump-' + (bumpMap[acc.user_id] || {}).dir]: bumpMap[acc.user_id] }"
+        :data-selected="current?.user_id === acc.user_id ? 'true' : 'false'"
         :style="dragIdx >= 0 && dragIdx !== i ? { transitionDelay: Math.min(Math.abs(i - dragIdx) * 35, 140) + 'ms' } : null"
         :title="`${labelOfAcc(acc)} · ${accountName(acc)}`"
         :aria-label="`${labelOfAcc(acc)} · ${accountName(acc)}`"

@@ -181,12 +181,13 @@ body {
 .rail-list {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
   scrollbar-width: none;
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
 }
 .rail-list::-webkit-scrollbar { width: 0; height: 0; }
-.account-rail.expanded .rail-list { align-items: stretch; padding: 0 2px; }
+.rail-items { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; min-height: 100%; }
+.account-rail.expanded .rail-items { align-items: stretch; padding: 0 2px; }
+.rail-active-pill { position: absolute; z-index: 0; top: 0; left: 0; right: 0; border-radius: 10px; pointer-events: none; background: var(--listselectbg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 20%, transparent), 0 5px 14px color-mix(in srgb, var(--color-primary) 10%, transparent); }
 .rail-item {
-  display: flex; align-items: center; justify-content: center;
+  position: relative; z-index: 1; display: flex; align-items: center; justify-content: center;
   width: var(--icon-box); min-width: var(--icon-box); height: var(--icon-box); min-height: var(--icon-box);
   padding: 0; border: 0; border-radius: 10px;
   background: transparent; color: var(--text-primary); cursor: pointer; text-align: left;
@@ -247,8 +248,8 @@ body.rail-drag-active { cursor: grabbing; user-select: none; }
 .rail-item.bump-up .rail-inner { animation: rail-bump-up .4s cubic-bezier(.3, 1.35, .5, 1) both; }
 
 .rail-item.active {
-  background: var(--listselectbg);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 20%, transparent);
+  background: transparent;
+  box-shadow: none;
 }
 .rail-icon {
   width: var(--icon-box); height: var(--icon-box); border-radius: 10px; flex-shrink: 0;

@@ -1,6 +1,8 @@
 <script setup>
 // 账号快切栏（复刻旧版 AccountRail）：默认 60px 窄图标栏，悬停展开为 220px 显示名称与用量。
-import { computed, ref, onBeforeUnmount, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { motion, MotionConfig } from 'motion-v'
+import { compactSpring, reducedMotion } from '../motion/presets'
 import { providerOf, accountName, providerIconUrl, providerMetaOf } from '../api'
 import { useOrderedAccounts, setPref } from '../appearance'
 import ContextMenu from './ContextMenu.vue'
@@ -17,6 +19,7 @@ const emit = defineEmits(['select', 'add', 'remove', 'info', 'rename'])
 const expanded = ref(false)
 const railEl = ref(null)
 const menu = ref(null)
+const activePill = ref({ y: 0, height: 0, visible: false })
 let hovering = false
 let keyboardFocus = false
 let cancelDrag = null
@@ -28,6 +31,22 @@ onBeforeUnmount(() => {
   clearTimeout(enterTimer)
   clearTimeout(leaveTimer)
   clearTimeout(clickTimer)
+  railEl.value?.removeEventListener('transitionend', scheduleActivePill)
+})
+
+// 选中背景独立于账号按钮，用共享元素在两项之间滑动；避免新旧两项仅各自淡入淡出。
+function syncActivePill() {
+  const list = railEl.value?.querySelector('.rail-items')
+  const active = list?.querySelector('.rail-item.active')
+  if (!list || !active) { activePill.value = { ...activePill.value, visible: false }; return }
+  const listRect = list.getBoundingClientRect()
+  const itemRect = active.getBoundingClientRect()
+  activePill.value = { y: Math.round(itemRect.top - listRect.top), height: Math.round(itemRect.height), visible: true }
+}
+function scheduleActivePill() { nextTick(syncActivePill) }
+onMounted(() => {
+  scheduleActivePill()
+  railEl.value?.addEventListener('transitionend', scheduleActivePill)
 })
 
 // ---------- 手动拖拽排序（顺序存 localStorage prefs.accountOrder） ----------
@@ -128,7 +147,7 @@ function onItemPointerDown(e, acc) {
     if (!items.length) return
     heights = new Map()
     items.forEach((el, i) => heights.set(liveList.value[i].user_id, el.getBoundingClientRect().height))
-    gapPx = parseFloat(getComputedStyle(listEl).rowGap) || 0
+    gapPx = parseFloat(getComputedStyle(listEl.querySelector('.rail-items')).rowGap) || 0
     top0 = items[0].getBoundingClientRect().top
     bottomLimit = items[items.length - 1].getBoundingClientRect().bottom
     const r = itemEl.getBoundingClientRect()
@@ -268,6 +287,7 @@ function scheduleCollapse() {
 watch(menu, (value) => {
   if (!value && !hovering) onRailLeave()
 })
+watch([() => props.current?.user_id, expanded, orderedAccounts], scheduleActivePill, { flush: 'post' })
 watch(() => props.accounts.map(a => a.user_id).join('\n'), () => {
   cancelDrag?.()
   if (menu.value && !props.accounts.some(a => a.user_id === menu.value.acc.user_id)) menu.value = null
@@ -364,8 +384,17 @@ function onMenu(action) {
     @mouseleave="onRailLeave"
     @focusout="scheduleCollapse"
   >
-    <TransitionGroup name="rail" tag="div" class="rail-list" :class="{ reordering: dragIdx >= 0 }">
-      <button
+    <MotionConfig :reduced-motion="reducedMotion">
+    <div class="rail-list" :class="{ reordering: dragIdx >= 0 }">
+      <TransitionGroup name="rail" tag="div" class="rail-items">
+        <motion.div
+          key="active-indicator"
+          class="rail-active-pill"
+          :initial="false"
+          :animate="{ y: activePill.y, height: activePill.height, opacity: activePill.visible ? 1 : 0 }"
+          :transition="compactSpring"
+        />
+        <button
         v-for="(acc, i) in orderedAccounts"
         :key="acc.user_id"
         type="button"
@@ -396,11 +425,13 @@ function onMenu(action) {
             <span v-if="hasQuota(acc)" class="rail-quota"><i :style="{ width: quotaPct(acc) + '%' }"></i></span>
           </span>
         </span>
-      </button>
-      <div v-if="!accounts.length" class="rail-empty" key="__empty">
-        <span v-show="expanded">尚未登录网盘账号</span>
-      </div>
-    </TransitionGroup>
+        </button>
+        <div v-if="!accounts.length" class="rail-empty" key="__empty">
+          <span v-show="expanded">尚未登录网盘账号</span>
+        </div>
+      </TransitionGroup>
+    </div>
+    </MotionConfig>
 
     <button type="button" class="rail-add" :title="'添加网盘账号'" @click="emit('add')" @keydown="onRailKey($event)">
       <UiIcon name="plus" :size="17" class="rail-add-icon" />

@@ -2,8 +2,8 @@
 import packageInfo from '../../package.json'
 // 设置页：简短分组导航 + 右侧紧凑设置卡片
 import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { motion, MotionConfig } from 'motion-v'
-import { compactSpring, panelReveal, reducedMotion } from '../motion/presets'
+import { motion } from 'motion-v'
+import { compactSpring, panelReveal } from '../motion/presets'
 import { GetSettings, SaveSettings, GetDownloadDirectory, OpenDownloadDirectory, ClearCache, PickDirectory, RevealInFolder, GetLogPath, ClearLogs, ExportLogs } from '../api'
 import { Environment } from '../../wailsjs/runtime/runtime'
 import { getPrefs, setPref } from '../appearance'
@@ -336,7 +336,6 @@ async function exportLogs() {
 </script>
 
 <template>
-  <MotionConfig :reduced-motion="reducedMotion">
   <motion.div class="settings-layout settings-view" :initial="panelReveal.initial" :animate="panelReveal.animate" :transition="panelReveal.transition">
     <ConfirmModal v-if="pendingBackup" title="恢复偏好" message="将覆盖备份中的偏好并合并收藏，是否继续？账号凭据不会更改。" @cancel="pendingBackup = null" @ok="restorePrefs" />
     <aside class="settings-nav" aria-label="设置分类">
@@ -749,7 +748,6 @@ async function exportLogs() {
       </div>
     </div>
   </motion.div>
-  </MotionConfig>
 </template>
 
 <style scoped>

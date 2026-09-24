@@ -27,6 +27,8 @@ jobs:
   quality:
     name: Quality gate
     runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -tags=webkit2_41
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +36,11 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Check Go formatting
         run: |
@@ -56,13 +63,18 @@ jobs:
           app_version="$(sed -nE 's/^const AppVersion = "([^"]+)"/\1/p' internal/config/config.go)"
           wails_version="$(node -p "require('./wails.json').version")"
           frontend_version="$(node -p "require('./frontend/package.json').version")"
+          lock_version="$(node -p "require('./frontend/package-lock.json').version")"
+          lock_root_version="$(node -p "require('./frontend/package-lock.json').packages[''].version")"
           installer_version="$(sed -nE 's/^[[:space:]]*#define MyAppVersion "([^"]+)"/\1/p' build/windows/installer.iss)"
           test -n "$app_version"
           test "$app_version" = "$wails_version"
           test "$app_version" = "$frontend_version"
+          test "$app_version" = "$lock_version"
+          test "$app_version" = "$lock_root_version"
           test "$app_version" = "$installer_version"
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
             test "v$app_version" = "${GITHUB_REF_NAME}"
+            test -f "docs/releases/${GITHUB_REF_NAME}.md"
           fi
 
       - name: Install frontend dependencies

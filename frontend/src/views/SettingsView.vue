@@ -665,7 +665,7 @@ async function exportLogs() {
             <div class="sg-row">
               <div class="sg-text">
                 <span class="sg-label">目录与页面缓存</span>
-                <span class="sg-desc">保存在安装目录的 data/cache 中，不会删除账号、传输记录或播放进度</span>
+                <span class="sg-desc">目录与图片缓存默认保存在安装目录的 data/cache 中；安装目录不可写时转入用户数据目录。图片缓存最多 1 GB、7 天未使用自动过期。清理不会删除账号、传输记录或播放进度</span>
               </div>
               <div class="sg-control">
                 <button class="btn sm" :disabled="clearingCache" @click="clearCache">

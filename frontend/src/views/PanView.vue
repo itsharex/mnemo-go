@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
+import { ref, shallowRef, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from 'vue'
 import {
   listDir, listDirSilently, listTrash, search, mkdir, rename, trash, remove, restore,
   move, copy, createShare, uploadFiles, validateUploadFiles, migrateFiles, PreviewMigration, download,
@@ -36,7 +36,7 @@ const emit = defineEmits(['toast', 'go', 'cloud-drag-start', 'cloud-drag-end', '
 const mode = ref('list') // list | trash | search | favorite
 const dirId = ref('root')
 const pathStack = ref([]) // [{id,name}]
-const files = ref([])
+const files = shallowRef([])
 const selected = ref([]) // file 对象数组
 const focusId = ref('')  // 键盘焦点行
 const loading = ref(false)
@@ -338,9 +338,9 @@ async function load(id, options = {}) {
     else if (snapMode === 'search') list = snapKw ? (await search(snapUid, snapDid, snapKw.trim())) || [] : []
     else list = await requestDirectory(snapUid, snapDid, id, epoch, options)
     networkDone = true
-    recordAccountHealth(snapUid)
     // 时序保护：过期响应（账号/目录已切换或有更新请求）直接丢弃
-    if (seq !== loadSeq || epoch !== cacheEpoch) return
+    if (seq !== loadSeq || epoch !== cacheEpoch || snapUid !== uid.value || snapDid !== did.value) return
+    recordAccountHealth(snapUid)
     if (!validDirectory(list)) throw new Error('目录数据包含空白或重复的文件 ID，请刷新重试')
     files.value = list
     // 清理当前目录已不存在的缩略图错误标记，避免瞬时失败被永久记住
@@ -356,8 +356,8 @@ async function load(id, options = {}) {
     }
   } catch (e) {
     networkDone = true
+    if (seq !== loadSeq || epoch !== cacheEpoch || snapUid !== uid.value || snapDid !== did.value) return
     recordAccountHealth(snapUid, e)
-    if (seq !== loadSeq) return
     if (!displayedCache) {
       error.value = String(e)
       files.value = []
@@ -413,11 +413,16 @@ function scheduleDirectoryPrefetch(list) {
   cancelDirectoryPrefetch()
   if (viewDisposed || mode.value !== 'list') return
   const seen = new Set()
-  prefetchQueue = list.filter(file => {
-    if (!file.isDir || !file.file_id || seen.has(file.file_id)) return false
+  const queue = []
+  for (const file of list) {
+    if (!file.isDir || !file.file_id || seen.has(file.file_id)) continue
     seen.add(file.file_id)
-    return !getCachedDir(dirCacheKey(uid.value, did.value, 'list', file.file_id, ''))
-  }).slice(0, TREE_PREFETCH_LIMIT).map(file => ({ id: file.file_id, user: uid.value, drive: did.value, epoch: cacheEpoch }))
+    if (getCachedDir(dirCacheKey(uid.value, did.value, 'list', file.file_id, ''))) continue
+    queue.push({ id: file.file_id, user: uid.value, drive: did.value, epoch: cacheEpoch })
+    if (queue.length === TREE_PREFETCH_LIMIT) break
+  }
+  prefetchQueue = queue
+  if (!queue.length) return
   prefetchTimer = setTimeout(() => { prefetchReady = true; drainDirectoryPrefetch() }, TREE_PREFETCH_DELAY_MS)
 }
 
@@ -474,6 +479,7 @@ async function loadFavorites() {
   }
 }
 
+const nameCollator = new Intl.Collator('zh-Hans-CN')
 const displayFiles = computed(() => {
   let list = files.value
   if (filter.value) {
@@ -485,7 +491,7 @@ const displayFiles = computed(() => {
   arr.sort((a, b) => {
     if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
     let r = 0
-    if (key === 'name') r = (a.name || '').localeCompare(b.name || '', 'zh-Hans-CN')
+    if (key === 'name') r = nameCollator.compare(a.name || '', b.name || '')
     else if (key === 'time') r = (a.time || 0) - (b.time || 0)
     else r = (a.size || 0) - (b.size || 0)
     return sortAsc.value ? r : -r
@@ -511,12 +517,11 @@ function namePartsOf(name, kw) {
   ]
 }
 
-// 行展示模型：列表/排序/关键词/缩略图状态变化时统一预计算一次；
-// 选中、焦点等高频交互只改 class，不再触发每行的字符串/时间格式化运算。
-const rowsShown = computed(() => {
+// 只格式化视口内的文件；大目录的其余文件不参与每次行模型计算。
+function renderRows(list) {
   const kw = hlKeyword.value
   const errs = thumbErrors.value
-  return listShown.value.map((f) => ({
+  return list.map((f) => ({
     f,
     icon: iconOf(f),
     parts: kw ? namePartsOf(f.name, kw) : null,
@@ -524,7 +529,7 @@ const rowsShown = computed(() => {
     timeParts: formatTimeParts(f.time),
     thumb: !f.isDir && f.thumbnail && !errs[f.file_id] ? f.thumbnail : '',
   }))
-})
+}
 
 const crumbs = computed(() => [{ id: rootKey.value, name: rootTitle.value }, ...pathStack.value])
 
@@ -817,8 +822,8 @@ const gridWindow = computed(() => {
   const rows = virtualRange(Math.ceil(total / cols), gridRowPitch.value)
   return { start: rows.start * cols, end: Math.min(total, rows.end * cols) }
 })
-const listRenderRows = computed(() => rowsShown.value.slice(listWindow.value.start, listWindow.value.end))
-const gridRenderRows = computed(() => rowsShown.value.slice(gridWindow.value.start, gridWindow.value.end))
+const listRenderRows = computed(() => renderRows(listShown.value.slice(listWindow.value.start, listWindow.value.end)))
+const gridRenderRows = computed(() => renderRows(listShown.value.slice(gridWindow.value.start, gridWindow.value.end)))
 const listVirtualTop = computed(() => listWindow.value.start * LIST_ROW_PITCH)
 const listVirtualBottom = computed(() => Math.max(0, (listShown.value.length - listWindow.value.end) * LIST_ROW_PITCH))
 const gridVirtualTop = computed(() => Math.floor(gridWindow.value.start / Math.max(1, gridColumnCount.value)) * gridRowPitch.value)
@@ -854,9 +859,7 @@ async function openFile(file) {
   if (file.isDir) { openDir(file); return }
   if (mode.value === 'trash') { emit('toast', '回收站中的文件无法打开', 'error'); return }
   const kind = openKindOf(file, caps.value)
-  if (kind === 'pdf') {
-    askConfirm(`“${file.name}”暂不支持在线预览，需要下载后查看，是否下载到本地？`, () => doDownload([file]), { okText: '下载', title: 'PDF 暂不支持预览' })
-  } else if (kind === 'download') {
+  if (kind === 'download') {
     askConfirm(`“${file.name}”不支持在线预览，是否下载到本地？`, () => doDownload([file]), { okText: '下载', title: '无法预览' })
   } else {
     try {

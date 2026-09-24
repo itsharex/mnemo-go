@@ -26,6 +26,7 @@ const props = defineProps({
   dialogStyle: { type: Object, default: () => ({}) },
   // 沉浸式媒体预览在自身舞台中提供关闭/窗口控制，不渲染通用实体标题栏。
   hideHead: { type: Boolean, default: false },
+  focusDialog: { type: Boolean, default: false },
 })
 const emit = defineEmits(['close'])
 const dialogEl = ref(null)
@@ -81,6 +82,7 @@ onMounted(() => {
   }
   nextTick(() => {
     if (!dialogEl.value || dialogEl.value.contains(document.activeElement)) return
+    if (props.focusDialog) { dialogEl.value.focus(); return }
     focusableElements()[0]?.focus()
     if (!dialogEl.value.contains(document.activeElement)) dialogEl.value.focus()
   })

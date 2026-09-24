@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"os"
+	"runtime"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -28,7 +29,7 @@ func main() {
 			return
 		}
 		err = wails.Run(&options.App{
-			Title: "Mnemo 预览", Frameless: true,
+			Title: "Mnemo 预览", Frameless: runtime.GOOS == "windows",
 			Width: 1100, Height: 720, MinWidth: 480, MinHeight: 360,
 			AssetServer:      &assetserver.Options{Assets: assets},
 			BackgroundColour: &options.RGBA{R: 0, G: 0, B: 0, A: 255},
@@ -51,7 +52,7 @@ func main() {
 
 	err := wails.Run(&options.App{
 		Title:     "Mnemo",
-		Frameless: true,
+		Frameless: runtime.GOOS == "windows",
 		Width:     1440,
 		Height:    900,
 		MinWidth:  1024,

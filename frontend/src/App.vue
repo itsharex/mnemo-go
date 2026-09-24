@@ -525,7 +525,7 @@ onBeforeUnmount(() => cleanupFns && cleanupFns())
         @rename="openRename"
       />
       <main class="page-host">
-        <transition :name="pageTrans" mode="out-in">
+        <transition :name="pageTrans">
           <KeepAlive>
             <component
               :is="pageComponent"

@@ -77,6 +77,7 @@ const api = vi.hoisted(() => ({
   providerOf: vi.fn((id) => String(id).split(':')[0]),
   formatBytes: vi.fn((value) => `${value} B`),
   PreviewURL: vi.fn(),
+  cachedPreviewImageURL: vi.fn().mockRejectedValue(new Error('缓存不可用')),
   PinFileSnapshot: vi.fn().mockResolvedValue(undefined),
   openKindOf: vi.fn(file => file.name.endsWith('.wav') ? 'audio' : 'image'),
   formatTime: vi.fn(() => ''),
@@ -239,6 +240,47 @@ afterEach(async () => {
 })
 
 describe('关键交互组件', () => {
+  it('添加网盘弹窗只保留紧凑标题，关闭键在标题栏末端', async () => {
+    localStorage.setItem('login_provider', 'pikpak')
+    const wrapper = mountAttached(LoginModal, {
+      props: { providers: [{ ID: 'pikpak', Meta: { label: 'PikPak' }, Login: { fields: [] } }] },
+      global: { stubs: { UiIcon: true } },
+    })
+    await nextTick()
+    const head = document.querySelector('.login-modal-head')
+    expect(head.textContent.trim()).toBe('添加网盘')
+    expect(head.lastElementChild.classList.contains('login-close')).toBe(true)
+    expect(head.querySelector('.login-close').getAttribute('aria-label')).toBe('关闭添加网盘')
+    expect([...document.querySelectorAll('.login-actions .btn')]).toHaveLength(2)
+    head.querySelector('.login-close').click()
+    expect(wrapper.emitted('close')).toHaveLength(1)
+  })
+  it('切换网盘时选中高亮沿侧栏移动', async () => {
+    localStorage.setItem('login_provider', 'pikpak')
+    mountAttached(LoginModal, {
+      props: { providers: [
+        { ID: 'pikpak', Meta: { label: 'PikPak' }, Login: { fields: [] } },
+        { ID: 'dropbox', Meta: { label: 'Dropbox' }, Login: { fields: [] } },
+      ] },
+      global: { stubs: { UiIcon: true } },
+    })
+    const list = document.querySelector('.login-provider-list')
+    const buttons = [...list.querySelectorAll('.lp-item')]
+    list.getBoundingClientRect = () => ({ left: 10, top: 20 })
+    Object.defineProperty(list, 'clientHeight', { configurable: true, value: 39 })
+    list.scrollTo = vi.fn()
+    buttons[0].getBoundingClientRect = () => ({ left: 10, top: 20, width: 152, height: 39 })
+    buttons[1].getBoundingClientRect = () => ({ left: 10, top: 61, width: 152, height: 39 })
+    await nextTick()
+    buttons[1].click()
+    await flushPromises()
+    const selection = list.querySelector('.lp-selection')
+    expect(selection).not.toBeNull()
+    expect(selection.style.transform).toBe('translate3d(0px, 41px, 0)')
+    expect(selection.style.height).toBe('39px')
+    expect(buttons[1].getAttribute('aria-selected')).toBe('true')
+    expect(list.scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 41, behavior: 'smooth' }))
+  })
   it('不限量账号在侧栏显示容量说明而不是零容量进度条', () => {
     const wrapper = mountAttached(AccountRail, { props: { accounts: [{ user_id: 'lanzou:quota', usage: { type: 'unlimited', size: 0, status: 'available' } }] } })
     expect(wrapper.text()).toContain('总空间不限量')
@@ -373,6 +415,22 @@ describe('关键交互组件', () => {
     await flushPromises()
     expect(wrapper.findAll('.fileitem')).toHaveLength(0)
     expect(wrapper.text()).toContain('空目录')
+  })
+
+  it('大目录只格式化当前视口的文件行', async () => {
+    const account = { user_id: 'webdav:large', drive_id: 'large' }
+    const files = Array.from({ length: 1000 }, (_, index) => ({ file_id: `file-${index}`, name: `文件 ${index}`, isDir: false, size: index }))
+    api.capsOf.mockReturnValue({})
+    api.listDir.mockResolvedValue(files)
+    api.formatTimeParts.mockClear()
+    const wrapper = mountAttached(PanView, { props: { account } })
+    await flushPromises()
+    expect(wrapper.findAll('.fileitem').length).toBeGreaterThan(0)
+    expect(wrapper.findAll('.fileitem').length).toBeLessThan(100)
+    expect(api.formatTimeParts.mock.calls.length).toBeLessThan(100)
+    await wrapper.get('[title="网格视图"]').trigger('click')
+    expect(wrapper.findAll('.griditem').length).toBeLessThan(100)
+    expect(api.formatTimeParts.mock.calls.length).toBeLessThan(200)
   })
 
   it('目录缓存先展示再后台更新，写缓存失败不影响目录显示', async () => {
@@ -669,6 +727,15 @@ describe('关键交互组件', () => {
       expect(document.querySelector('.md-code-block pre code').textContent).toBe('<img src=x onerror=alert(1)>')
       expect(document.querySelector('.pv-markdown-view img')).toBeNull()
     } finally { vi.unstubAllGlobals(); api.openKindOf.mockImplementation(file => file.name.endsWith('.wav') ? 'audio' : 'image') }
+  })
+  it('文档预览复用独立窗口标题栏的最小化、最大化和关闭三键', async () => {
+    api.openKindOf.mockReturnValue('pdf')
+    api.PinFileSnapshot.mockResolvedValue(undefined)
+    api.PreviewURL.mockResolvedValue('http://127.0.0.1/document.pdf')
+    mountAttached(PreviewModal, { props: { file: { file_id: 'pdf', name: 'manual.pdf', size: 1024 }, account: { user_id: 'webdav:one', drive_id: 'drive' } } })
+    await nextTick()
+    expect([...document.querySelectorAll('.preview-modal .modal-window-controls button')].map(button => button.getAttribute('aria-label'))).toEqual(['最小化窗口', '最大化窗口', '关闭对话框'])
+    expect(document.querySelector('.preview-modal .pv-window-controls')).toBeNull()
   })
   it('账号右键可打开图标名称编辑页，保存后更新所有页面使用的账号', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
@@ -1025,6 +1092,56 @@ describe('关键交互组件', () => {
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
 
+  it('图片来回切换复用预载缓存，初次焦点不落在窗口按钮上', async () => {
+    const originalImage = globalThis.Image
+    vi.stubGlobal('Image', class {
+      naturalWidth = 640
+      naturalHeight = 480
+      set src(value) { this.url = value; queueMicrotask(() => this.onload?.()) }
+    })
+    const files = [
+      { file_id: 'first', name: 'first.png', size: 100, isDir: false },
+      { file_id: 'second', name: 'second.png', size: 100, isDir: false },
+    ]
+    api.PinFileSnapshot.mockResolvedValue(undefined)
+    api.cachedPreviewImageURL.mockImplementation(async (_user, _drive, file) => `http://127.0.0.1/cache/${file.file_id}`)
+    try {
+      mountAttached(PreviewModal, { props: { account: { user_id: 'test', drive_id: 'test' }, file: files[0], fileList: files } })
+      await flushPromises()
+      expect(document.activeElement).toBe(document.querySelector('.preview-modal'))
+      expect(api.cachedPreviewImageURL).toHaveBeenCalledTimes(2)
+      document.querySelector('.pv-edge.right').click()
+      await flushPromises()
+      document.querySelector('.pv-edge.left').click()
+      await flushPromises()
+      expect(api.cachedPreviewImageURL).toHaveBeenCalledTimes(2)
+      expect(api.PinFileSnapshot).toHaveBeenCalledTimes(2)
+      expect(document.querySelector('.pv-topbar-name').textContent).toBe('first.png')
+    } finally {
+      vi.stubGlobal('Image', originalImage)
+    }
+  })
+
+  it('图片磁盘缓存损坏时回退到原始预览地址', async () => {
+    const originalImage = globalThis.Image
+    vi.stubGlobal('Image', class {
+      naturalWidth = 800
+      naturalHeight = 600
+      set src(value) { queueMicrotask(() => value.includes('/local/') ? this.onerror?.() : this.onload?.()) }
+    })
+    api.PinFileSnapshot.mockResolvedValue(undefined)
+    api.cachedPreviewImageURL.mockResolvedValue('http://127.0.0.1/local/broken')
+    api.PreviewURL.mockResolvedValue('http://127.0.0.1/stream/original')
+    try {
+      mountAttached(PreviewModal, { props: { account: { user_id: 'test', drive_id: 'test' }, file: { file_id: 'image', name: 'image.png', size: 100 } } })
+      await flushPromises()
+      expect(document.querySelector('.pv-img-layer img')?.getAttribute('src')).toBe('http://127.0.0.1/stream/original')
+      expect(api.PreviewURL).toHaveBeenCalledOnce()
+    } finally {
+      vi.stubGlobal('Image', originalImage)
+    }
+  })
+
   it('音频滑杆保留原生方向键行为，不触发全局音量快捷键', async () => {
     api.PinFileSnapshot.mockResolvedValue(undefined)
     api.getPlayCursor.mockResolvedValue(0)
@@ -1095,6 +1212,42 @@ describe('关键交互组件', () => {
     expect(document.body.classList.contains('rail-drag-active')).toBe(false)
     window.dispatchEvent(new MouseEvent('pointerup'))
     expect(save).not.toHaveBeenCalled()
+  })
+
+  it('账号拖拽换位时显示幽灵与碰撞动画，并保存新顺序', async () => {
+    const frames = new Map()
+    let frameID = 0
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+      frames.set(++frameID, callback)
+      return frameID
+    })
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => frames.delete(id))
+    const flushFrame = async () => {
+      const pending = [...frames.values()]
+      frames.clear()
+      pending.forEach(callback => callback(0))
+      await nextTick()
+    }
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      const items = [...document.querySelectorAll('.rail-list .rail-item')]
+      const index = items.indexOf(this)
+      const top = index < 0 ? 0 : index * 50
+      return { top, bottom: top + 44, left: 0, right: 44, width: 44, height: 44 }
+    })
+    const save = vi.spyOn(appearance, 'setPref')
+    const accounts = [{ user_id: 'pikpak:one' }, { user_id: 'pikpak:two' }]
+    const wrapper = mountAttached(AccountRail, { props: { accounts } })
+    await wrapper.findAll('.rail-item')[0].trigger('pointerdown', { button: 0, clientX: 10, clientY: 10 })
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 10, clientY: 80 }))
+    await flushFrame()
+    expect(wrapper.find('.rail-ghost').exists()).toBe(true)
+    expect(wrapper.find('.rail-item.dragging').exists()).toBe(true)
+    for (let step = 0; step < 8; step++) await flushFrame()
+    expect(wrapper.find('.rail-item.bump-up').exists()).toBe(true)
+    expect(wrapper.findAll('.rail-list .rail-item').map(item => item.attributes('aria-label'))).toEqual(['pikpak · pikpak:two', 'pikpak · pikpak:one'])
+    window.dispatchEvent(new MouseEvent('pointerup'))
+    expect(save).toHaveBeenCalledWith('accountOrder', ['pikpak:two', 'pikpak:one'])
+    expect(wrapper.find('.rail-ghost.dropping').exists()).toBe(true)
   })
 
   it('目录树点击已展开目录只导航，箭头才折叠', async () => {
@@ -1509,5 +1662,21 @@ describe('关键交互组件', () => {
     refreshButton.click()
     await vi.runAllTicks()
     expect(api.refreshAccountNow).toHaveBeenCalledTimes(1)
+  })
+
+  it('家庭云容量只显示在右上角弹窗，侧边账号栏保持个人云容量', async () => {
+	vi.useFakeTimers()
+    api.refreshAccountSilently.mockResolvedValue({ user_id: 'pan189:family-quota', token: {}, usage: { size: 100, used: 10 }, family_usage: { size: 200, used: 20 } })
+    const account = { user_id: 'pan189:family-quota', token: {}, usage: { size: 100, used: 10, sizeStr: '100 B', usedStr: '10 B' }, family_usage: { size: 200, used: 20, sizeStr: '200 B', usedStr: '20 B' } }
+    const avatar = mountAttached(AccountAvatar, { props: { account, providers: [] }, global: { stubs: { UiIcon: true } } })
+    await avatar.get('.acc-ava').trigger('mouseenter')
+    await vi.advanceTimersByTimeAsync(120)
+    expect(document.querySelector('.ap-quota')?.textContent).toContain('个人云')
+    expect(document.querySelector('.ap-quota')?.textContent).toContain('家庭云')
+    const rail = mountAttached(AccountRail, { props: { accounts: [account], current: account, providers: [] } })
+    expect(rail.text()).not.toContain('家庭云')
+    expect(rail.text()).toContain('10 B / 100 B')
+    expect(rail.text()).not.toContain('20 B / 200 B')
+    expect(rail.find('.rail-quota').exists()).toBe(true)
   })
 })

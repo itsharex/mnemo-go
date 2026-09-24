@@ -196,7 +196,7 @@ function onItemPointerDown(e, acc) {
     if (!items.length) return
     heights = new Map()
     items.forEach((el, i) => heights.set(liveList.value[i].user_id, el.getBoundingClientRect().height))
-    gapPx = parseFloat(getComputedStyle(listEl.querySelector('.rail-items')).rowGap) || 0
+    gapPx = parseFloat(getComputedStyle(listEl).rowGap) || 0
     top0 = items[0].getBoundingClientRect().top
     bottomLimit = items[items.length - 1].getBoundingClientRect().bottom
     const r = itemEl.getBoundingClientRect()

@@ -22,9 +22,11 @@ describe('工作区辅助逻辑', () => {
     expect(clean.accountIcons).toEqual({two:'webdav.svg'})
   })
   it('区分认证、网络、配额和风控错误，成功后清除错误状态', () => {
-    for (const [message,status] of [['401 unauthorized','auth'],['network timeout','network'],['空间不足','quota'],['429 风控','limited']]) {
+    for (const [message,status] of [['401 unauthorized','error'],['网盘登录已失效，账号已从本机移除: invalid_grant','auth'],['network timeout','network'],['空间不足','quota'],['429 风控','limited']]) {
       recordAccountHealth('one',message); expect(accountHealth.one.status).toBe(status)
     }
+    recordAccountHealth('one', new Error('PikPak http 401 invalid_grant'))
+    expect(accountHealth.one).toMatchObject({ status: 'error', message: '账号检查暂时失败，请稍后重试' })
     recordAccountHealth('one'); expect(accountHealth.one.status).toBe('ok'); expect(accountHealth.one.message).toBe('')
   })
   it('把网盘原始错误转换为可操作的统一提示，不暴露服务端详情', () => {

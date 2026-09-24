@@ -24,9 +24,11 @@ const props = defineProps({
 // 本地 token 副本：静默刷新后更新展示，不依赖父组件重传
 const tok = ref(props.account ? (props.account.token || {}) : {})
 const quota = ref(props.account ? (props.account.usage || null) : null)
+const familyQuota = ref(props.account ? (props.account.family_usage || null) : null)
 watch(() => props.account, (a) => {
   tok.value = a ? (a.token || {}) : {}
   quota.value = a ? (a.usage || null) : null
+  familyQuota.value = a ? (a.family_usage || null) : null
 })
 
 const avatar = computed(() => tok.value.avatar || '')
@@ -51,6 +53,11 @@ const free = computed(() => {
 })
 const pct = computed(() => total.value > 0 ? Math.min(100, Math.round((used.value / total.value) * 100)) : 0)
 const hasQuota = computed(() => total.value > 0)
+const familyTotal = computed(() => Math.max(0, Number(familyQuota.value?.size) || 0))
+const hasFamilyQuota = computed(() => familyTotal.value > 0)
+const familyUsed = computed(() => Math.min(familyTotal.value, Math.max(0, Number(familyQuota.value?.used) || 0)))
+const familyFree = computed(() => familyTotal.value - familyUsed.value)
+const familyPct = computed(() => hasFamilyQuota.value ? Math.min(100, Math.round((familyUsed.value / familyTotal.value) * 100)) : 0)
 const quotaStatus = computed(() => String(quota.value?.status || (hasQuota.value ? 'available' : 'unknown')))
 const quotaStatusText = computed(() => {
   if (quota.value?.type === 'unlimited') return '总空间不限量；已用空间暂未提供'
@@ -122,9 +129,12 @@ async function syncQuota(force = false) {
     if (snapUid === (props.account && props.account.user_id) && acc) {
       if (acc.token) tok.value = acc.token
       quota.value = acc.usage || null
+      familyQuota.value = acc.family_usage || null
     }
     return acc
-  } catch(error) { recordAccountHealth(snapUid, error) }
+  } catch(error) {
+    if (snapUid === props.account?.user_id) recordAccountHealth(snapUid, error)
+  }
 }
 
 async function manualRefresh() {
@@ -174,6 +184,7 @@ onMounted(() => {
             </div>
           </div>
           <div class="ap-quota">
+            <div v-if="hasFamilyQuota" class="ap-space-title">个人云</div>
             <div v-if="hasQuota" class="ap-qrow">
               <span class="ap-qpct">{{ pct }}%</span>
               <span class="ap-qhint">已用 / 总容量</span>
@@ -189,6 +200,16 @@ onMounted(() => {
             <div v-else class="ap-noquota">{{ quotaStatusText || '暂无容量信息' }}</div>
             <div v-if="hasQuota && quotaStatusText" class="ap-qstatus">{{ quotaStatusText }}</div>
             <div v-if="quotaUpdatedText" class="ap-qupdated">{{ quotaUpdatedText }}</div>
+            <template v-if="hasFamilyQuota">
+              <div class="ap-space-title ap-family-title">家庭云</div>
+              <div class="ap-qrow"><span class="ap-qpct">{{ familyPct }}%</span><span class="ap-qhint">已用 / 总容量</span></div>
+              <div class="ap-bar"><div class="ap-bar-fill" :class="{ full: familyPct >= 95 }" :style="{ width: familyPct + '%' }"></div></div>
+              <div class="ap-nums">
+                <div><span class="ap-num-k">已用</span><span class="ap-num-v">{{ formatBytes(familyUsed) }}</span></div>
+                <div><span class="ap-num-k">剩余</span><span class="ap-num-v">{{ formatBytes(familyFree) }}</span></div>
+                <div><span class="ap-num-k">总容量</span><span class="ap-num-v">{{ formatBytes(familyTotal) }}</span></div>
+              </div>
+            </template>
             <button class="btn sm ap-refresh" type="button" :disabled="refreshing" @click.stop="manualRefresh">
               <span v-if="refreshing" class="spin"></span>
               <UiIcon v-else name="refresh" :size="12" />
@@ -226,6 +247,8 @@ onMounted(() => {
 .ap-provider { font-size: 12px; color: var(--text-tertiary); }
 .ap-vip { display: inline-flex; align-items: center; gap: 3px; margin-top: 3px; font-size: 11px; color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 12%, transparent); padding: 1px 6px; border-radius: 999px; }
 .ap-quota { padding-top: 10px; }
+.ap-space-title { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin-bottom: 5px; }
+.ap-family-title { border-top: 1px solid var(--border-lighter); margin-top: 10px; padding-top: 10px; }
 .ap-qrow { display: flex; align-items: baseline; justify-content: space-between; }
 .ap-qpct { font-size: 16px; font-weight: 700; color: var(--color-primary); }
 .ap-qhint { font-size: 11px; color: var(--text-tertiary); }

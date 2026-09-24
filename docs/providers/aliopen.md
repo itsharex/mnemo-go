@@ -11,7 +11,7 @@
 ```
 favorite, search, createShare, shareExpiration, sharePassword, shareHistory, importShare: true
 copy, recycleBin, permanentDelete: true
-trashView, trashRestore: false
+trashView, trashRestore: true
 SetHashes(["sha1"], ["sha1"])
 SetConflictPolicies(["refuse", "rename", "skip", "overwrite"])
 ```
@@ -104,7 +104,8 @@ SetConflictPolicies(["refuse", "rename", "skip", "overwrite"])
 |------|:----:|---------|------|
 | Trash | ✅ | `aliopen.go:352-361` recyclebin/trash | 无 |
 | Delete | ✅ | `aliopen.go:363-372` delete | 无 |
-| Restore | ❌ | `aliopen.go:774-775` NotSupported | 设计（旧版也无） |
+| ListTrash | ✅ | `aliopen.go` 按备份盘与资源盘分页列举回收站；仅在 Open API 返回 404 时切换到兼容接口 | 无 |
+| Restore | ✅ | `aliopen.go` 以带空间前缀的 ID 恢复原空间文件 | 无 |
 
 ---
 

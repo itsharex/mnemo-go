@@ -57,7 +57,7 @@ func (d *Driver) rename(ctx context.Context, c drive.Context, fileID, name strin
 }
 
 // deleteBatch ports /file/delete with folderIds/fileIds CSV payloads.
-func (d *Driver) deleteBatch(ctx context.Context, c drive.Context, refs []drive.FileRef) ([]string, error) {
+func (d *Driver) deleteBatch(ctx context.Context, c drive.Context, refs []drive.FileRef, status int) ([]string, error) {
 	var folderIDs, fileIDs []string
 	for _, r := range refs {
 		if r.IsDir != nil && *r.IsDir {
@@ -71,7 +71,7 @@ func (d *Driver) deleteBatch(ctx context.Context, c drive.Context, refs []drive.
 		body: map[string]any{
 			"folderIds": strings.Join(folderIDs, ","),
 			"fileIds":   strings.Join(fileIDs, ","),
-			"status":    0,
+			"status":    status,
 		},
 	})
 	if err != nil {

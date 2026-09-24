@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -325,6 +326,9 @@ func (d *Driver) doOnce(ctx context.Context, tok *model.TokenInfo, sess *Session
 		return &rawResponse{needRefresh: true, text: bodyText}, nil
 	}
 	if resp.StatusCode >= 400 {
+		if strings.Contains(bodyText, "App Not Exist") {
+			return nil, errors.New("天翼云盘家庭云接口拒绝当前客户端身份（App Not Exist）")
+		}
 		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, truncateStr(bodyText, 300))
 	}
 
@@ -447,9 +451,9 @@ func (d *Driver) refreshSessionOnce(ctx context.Context, tok *model.TokenInfo, s
 	if err != nil {
 		return nil, err
 	}
-	var j map[string]json.RawMessage
-	if err := json.Unmarshal(body, &j); err != nil {
-		return nil, fmt.Errorf("刷新 189 Session 失败（HTTP %d，响应不是有效 JSON）", status)
+	j, err := decodePan189Session(body)
+	if err != nil {
+		return nil, fmt.Errorf("刷新 189 Session 失败（HTTP %d，响应格式无效）", status)
 	}
 	code := strVal(j, "errorCode")
 	resCode := strVal(j, "res_code")
@@ -494,6 +498,35 @@ func (d *Driver) refreshSessionOnce(ctx context.Context, tok *model.TokenInfo, s
 		return relogin()
 	}
 	return nil, pan189SessionError(status, j)
+}
+
+func decodePan189Session(body []byte) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err == nil && fields != nil {
+		return fields, nil
+	}
+	var session struct {
+		XMLName             xml.Name `xml:"userSession"`
+		SessionKey          string   `xml:"sessionKey"`
+		SessionSecret       string   `xml:"sessionSecret"`
+		FamilySessionKey    string   `xml:"familySessionKey"`
+		FamilySessionSecret string   `xml:"familySessionSecret"`
+	}
+	if err := xml.Unmarshal(body, &session); err != nil {
+		return nil, err
+	}
+	if session.SessionKey == "" || session.SessionSecret == "" {
+		return nil, errors.New("天翼云盘 Session XML 不完整")
+	}
+	values := map[string]string{
+		"sessionKey": session.SessionKey, "sessionSecret": session.SessionSecret,
+		"familySessionKey": session.FamilySessionKey, "familySessionSecret": session.FamilySessionSecret,
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return nil, err
+	}
+	return fields, json.Unmarshal(encoded, &fields)
 }
 
 const pan189SessionRetryDelay = 300 * time.Millisecond
@@ -579,7 +612,7 @@ func getFamilyList(ctx context.Context, sess *Session) ([]struct {
 	FamilyID   string
 	RemarkName string
 }, error) {
-	req := reqOptions{method: "GET", family: boolPtr(false)}
+	req := reqOptions{method: "GET", family: boolPtr(true)}
 	res, err := doOnceRaw(ctx, sess, apiURL+"/family/manage/getFamilyList.action", req)
 	if err != nil {
 		return nil, err

@@ -71,7 +71,7 @@ ShareExpirationOptions: [0, 1, 7, 30]
 
 ## 7. 回收站
 
-❌ 无（设计）。`guangya.go:466-468` Trash 直接转发 Delete。
+光鸭删除任务将文件移入回收站；`guangya.go` 使用 `get_file_list` 的 `dirType=4` 分页列举。`trash.go` 通过网页当前使用的 `POST /userres/v1/file/recycle_file` 还原，发送 `{fileIds}` 并查询 `/userres/v1/get_task_status`；仅任务状态为成功时返回成功。来源为官网网页脚本 `https://www.guangyapan.com/static/js/index.2795c2ad.js`，已完成模拟请求测试，尚待真实账号验证。普通 `delete_file` 仅能确定移入回收站，彻底删除能力仍关闭。
 
 ---
 

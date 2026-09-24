@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -54,6 +55,108 @@ func TestRootListsPersonalAndFamilyVirtualFolders(t *testing.T) {
 	}
 	if len(items) != 2 || items[0].FileID != PAN189PersonalRoot || items[0].Name != "个人云" || items[1].FileID != PAN189FamilyRoot || items[1].Name != "家庭云" {
 		t.Fatalf("unexpected virtual roots: %+v", items)
+	}
+}
+
+func TestFamilyRootDiscoversIDAndUsesEmptyRemoteFolder(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	var familyRequests int
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/family/manage/getFamilyList.action":
+			if req.Header.Get("SessionKey") != "family-key" {
+				t.Errorf("family discovery signed with %q", req.Header.Get("SessionKey"))
+			}
+			return pan189AuthResponse(req, http.StatusOK, nil, `{"familyInfoResp":[{"familyId":42,"remarkName":"家庭","useFlag":1}]}`), nil
+		case "/family/file/listFiles.action":
+			familyRequests++
+			if req.Header.Get("SessionKey") != "family-key" || req.URL.Query().Get("folderId") != "" || req.URL.Query().Get("familyId") != "42" {
+				t.Errorf("family list request: %s, session=%q", req.URL, req.Header.Get("SessionKey"))
+			}
+			return pan189AuthResponse(req, http.StatusOK, nil, `{"fileListAO":{"folderList":[],"fileList":[{"id":101,"name":"family.txt","size":12}]}}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request: %s", req.URL)
+		}
+	})
+	session := &Session{SessionKey: "personal-key", SessionSecret: "personal-secret", FamilySessionKey: "family-key", FamilySessionSecret: "family-secret"}
+	token := &model.TokenInfo{AccessToken: session.SessionKey, RefreshToken: mustJSON(session)}
+	ctx := drive.Context{UserID: "pan189:test", DriveID: "pan189:test", Token: token}
+	for attempt := 0; attempt < 2; attempt++ {
+		items, err := (&Driver{}).List(t.Context(), ctx, PAN189FamilyRoot, nil)
+		if err != nil || len(items) != 1 || items[0].FileID != pan189FileID(spaceFamily, "101") || items[0].ParentFileID != PAN189FamilyRoot {
+			t.Fatalf("family list = %+v, %v", items, err)
+		}
+	}
+	if familyRequests != 2 {
+		t.Fatalf("family requests = %d", familyRequests)
+	}
+	stored, err := sessionOf(token)
+	if err != nil || stored.FamilyID != "42" {
+		t.Fatalf("discovered family ID = %+v, %v", stored, err)
+	}
+}
+
+func TestFreshLoginFamilyListUsesFamilySession(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/family/manage/getFamilyList.action" || req.Header.Get("SessionKey") != "family-key" {
+			t.Errorf("家庭云列表未使用家庭会话: %s", req.URL.Path)
+		}
+		return pan189AuthResponse(req, http.StatusOK, nil, `{"familyInfoResp":[{"familyId":42,"remarkName":"家庭"}]}`), nil
+	})
+	families, err := getFamilyList(t.Context(), &Session{SessionKey: "personal-key", SessionSecret: "personal-secret", FamilySessionKey: "family-key", FamilySessionSecret: "family-secret"})
+	if err != nil || len(families) != 1 || families[0].FamilyID != "42" {
+		t.Fatalf("家庭云列表=%+v，错误=%v", families, err)
+	}
+}
+
+func TestFamilyAppErrorDoesNotExposeSessionDetails(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return pan189AuthResponse(req, http.StatusBadRequest, nil, `{"res_message":"getFamilyList() - requestId=private-id, sessionKey=private-key, App Not Exist"}`), nil
+	})
+	_, err := getFamilyList(t.Context(), &Session{SessionKey: "personal-key", SessionSecret: "personal-secret", FamilySessionKey: "family-key", FamilySessionSecret: "family-secret"})
+	if err == nil || !strings.Contains(err.Error(), "App Not Exist") || strings.Contains(err.Error(), "private-key") || strings.Contains(err.Error(), "private-id") {
+		t.Fatalf("家庭云错误未脱敏: %v", err)
+	}
+}
+
+func TestRefreshAccountIncludesFamilyCapacity(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/portal/getUserSizeInfo.action" {
+			return nil, fmt.Errorf("unexpected request: %s", req.URL)
+		}
+		if req.Header.Get("SessionKey") == "family-key" {
+			return pan189AuthResponse(req, http.StatusOK, nil, `{"userSizeInfo":{"familyCapacityInfo":{"usedSize":"20","totalSize":"200"}}}`), nil
+		}
+		return pan189AuthResponse(req, http.StatusOK, nil, `{"userSizeInfo":{"usedSize":"10","cloudCapacityInfo":{"totalSize":"100"}}}`), nil
+	})
+	session := &Session{SessionKey: "personal-key", SessionSecret: "personal-secret", FamilySessionKey: "family-key", FamilySessionSecret: "family-secret", FamilyID: "42"}
+	token := &model.TokenInfo{AccessToken: session.SessionKey, RefreshToken: mustJSON(session)}
+	updated, err := (&Driver{}).RefreshAccount(t.Context(), drive.Context{UserID: "pan189:test", DriveID: "pan189:test", Token: token}, token)
+	if err != nil || updated.TotalSize != 100 || updated.UsedSize != 10 || updated.FreeSize != 90 || updated.FamilyTotalSize != 200 || updated.FamilyUsedSize != 20 || !updated.FamilyQuotaSeparated {
+		t.Fatalf("capacity = %+v, %v", updated, err)
+	}
+}
+
+func TestRefreshAccountUsesFamilyCapacityFromPersonalResponse(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	requests := 0
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		return pan189AuthResponse(req, http.StatusOK, nil, `{"userSizeInfo":{"usedSize":"10","cloudCapacityInfo":{"totalSize":"100"},"familyCapacityInfo":{"usedSize":"20","totalSize":"200"}}}`), nil
+	})
+	session := &Session{SessionKey: "personal-key", SessionSecret: "personal-secret", FamilySessionKey: "family-key", FamilySessionSecret: "family-secret", FamilyID: "42"}
+	token := &model.TokenInfo{AccessToken: session.SessionKey, RefreshToken: mustJSON(session)}
+	updated, err := (&Driver{}).RefreshAccount(t.Context(), drive.Context{UserID: "pan189:test", DriveID: "pan189:test", Token: token}, token)
+	if err != nil || updated.TotalSize != 100 || updated.UsedSize != 10 || updated.FamilyTotalSize != 200 || updated.FamilyUsedSize != 20 || requests != 1 {
+		t.Fatalf("capacity = %+v, requests = %d, error = %v", updated, requests, err)
 	}
 }
 
@@ -182,7 +285,7 @@ func TestListPagePreservesDistinctIDs(t *testing.T) {
 				dirID, space = PAN189FamilyRoot, spaceFamily
 			}
 			items, done, err := (&Driver{}).listPage(t.Context(), drive.Context{DriveID: "pan189:test", Token: &model.TokenInfo{AccessToken: sess.SessionKey, RefreshToken: mustJSON(sess)}}, dirID, 1)
-			if err != nil || done || len(items) != 5 {
+			if err != nil || !done || len(items) != 5 {
 				t.Fatalf("listPage = %+v, %v, %v", items, done, err)
 			}
 			for i, want := range []string{"9007199254740992", "9007199254740993", "folder-c", "9007199254740994", "file-b"} {
@@ -191,6 +294,58 @@ func TestListPagePreservesDistinctIDs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDecodePan189SessionXML(t *testing.T) {
+	fields, err := decodePan189Session([]byte(`<userSession><sessionKey>personal-key</sessionKey><sessionSecret>personal-secret</sessionSecret><familySessionKey>family-key</familySessionKey><familySessionSecret>family-secret</familySessionSecret></userSession>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, expected := range map[string]string{
+		"sessionKey": "personal-key", "sessionSecret": "personal-secret",
+		"familySessionKey": "family-key", "familySessionSecret": "family-secret",
+	} {
+		if actual := strVal(fields, key); actual != expected {
+			t.Errorf("%s = %q, want %q", key, actual, expected)
+		}
+	}
+	if _, err := decodePan189Session([]byte(`<html><body>login</body></html>`)); err == nil {
+		t.Fatal("unexpectedly accepted unrelated XML")
+	}
+}
+
+func TestGetFileUsesListedFamilyMetadata(t *testing.T) {
+	cloud := drive.Context{UserID: "pan189:cached-family-test", DriveID: "pan189:cached-family-test"}
+	fileID := pan189FileID(spaceFamily, "file-123")
+	want := model.File{DriveID: cloud.DriveID, FileID: fileID, Name: "照片.jpg", Size: 1024}
+	drive.RememberFile(cloud.UserID, cloud.DriveID, want)
+	got, err := (&Driver{}).GetFile(t.Context(), cloud, fileID)
+	if err != nil || got.Name != want.Name || got.Size != want.Size {
+		t.Fatalf("family file metadata=%+v, error=%v", got, err)
+	}
+}
+
+func TestFamilyDownloadUsesListedFileSize(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	netx.TestTransportHook = pan189AuthRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/family/file/getFileDownloadUrl.action" {
+			if req.Header.Get("SessionKey") != "family-key" || req.URL.Query().Get("familyId") != "42" || req.URL.Query().Get("fileId") != "file-123" {
+				return nil, fmt.Errorf("family download request is not scoped correctly")
+			}
+			return pan189AuthResponse(req, http.StatusOK, nil, `{"fileDownloadUrl":"https://example.test/file"}`), nil
+		}
+		return pan189AuthResponse(req, http.StatusOK, nil, ""), nil
+	})
+	cloud := drive.Context{UserID: "pan189:download-size-test", DriveID: "pan189:download-size-test"}
+	session := &Session{SessionKey: "personal-key", SessionSecret: "personal-secret", FamilySessionKey: "family-key", FamilySessionSecret: "family-secret", FamilyID: "42"}
+	cloud.Token = &model.TokenInfo{AccessToken: session.SessionKey, RefreshToken: mustJSON(session)}
+	fileID := pan189FileID(spaceFamily, "file-123")
+	drive.RememberFile(cloud.UserID, cloud.DriveID, model.File{FileID: fileID, Size: 1024})
+	link, err := (&Driver{}).GetDownloadURL(t.Context(), cloud, fileID, 0)
+	if err != nil || link.Size != 1024 {
+		t.Fatalf("family download link=%+v, error=%v", link, err)
 	}
 }
 

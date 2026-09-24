@@ -154,6 +154,20 @@ type qiniuPart struct {
 	Etag       string `json:"etag"`
 }
 
+type qiniuUploadState struct {
+	Key      string      `json:"key"`
+	UploadID string      `json:"uploadId"`
+	Parts    []qiniuPart `json:"parts"`
+}
+
+func saveQiniuUploadState(sessionKey string, state qiniuUploadState) error {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return drive.SaveUploadSessionState(sessionKey, string(encoded), nil)
+}
+
 // qiniuJSON issues a JSON body request to upload.qiniup.com with the UpToken.
 func qiniuJSON(ctx context.Context, method, rawURL, upToken string, body any) (map[string]any, int, error) {
 	var reader io.Reader
@@ -248,6 +262,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	ui.Info.Size = size
 	ui.Info.SizeStr = model.FormatBytes(size)
 	folderID := ToILanzouFolderId(firstNonEmpty(ui.Info.ParentFileID, "0"))
+	sessionKey := drive.UploadSessionKey(c.UserID, c.DriveID, folderID, ui.Info.Name+"|"+md5hex, size)
 	up, _, err := d.request(ctx, c, "/7n/getUpToken", requestOptions{
 		method: http.MethodPost,
 		body: map[string]any{
@@ -270,6 +285,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	}
 	if upToken == "" && rapidFileID != "" {
 		// MD5 命中秒传：直接返回 fileId
+		drive.ClearUploadSession(sessionKey)
 		markUploadDone(ui, size, rapidFileID)
 		return nil
 	}
@@ -286,6 +302,15 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	}
 	now := time.Now()
 	key := fmt.Sprintf("disk/%d/%d/%d/%s/%016d", now.Year(), int(now.Month()), now.Day(), account, now.UnixMilli())
+	var saved qiniuUploadState
+	if encoded, _ := drive.LoadUploadSessionState(sessionKey); encoded != "" {
+		if json.Unmarshal([]byte(encoded), &saved) != nil || saved.Key == "" || saved.UploadID == "" {
+			drive.ClearUploadSession(sessionKey)
+			saved = qiniuUploadState{}
+		} else {
+			key = saved.Key
+		}
+	}
 	keyB64 := base64.RawURLEncoding.EncodeToString([]byte(key))
 
 	var commitToken string
@@ -336,18 +361,29 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 		ui.ReportUploadProgress(size, size)
 	} else {
 		initURL := fmt.Sprintf("https://upload.qiniup.com/buckets/%s/objects/%s/uploads", ILANZOU_CONF.Bucket, keyB64)
-		j, status, err := qiniuJSON(ctx, http.MethodPost, initURL, upToken, nil)
-		if err != nil {
-			return err
+		if saved.UploadID == "" {
+			j, status, initErr := qiniuJSON(ctx, http.MethodPost, initURL, upToken, nil)
+			if initErr != nil {
+				return initErr
+			}
+			if status >= 400 {
+				return fmt.Errorf("初始化分片上传失败 HTTP %d", status)
+			}
+			saved = qiniuUploadState{Key: key, UploadID: responseString(j, "uploadId")}
+			if saved.UploadID == "" {
+				return errors.New("初始化分片上传失败")
+			}
+			if err := saveQiniuUploadState(sessionKey, saved); err != nil {
+				return err
+			}
 		}
-		if status >= 400 {
-			return fmt.Errorf("初始化分片上传失败 HTTP %d", status)
+		parts := make([]qiniuPart, 0, len(saved.Parts))
+		uploaded := make(map[int]string, len(saved.Parts))
+		for _, part := range saved.Parts {
+			if part.PartNumber > 0 && part.Etag != "" {
+				uploaded[part.PartNumber] = part.Etag
+			}
 		}
-		uploadID := responseString(j, "uploadId")
-		if uploadID == "" {
-			return errors.New("初始化分片上传失败")
-		}
-		parts := make([]qiniuPart, 0)
 		partNum := int((size + uploadPartSize - 1) / uploadPartSize)
 		for i := 1; i <= partNum; i++ {
 			start := int64(i-1) * uploadPartSize
@@ -355,16 +391,24 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 			if size-start < cur {
 				cur = size - start
 			}
+			if etag := uploaded[i]; etag != "" {
+				parts = append(parts, qiniuPart{PartNumber: i, Etag: etag})
+				ui.ReportUploadProgress(start+cur, size)
+				continue
+			}
 			buff := make([]byte, cur)
 			if _, err := f.ReadAt(buff, start); err != nil && err != io.EOF {
 				return err
 			}
-			partURL := fmt.Sprintf("%s/%s/%d", initURL, uploadID, i)
+			partURL := fmt.Sprintf("%s/%s/%d", initURL, saved.UploadID, i)
 			pj, status, err := qiniuPut(ctx, partURL, upToken, buff)
 			if err != nil {
 				return err
 			}
 			if status >= 400 {
+				if status == http.StatusNotFound || status == http.StatusGone || status == 612 {
+					drive.ClearUploadSession(sessionKey)
+				}
 				return fmt.Errorf("分片上传失败 %d", status)
 			}
 			etag := responseString(pj, "etag")
@@ -372,9 +416,13 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 				return errors.New("分片上传未返回 etag")
 			}
 			parts = append(parts, qiniuPart{PartNumber: i, Etag: etag})
+			saved.Parts = append(saved.Parts, qiniuPart{PartNumber: i, Etag: etag})
+			if err := saveQiniuUploadState(sessionKey, saved); err != nil {
+				return err
+			}
 			ui.ReportUploadProgress(start+cur, size)
 		}
-		finURL := fmt.Sprintf("%s/%s", initURL, uploadID)
+		finURL := fmt.Sprintf("%s/%s", initURL, saved.UploadID)
 		fj, status, err := qiniuJSON(ctx, http.MethodPost, finURL, upToken, map[string]any{
 			"fnmae": ui.Info.Name, // 服务端字段拼写即 fnmae（历史沿用）
 			"parts": parts,
@@ -383,9 +431,15 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 			return err
 		}
 		if status >= 400 {
+			if status == http.StatusNotFound || status == http.StatusGone || status == 612 {
+				drive.ClearUploadSession(sessionKey)
+			}
 			return fmt.Errorf("完成分片上传失败 HTTP %d", status)
 		}
 		commitToken = responseString(fj, "token")
+		if commitToken != "" {
+			drive.ClearUploadSession(sessionKey)
+		}
 	}
 	if commitToken == "" {
 		return errors.New("上传完成令牌为空")

@@ -9,7 +9,8 @@
 ## 能力声明（yike.go:38-48）
 
 ```
-createFolder, photoAlbum, permanentDelete: true
+createFolder, photoAlbum, recycleBin, trashView, trashRestore: true
+permanentDelete: false
 createDateFolder: false
 不声明 ProvideHashes/RapidUploadHashes  // 按需求不参与跨盘秒传
 ```
@@ -66,7 +67,9 @@ createDateFolder: false
 
 ## 6. 回收站
 
-❌ 无（设计）。`yike.go:620-622` Trash 直接转发 Delete，permanentDelete:true。
+✅ 照片回收站：`/file/v1/listrecycle` 按游标分页，`/file/v1/restore?fsid_list=...` 恢复；普通删除改用当前网页端的 `GET /file/v1/delete?fsid_list=...`。以上接口来自一刻相册网页脚本 `chunk-common.ad887183.js`，已通过模拟请求测试，尚需真实账号确认。
+
+相册删除与照片回收站不是同一套接口；当前不展示相册回收站，不声明永久删除。照片永久删除需要 `/file/v1/delrecycle`，但当前 `Delete` 仅移入回收站，因此关闭 `permanentDelete` 以防 UI 误报彻底删除。
 
 ---
 

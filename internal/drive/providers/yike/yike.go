@@ -41,8 +41,10 @@ func init() {
 			"createFolder":     true,
 			"createDateFolder": false,
 			"photoAlbum":       true,
-			"recycleBin":       false,
-			"permanentDelete":  true,
+			"recycleBin":       true,
+			"permanentDelete":  false,
+			"trashView":        true,
+			"trashRestore":     true,
 			"move":             false,
 			"copy":             false,
 		}, nil),
@@ -150,8 +152,16 @@ func (c *client) do(ctx context.Context, method, rawURL string, query, form url.
 		Errmsg   string `json:"errmsg"`
 		ErrorMsg string `json:"error_msg"`
 	}
-	_ = json.Unmarshal(body, &wrapper)
+	if err := json.Unmarshal(body, &wrapper); err != nil {
+		return nil, fmt.Errorf("一刻相册 API 响应无效: %w", err)
+	}
 	errno := wrapper.Errno
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if errno == -6 || errno == 111 {
+			return nil, drive.AuthExpired("一刻登录已失效，请重新粘贴 BDUSS/Cookie")
+		}
+		return nil, fmt.Errorf("一刻相册 API HTTP %d", resp.StatusCode)
+	}
 	if errno == 0 {
 		return body, nil
 	}
@@ -373,8 +383,8 @@ func (c *client) Delete(ctx context.Context, fileIDs []string) error {
 	}
 	if len(fsids) > 0 {
 		q := url.Values{}
-		q.Set("fsids", strings.Join(fsids, ","))
-		if _, err := c.request(ctx, http.MethodPost, fileV1+"/delete", q); err != nil {
+		q.Set("fsid_list", strings.Join(fsids, ","))
+		if _, err := c.request(ctx, http.MethodGet, fileV1+"/delete", q); err != nil {
 			errs = append(errs, fmt.Errorf("删除照片失败: %w", err))
 		}
 	}
@@ -585,7 +595,20 @@ func (d *Driver) Rename(ctx context.Context, c drive.Context, fileID, name strin
 }
 
 func (d *Driver) Trash(ctx context.Context, c drive.Context, fileIDs []string) ([]string, error) {
-	return d.Delete(ctx, c, idsToRefs(fileIDs))
+	files := make([]drive.FileRef, 0, len(fileIDs))
+	var failed []error
+	for _, id := range fileIDs {
+		if strings.HasPrefix(id, "album:") || parseFsid(id) == "" || isRoot(id) {
+			failed = append(failed, fmt.Errorf("%s: 相册和根目录不支持移入照片回收站", id))
+			continue
+		}
+		files = append(files, drive.FileRef{ID: id})
+	}
+	if len(files) == 0 {
+		return nil, errors.Join(failed...)
+	}
+	completed, err := d.Delete(ctx, c, files)
+	return completed, errors.Join(append(failed, err)...)
 }
 
 func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileRef) ([]string, error) {
@@ -740,14 +763,6 @@ func decryptYikeMd5(encryptMd5 string) string {
 	}
 	decrypted := string(out)
 	return decrypted[8:16] + decrypted[0:8] + decrypted[24:32] + decrypted[16:24]
-}
-
-func idsToRefs(ids []string) []drive.FileRef {
-	refs := make([]drive.FileRef, 0, len(ids))
-	for _, id := range ids {
-		refs = append(refs, drive.FileRef{ID: id})
-	}
-	return refs
 }
 
 func mustJSON(v any) string {

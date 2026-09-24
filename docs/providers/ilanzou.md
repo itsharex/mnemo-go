@@ -9,8 +9,8 @@
 ## 能力声明（ilanzou.go:18-23）
 
 ```
-permanentDelete: true
-search, createShare, copy, recycleBin, trashView: false
+recycleBin, trashView, trashRestore, permanentDelete: true
+search, createShare, copy: false
 ```
 
 ---
@@ -62,6 +62,7 @@ search, createShare, copy, recycleBin, trashView: false
 | getUpToken 秒传 | ✅ | `upload.go:62-81` POST /7n/getUpToken MD5 命中返回 fileId | 无 |
 | 整包上传 ≤8MB | ✅ | `upload.go:93-119` multipart → upload.qiniup.com | 无 |
 | 分片上传 >8MB | ✅ | `upload.go:121-161` initUpload → 逐片 PUT → complete（七牛分片） | 无 |
+| 分片断点续传 >8MB | ✅ | 保存 upload ID、对象 key 和已确认分片 ETag；重试时续用当前会话，失效会话清理后下次重试重新开始 | 七牛会话过期时需重传；≤8MB 整包上传只能从头重试 |
 | 上传确认轮询 | ✅ | `upload.go` POST /7n/results 最多 10 次每秒，支持上下文取消并回写实际文件大小/文件 ID | 无 |
 
 > ilanzou 是蓝奏系中唯一支持秒传 + 分片上传的。
@@ -82,13 +83,14 @@ search, createShare, copy, recycleBin, trashView: false
 | Rename | ✅ | `ilanzou.go:133-145` → `filecmd.go:32-41` /file/edit 或 /file/folder/edit，kind fallback | 无 |
 | Move | ✅ | `ilanzou.go:125-160` → `filecmd.go:55-79` /file/folder/move CSV，kind fallback | 无（支持文件夹） |
 | Copy | ❌(设计) | `ilanzou.go:170-172` 返回空 | 无 |
-| Delete | ✅ | `ilanzou.go:103-124` → `filecmd.go:44-53` /file/delete CSV 批量 + fallback | 无 |
+| Trash | ✅ | `ilanzou.go` → `filecmd.go` /file/delete status=0，按类型传文件或文件夹 ID | 真实账号待验证 |
+| Delete | ✅ | `ilanzou.go` → `filecmd.go` /file/delete status=-1 | 真实账号待验证 |
 
 ---
 
 ## 8. 回收站 / 分享 / 搜索
 
-❌ 均无（设计）。ilanzou `createShare:false`。
+回收站支持 `/proved/record/recycle/list` 分页查看和 `/proved/file/resume` 按文件／文件夹 ID 还原，列表采用 `file:`／`folder:` 前缀避免同号冲突；实现见 `trash.go`。路径与参数来自官网当前网页脚本 `chunk.RecycleBin.1787036885556.a58765f0.js`，本地模拟测试已覆盖大整数 ID、分页、分类还原及失败响应，真实账号尚未验证。分享与搜索仍不支持（`createShare:false`）。
 
 ---
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,93 @@ func TestFileSizeAcceptsQuotedAndNumericIntegers(t *testing.T) {
 		if err := json.Unmarshal([]byte(`{"size":`+raw+`}`), &file); err == nil {
 			t.Errorf("accepted invalid size %s", raw)
 		}
+	}
+}
+
+func TestRefreshAccountDoesNotExpireRotatedToken(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	current := &model.TokenInfo{AccessToken: "old-access", RefreshToken: "old-refresh", DeviceID: "device"}
+	drive.SetTokenResolver(func(_, _ string) (*model.TokenInfo, error) { return drive.CloneToken(current), nil })
+	t.Cleanup(func() { drive.SetTokenResolver(nil) })
+	netx.TestTransportHook = pikpakRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/v1/auth/token" {
+			return nil, fmt.Errorf("unexpected request: %s", req.URL)
+		}
+		current = &model.TokenInfo{AccessToken: "new-access", RefreshToken: "new-refresh", DeviceID: "device"}
+		return pikpakResponse(req, http.StatusBadRequest, `{"error":"invalid_grant"}`), nil
+	})
+	token := drive.CloneToken(current)
+	updated, err := (&Driver{}).RefreshAccount(t.Context(), drive.Context{UserID: "pikpak:test", DriveID: "pikpak:test", Token: token}, token)
+	if err != nil || updated.RefreshToken != "new-refresh" || updated.AccessToken != "new-access" {
+		t.Fatalf("rotated token = %+v, %v", updated, err)
+	}
+}
+
+func TestConcurrentRefreshAccountPersistsTokenBeforeNextRefresh(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	persisted := &model.TokenInfo{AccessToken: "old-access", RefreshToken: "old-refresh", DeviceID: "device"}
+	var storeMu sync.Mutex
+	drive.SetTokenResolver(func(_, _ string) (*model.TokenInfo, error) {
+		storeMu.Lock()
+		defer storeMu.Unlock()
+		return drive.CloneToken(persisted), nil
+	})
+	drive.SetTokenUpdater(func(_, _ string, token *model.TokenInfo) error {
+		storeMu.Lock()
+		defer storeMu.Unlock()
+		persisted = drive.CloneToken(token)
+		return nil
+	})
+	t.Cleanup(func() {
+		drive.SetTokenResolver(nil)
+		drive.SetTokenUpdater(nil)
+	})
+	var requestMu sync.Mutex
+	refreshRequests := 0
+	netx.TestTransportHook = pikpakRoundTripper(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/auth/token":
+			requestMu.Lock()
+			refreshRequests++
+			requestMu.Unlock()
+			return pikpakResponse(req, http.StatusOK, `{"access_token":"new-access","refresh_token":"new-refresh"}`), nil
+		case "/drive/v1/about":
+			return pikpakResponse(req, http.StatusOK, `{"quota":{"limit":100,"used":10}}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request: %s", req.URL)
+		}
+	})
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			token := &model.TokenInfo{AccessToken: "old-access", RefreshToken: "old-refresh", DeviceID: "device"}
+			c := drive.Context{UserID: "pikpak:concurrent", DriveID: "pikpak:concurrent", Token: token}
+			updated, err := (&Driver{}).RefreshAccount(context.Background(), c, token)
+			if err == nil && (updated.AccessToken != "new-access" || updated.RefreshToken != "new-refresh") {
+				err = fmt.Errorf("unexpected token: %+v", updated)
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	requestMu.Lock()
+	defer requestMu.Unlock()
+	if refreshRequests != 1 {
+		t.Fatalf("refresh requests = %d, want 1", refreshRequests)
+	}
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	if persisted.RefreshToken != "new-refresh" {
+		t.Fatalf("persisted refresh token = %s", persisted.RefreshToken)
 	}
 }
 

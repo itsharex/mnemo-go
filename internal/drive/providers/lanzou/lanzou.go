@@ -23,9 +23,10 @@ func init() {
 			"shareHistory":    true,
 			"copy":            false,
 			"move":            true,
-			"recycleBin":      false,
-			"permanentDelete": true,
-			"trashView":       false,
+			"recycleBin":      true,
+			"permanentDelete": false,
+			"trashView":       true,
+			"trashRestore":    true,
 		}, nil),
 		Login: drive.LoginConfig{Fields: []drive.LoginField{
 			{Key: "cookie", Type: "text", Label: "蓝奏云 Cookie", Required: false, Hint: "粘贴 Cookie 直接登录"},
@@ -168,9 +169,29 @@ func (d *Driver) Rename(ctx context.Context, c drive.Context, fileID, name strin
 	return d.renameFile(ctx, c, fileID, name)
 }
 
-// Trash: 蓝奏 has no recycle bin; the legacy adapter returned [].
 func (d *Driver) Trash(ctx context.Context, c drive.Context, fileIDs []string) ([]string, error) {
-	return []string{}, nil
+	var completed []string
+	var failures []error
+	for _, id := range fileIDs {
+		if isRootSentinel(id) {
+			failures = append(failures, fmt.Errorf("%s: 不允许删除根目录", id))
+			continue
+		}
+		isDir, known := drive.Lookup(c.UserID, c.DriveID, id)
+		if !known {
+			if err := d.removeItem(ctx, c, id, false); err == nil {
+				completed = append(completed, id)
+				continue
+			}
+			isDir = true
+		}
+		if err := d.removeItem(ctx, c, id, isDir); err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", id, err))
+		} else {
+			completed = append(completed, id)
+		}
+	}
+	return completed, errors.Join(failures...)
 }
 
 // Delete permanently removes files/folders (task 6 / task 3), guessing the

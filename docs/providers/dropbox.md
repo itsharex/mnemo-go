@@ -94,8 +94,10 @@ SetHashes(["dropbox"], nil)
 | 操作 | 状态 | 说明 |
 |------|:----:|------|
 | Trash | ✅ | `dropbox.go:216` /files/delete_v2 |
-| Restore | ❌ | NotSupported |
-| TrashView | ❌ | 未设 |
+| Restore | ✅（仅文件） | `/files/list_revisions` 确认当前已删除后，通过 `/files/restore` 使用最新有效修订号恢复 |
+| TrashView | ✅（仅文件） | `/files/list_folder` 递归分页并开启 `include_deleted`；过滤无可用修订号及文件夹 |
+
+> Dropbox API 不提供可靠的文件夹修订号，本实现不显示无法从 API 恢复的文件夹；需要按删除记录逐项查询修订号，大量已删除文件时列表可能较慢。已通过模拟接口验证，尚未用真实账号核验。
 
 ---
 

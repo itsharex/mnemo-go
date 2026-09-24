@@ -279,6 +279,15 @@ func safeDownloadTask(task model.DownloadTask) model.DownloadTask {
 	return task
 }
 
+func rememberDownloadSource(task *model.DownloadTask) {
+	if task.SourcePath != "" && task.FileID != "" && task.UserID != "" && task.DriveID != "" {
+		file, _ := drive.CachedFile(task.UserID, task.DriveID, task.FileID)
+		file.FileID = task.FileID
+		file.Path = task.SourcePath
+		drive.RememberFile(task.UserID, task.DriveID, file)
+	}
+}
+
 // addDownloadTask atomically assigns a collision-free final path and publishes
 // the task. Serializing assignment through targetMu prevents two concurrent
 // enqueue calls from selecting the same .part/.state/final file set.
@@ -360,16 +369,17 @@ func (m *Manager) AddDownload(userID, driveID string, f model.File) (*model.Down
 	// in a later detail response.
 	drive.RememberFile(userID, driveID, f)
 	t := &model.DownloadTask{
-		ID:       newID("dl"),
-		UserID:   userID,
-		DriveID:  driveID,
-		Provider: provider,
-		FileID:   f.FileID,
-		Name:     f.Name,
-		Size:     f.Size,
-		Status:   "queued",
-		Created:  time.Now().Unix(),
-		Updated:  time.Now().Unix(),
+		ID:         newID("dl"),
+		UserID:     userID,
+		DriveID:    driveID,
+		Provider:   provider,
+		FileID:     f.FileID,
+		SourcePath: f.Path,
+		Name:       f.Name,
+		Size:       f.Size,
+		Status:     "queued",
+		Created:    time.Now().Unix(),
+		Updated:    time.Now().Unix(),
 	}
 	if err := m.addDownloadTask(t, f.Name); err != nil {
 		return nil, err
@@ -469,6 +479,9 @@ func (m *Manager) runDownload(t *model.DownloadTask) {
 		return
 	}
 	opts := dlengine.Options{Concurrency: concurrencyFromSettings(s)}
+	if t.UserID != "" && t.DriveID != "" && t.FileID != "" {
+		opts.ResourceID = t.UserID + "\x00" + t.DriveID + "\x00" + t.FileID
+	}
 	if s.MaxDownloadSpeed > 0 {
 		opts.MaxSpeed = 0
 		m.speedLimiter.SetRate(s.MaxDownloadSpeed)
@@ -477,6 +490,7 @@ func (m *Manager) runDownload(t *model.DownloadTask) {
 	}
 	opts.Limiter = m.speedLimiter
 	if url == "" && t.UserID != "" {
+		rememberDownloadSource(t)
 		u, err := drive.GetDownloadURLContext(ctx, t.UserID, t.DriveID, t.FileID, 14400)
 		if err != nil {
 			m.mu.Lock()
@@ -561,6 +575,7 @@ func (m *Manager) runDownload(t *model.DownloadTask) {
 	// running. Re-resolve once for account-backed tasks and reuse the .part
 	// file; direct URL tasks have no provider context and remain unchanged.
 	if err != nil && t.UserID != "" && isExpiredDownloadError(err) && ctx.Err() == nil {
+		rememberDownloadSource(t)
 		if fresh, refreshErr := drive.GetDownloadURLContext(ctx, t.UserID, t.DriveID, t.FileID, 14400); refreshErr == nil && fresh != nil && fresh.URL != "" {
 			url = fresh.URL
 			opts.Headers = fresh.Headers

@@ -402,6 +402,19 @@ type uploadRewriteTransport struct {
 	host string
 }
 
+type qiniuMemorySessionStore struct{ sessions map[string]string }
+
+func (store *qiniuMemorySessionStore) SaveUploadSession(string, []int) error { return nil }
+func (store *qiniuMemorySessionStore) LoadUploadSession(string) []int        { return nil }
+func (store *qiniuMemorySessionStore) ClearUploadSession(key string)         { delete(store.sessions, key) }
+func (store *qiniuMemorySessionStore) SaveUploadSessionState(key, id string, _ []int) error {
+	store.sessions[key] = id
+	return nil
+}
+func (store *qiniuMemorySessionStore) LoadUploadSessionState(key string) (string, []int) {
+	return store.sessions[key], nil
+}
+
 func (t uploadRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	base := t.base
 	if base == nil {
@@ -466,6 +479,67 @@ func TestUploadOneFileUsesActualSizeAndCompletes(t *testing.T) {
 	}
 	if qiniuCalls != 1 {
 		t.Fatalf("qiniu calls = %d, want 1", qiniuCalls)
+	}
+}
+
+func TestMultipartUploadResumesConfirmedQiniuParts(t *testing.T) {
+	withNoThrottle(t)
+	store := &qiniuMemorySessionStore{sessions: map[string]string{}}
+	drive.SetUploadSessionStore(store)
+	t.Cleanup(func() { drive.SetUploadSessionStore(nil) })
+	oldBase, oldClient := ILANZOU_CONF.Base, httpClient
+	t.Cleanup(func() { ILANZOU_CONF.Base = oldBase; httpClient = oldClient })
+	firstRun := true
+	initialized, partOne, partTwo, completed := 0, 0, 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/7n/getUpToken"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"code": 200, "upToken": "token"})
+		case strings.HasSuffix(request.URL.Path, "/uploads") && request.Method == http.MethodPost:
+			initialized++
+			_ = json.NewEncoder(writer).Encode(map[string]any{"uploadId": "session"})
+		case strings.HasSuffix(request.URL.Path, "/session/1") && request.Method == http.MethodPut:
+			partOne++
+			_ = json.NewEncoder(writer).Encode(map[string]any{"etag": "first"})
+		case strings.HasSuffix(request.URL.Path, "/session/2") && request.Method == http.MethodPut:
+			partTwo++
+			if firstRun {
+				http.Error(writer, "interrupted", http.StatusBadRequest)
+			} else {
+				_ = json.NewEncoder(writer).Encode(map[string]any{"etag": "second"})
+			}
+		case strings.HasSuffix(request.URL.Path, "/session") && request.Method == http.MethodPost:
+			completed++
+			_ = json.NewEncoder(writer).Encode(map[string]any{"token": "commit"})
+		case strings.HasSuffix(request.URL.Path, "/7n/results"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"code": 200, "list": []any{map[string]any{"status": 1, "fileId": "uploaded"}}})
+		default:
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	ILANZOU_CONF.Base = server.URL
+	httpClient = &http.Client{Transport: uploadRewriteTransport{host: strings.TrimPrefix(server.URL, "http://")}}
+	path := t.TempDir() + "/large.bin"
+	if err := os.WriteFile(path, make([]byte, uploadPartSize+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	account := drive.Context{UserID: "ilanzou:test", DriveID: "ilanzou:test", Token: &model.TokenInfo{AccessToken: "api-token", DeviceID: "uuid"}}
+	makeUpload := func() *model.UploadingUI {
+		return &model.UploadingUI{Info: model.UploadInfo{LocalFilePath: path, ParentFileID: "0", Name: "large.bin"}}
+	}
+	if err := (&Driver{}).UploadOneFile(context.Background(), account, makeUpload()); err == nil {
+		t.Fatal("first attempt should fail")
+	}
+	if initialized != 1 || partOne != 1 || partTwo != 1 || len(store.sessions) != 1 {
+		t.Fatalf("first attempt: init=%d parts=%d/%d sessions=%v", initialized, partOne, partTwo, store.sessions)
+	}
+	firstRun = false
+	if err := (&Driver{}).UploadOneFile(context.Background(), account, makeUpload()); err != nil {
+		t.Fatal(err)
+	}
+	if initialized != 1 || partOne != 1 || partTwo != 2 || completed != 1 || len(store.sessions) != 0 {
+		t.Fatalf("resume: init=%d parts=%d/%d completed=%d sessions=%v", initialized, partOne, partTwo, completed, store.sessions)
 	}
 }
 

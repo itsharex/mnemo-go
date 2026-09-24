@@ -17,13 +17,13 @@ func TestProviderDeleteCapabilitiesAreExplicit(t *testing.T) {
 		model.ProviderOnedrive: {recycle: true, permanent: false},
 		model.ProviderDropbox:  {recycle: true, permanent: false},
 		model.ProviderPan123:   {recycle: true, permanent: true},
-		model.ProviderLanzou:   {recycle: false, permanent: true},
-		model.ProviderIlanzou:  {recycle: false, permanent: true},
+		model.ProviderLanzou:   {recycle: true, permanent: false},
+		model.ProviderIlanzou:  {recycle: true, permanent: true},
 		model.ProviderPan139:   {recycle: true, permanent: true},
 		model.ProviderPan189:   {recycle: true, permanent: true},
-		model.ProviderYike:     {recycle: false, permanent: true},
+		model.ProviderYike:     {recycle: true, permanent: false},
 		model.ProviderAliopen:  {recycle: true, permanent: true},
-		model.ProviderGuangya:  {recycle: false, permanent: true},
+		model.ProviderGuangya:  {recycle: true, permanent: false},
 		model.ProviderWebdav:   {recycle: false, permanent: true},
 		model.ProviderS3:       {recycle: false, permanent: true},
 	}
@@ -35,6 +35,20 @@ func TestProviderDeleteCapabilitiesAreExplicit(t *testing.T) {
 		if caps.RecycleBin != want.recycle || caps.PermanentDelete != want.permanent {
 			t.Errorf("%s delete caps = recycle:%v permanent:%v, want recycle:%v permanent:%v", provider, caps.RecycleBin, caps.PermanentDelete, want.recycle, want.permanent)
 		}
+	}
+}
+
+func TestDropboxOnlyExposesRecoverableFileTrash(t *testing.T) {
+	caps := drive.RegistryCaps(model.ProviderDropbox)
+	if !caps.TrashView || !caps.TrashRestore || caps.TrashPurge || caps.TrashClear {
+		t.Fatalf("Dropbox trash capabilities = %+v", caps)
+	}
+}
+
+func TestGuangyaExposesRestoreButNotPermanentDelete(t *testing.T) {
+	caps := drive.RegistryCaps(model.ProviderGuangya)
+	if !caps.RecycleBin || !caps.TrashView || !caps.TrashRestore || caps.PermanentDelete {
+		t.Fatalf("光鸭回收站能力声明不正确: %+v", caps)
 	}
 }
 

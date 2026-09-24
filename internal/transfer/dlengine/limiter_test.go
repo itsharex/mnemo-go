@@ -373,6 +373,58 @@ func TestResumeIdentityRequiresSameValidator(t *testing.T) {
 	}
 }
 
+func TestSignedURLRotationRequiresStableIdentityAndValidator(t *testing.T) {
+	previous := state{URLHash: urlFingerprint("https://example.test/file?sig=old"), ResourceHash: urlFingerprint("account/drive/file"), ETag: `"v1"`}
+	currentURL := "https://example.test/file?sig=new"
+	currentHash := urlFingerprint(currentURL)
+	if !stateResourceMatches(previous, currentURL, currentHash, previous.ResourceHash, resourceValidator{ETag: `"v1"`}) {
+		t.Fatal("同一文件和 ETag 的新签名链接应继续下载")
+	}
+	if stateResourceMatches(previous, currentURL, currentHash, previous.ResourceHash, resourceValidator{ETag: `"v2"`}) ||
+		stateResourceMatches(previous, currentURL, currentHash, previous.ResourceHash, resourceValidator{}) ||
+		stateResourceMatches(previous, currentURL, currentHash, urlFingerprint("other/file"), resourceValidator{ETag: `"v1"`}) ||
+		stateResourceMatches(previous, "https://example.test/file?sig=old", previous.URLHash, urlFingerprint("other/file"), resourceValidator{ETag: `"v1"`}) {
+		t.Fatal("缺少稳定身份或校验值变化时不得复用断点")
+	}
+}
+
+func TestDownloadResumesAfterSignedURLRotation(t *testing.T) {
+	payload := bytes.Repeat([]byte("signed-resume"), 512)
+	chunkSize := int64(len(payload) / 2)
+	var firstChunkRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		start, end, ok := parseTestRange(request.Header.Get("Range"))
+		if !ok {
+			http.Error(writer, "range required", http.StatusBadRequest)
+			return
+		}
+		if start == 0 && end != 0 {
+			firstChunkRequests++
+		}
+		writer.Header().Set("ETag", `"stable"`)
+		writeTestRange(writer, start, end, int64(len(payload)), payload[start:end+1])
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "signed.bin")
+	part := make([]byte, len(payload))
+	copy(part, payload[:chunkSize])
+	if err := os.WriteFile(path+".part", part, 0600); err != nil {
+		t.Fatal(err)
+	}
+	resourceID := "account\x00drive\x00file"
+	checkpoint := &state{URLHash: urlFingerprint(server.URL + "/file?sig=old"), ResourceHash: urlFingerprint(resourceID), Total: int64(len(payload)), Chunk: chunkSize, Done: []bool{true, false}, ETag: `"stable"`}
+	if err := persistState(path+".state.json", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := Download(context.Background(), Options{Concurrency: 1, ChunkSize: chunkSize, MinSize: 1, ResourceID: resourceID}, server.URL+"/file?sig=new", path, nil); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(actual, payload) || firstChunkRequests != 0 {
+		t.Fatalf("签名轮换后未复用已完成分片: err=%v firstChunkRequests=%d", err, firstChunkRequests)
+	}
+}
+
 func TestPersistStateHashesSignedURL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "download.state.json")
 	rawURL := "https://download.example/file?access_token=secret123&signature=private"

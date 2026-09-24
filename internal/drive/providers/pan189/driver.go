@@ -69,13 +69,21 @@ func (d *Driver) listPage(ctx context.Context, c drive.Context, dirID string, pa
 		}
 		return pan189RootEntries(c.DriveID), true, nil
 	}
+	space, _ := pan189SpaceID(dirID)
+	if space == spaceFamily {
+		if err := d.ensureFamilyID(ctx, c); err != nil {
+			return nil, true, err
+		}
+	}
 	sess, err := sessionOf(c.Token)
 	if err != nil {
 		return nil, true, err
 	}
-	space, _ := pan189SpaceID(dirID)
 	isFamily, familyID := cloudInfoForID(sess, dirID)
 	parent := toFolderID(dirID)
+	if isFamily && parent == Pan189DefaultFolder {
+		parent = ""
+	}
 	var (
 		rawURL string
 		query  map[string]string
@@ -162,7 +170,7 @@ func (d *Driver) listPage(ctx context.Context, c drive.Context, dirID string, pa
 		}
 		seen[item.FileID] = true
 	}
-	done := len(res.FileListAO.FolderList) == 0 && len(res.FileListAO.FileList) == 0
+	done := len(res.FileListAO.FolderList)+len(res.FileListAO.FileList) < 100
 	return items, done, nil
 }
 
@@ -233,6 +241,9 @@ func (d *Driver) GetInfo(ctx context.Context, c drive.Context, fileID string) (a
 }
 
 func (d *Driver) GetFile(ctx context.Context, c drive.Context, fileID string) (*model.File, error) {
+	if cached, ok := drive.CachedFile(c.UserID, c.DriveID, fileID); ok {
+		return &cached, nil
+	}
 	info, err := d.GetInfo(ctx, c, fileID)
 	if err != nil {
 		return nil, err
@@ -366,6 +377,9 @@ func (d *Driver) GetDownloadURL(ctx context.Context, c drive.Context, fileID str
 	u, size, err := d.downloadInfo(ctx, c, fileID)
 	if err != nil {
 		return nil, err
+	}
+	if cached, ok := drive.CachedFile(c.UserID, c.DriveID, fileID); ok && cached.Size > 0 {
+		size = cached.Size
 	}
 	return &model.DownloadURL{
 		DriveID:      c.DriveID,

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -32,7 +33,7 @@ import (
 const providerID = model.ProviderS3
 
 const (
-	s3MultipartThreshold = 64 * 1024 * 1024
+	s3MultipartThreshold = 16 * 1024 * 1024
 	s3MultipartPartSize  = 16 * 1024 * 1024
 	s3CopyCutoff         = 5*1024*1024*1024 - 64*1024*1024
 	s3CopyPartSize       = 64 * 1024 * 1024
@@ -984,7 +985,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 			ContentLength: aws.Int64(size),
 		}, func(o *s3.Options) { o.HTTPClient = netx.UploadHTTPClient{Client: o.HTTPClient} })
 	} else {
-		err = uploadMultipart(ctx, cc, key, f, ui)
+		err = uploadMultipart(ctx, c, cc, key, f, ui)
 	}
 	if err != nil {
 		return fmt.Errorf("s3: upload: %w", err)
@@ -1001,31 +1002,50 @@ func updateUploadProgress(ui *model.UploadingUI, read int64) {
 	ui.ReportUploadProgress(read, ui.Info.Size)
 }
 
-func uploadMultipart(ctx context.Context, cc *conn, key string, f *os.File, ui *model.UploadingUI) (err error) {
-	created, err := cc.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket: aws.String(cc.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return err
-	}
-	if created.UploadId == nil || *created.UploadId == "" {
-		return errors.New("multipart upload: 服务端未返回 upload id")
-	}
-	uploadID := *created.UploadId
-	completed := false
-	defer func() {
-		if !completed {
-			_, _ = cc.client.AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{
-				Bucket: aws.String(cc.bucket), Key: aws.String(key), UploadId: aws.String(uploadID),
-			})
-		}
-	}()
-
+func uploadMultipart(ctx context.Context, account drive.Context, cc *conn, key string, f *os.File, ui *model.UploadingUI) error {
 	partSize := multipartPartSize(ui.Info.Size)
 	capacity := int((ui.Info.Size + partSize - 1) / partSize)
 	if capacity < 1 {
 		capacity = 1
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	sessionName := fmt.Sprintf("%s|%x|%d", key, hasher.Sum(nil), partSize)
+	sessionKey := drive.UploadSessionKey(account.UserID, account.DriveID, cc.bucket, sessionName, ui.Info.Size)
+	uploadID, _ := drive.LoadUploadSessionState(sessionKey)
+	remoteParts := map[int32]types.Part{}
+	var err error
+	if uploadID != "" {
+		remoteParts, err = listS3UploadParts(ctx, cc, key, uploadID)
+		if err != nil {
+			if !isMissingS3Upload(err) {
+				return fmt.Errorf("multipart upload: 查询已上传分片失败: %w", err)
+			}
+			drive.ClearUploadSession(sessionKey)
+			uploadID = ""
+		}
+	}
+	if uploadID == "" {
+		created, createErr := cc.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(cc.bucket), Key: aws.String(key)})
+		if createErr != nil {
+			return createErr
+		}
+		if created.UploadId == nil || *created.UploadId == "" {
+			return errors.New("multipart upload: 服务端未返回 upload id")
+		}
+		uploadID = *created.UploadId
+		if err := drive.SaveUploadSessionState(sessionKey, uploadID, nil); err != nil {
+			_, _ = cc.client.AbortMultipartUpload(context.Background(), &s3.AbortMultipartUploadInput{Bucket: aws.String(cc.bucket), Key: aws.String(key), UploadId: aws.String(uploadID)})
+			return err
+		}
 	}
 	parts := make([]types.CompletedPart, 0, capacity)
 	buf := make([]byte, int(partSize))
@@ -1041,6 +1061,13 @@ func uploadMultipart(ctx context.Context, cc *conn, key string, f *os.File, ui *
 		}
 		if n == 0 {
 			break
+		}
+		if remote, ok := remoteParts[partNumber]; ok && remote.Size != nil && *remote.Size == int64(n) && remote.ETag != nil && *remote.ETag != "" {
+			parts = append(parts, types.CompletedPart{PartNumber: aws.Int32(partNumber), ETag: remote.ETag})
+			total += int64(n)
+			updateUploadProgress(ui, total)
+			partNumber++
+			continue
 		}
 		out, err := cc.client.UploadPart(ctx, &s3.UploadPartInput{
 			Bucket:     aws.String(cc.bucket),
@@ -1075,8 +1102,39 @@ func uploadMultipart(ctx context.Context, cc *conn, key string, f *os.File, ui *
 	if err != nil {
 		return err
 	}
-	completed = true
+	drive.ClearUploadSession(sessionKey)
 	return nil
+}
+
+func listS3UploadParts(ctx context.Context, cc *conn, key, uploadID string) (map[int32]types.Part, error) {
+	parts := map[int32]types.Part{}
+	var marker *string
+	seenMarkers := map[string]bool{}
+	for {
+		out, err := cc.client.ListParts(ctx, &s3.ListPartsInput{Bucket: aws.String(cc.bucket), Key: aws.String(key), UploadId: aws.String(uploadID), PartNumberMarker: marker})
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range out.Parts {
+			if part.PartNumber != nil && *part.PartNumber > 0 {
+				parts[*part.PartNumber] = part
+			}
+		}
+		if !aws.ToBool(out.IsTruncated) {
+			return parts, nil
+		}
+		next := aws.ToString(out.NextPartNumberMarker)
+		if next == "" || seenMarkers[next] {
+			return nil, errors.New("multipart upload: 分片列表游标无效")
+		}
+		seenMarkers[next] = true
+		marker = aws.String(next)
+	}
+}
+
+func isMissingS3Upload(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && strings.EqualFold(apiErr.ErrorCode(), "NoSuchUpload") || isNotFoundError(err)
 }
 
 func multipartPartSize(size int64) int64 {

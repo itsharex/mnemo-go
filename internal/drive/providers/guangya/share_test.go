@@ -30,6 +30,29 @@ func guangyaResponse(req *http.Request, status int, body string) *http.Response 
 	}
 }
 
+func TestListTrashUsesRecycleDirectory(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	netx.TestTransportHook = guangyaRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/userres/v1/file/get_file_list" {
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			return nil, err
+		}
+		if body["dirType"] != float64(4) || body["parentId"] != "" {
+			t.Errorf("recycle list body: %+v", body)
+		}
+		return guangyaResponse(req, http.StatusOK, `{"data":{"list":[{"fileId":"deleted-1","fileName":"测试.txt","fileSize":3}],"total":1}}`), nil
+	})
+	session := &Session{AccessToken: "access-token", RefreshToken: "refresh-token", DeviceID: "device-test"}
+	items, err := (&Driver{}).ListTrash(t.Context(), drive.Context{DriveID: "guangya:test", Token: &model.TokenInfo{AccessToken: session.AccessToken, RefreshToken: mustJSON(session)}}, nil)
+	if err != nil || len(items) != 1 || items[0].FileID != "deleted-1" || items[0].Name != "测试.txt" {
+		t.Fatalf("trash items = %+v, %v", items, err)
+	}
+}
+
 func TestCreateShareUsesGuangyaShareAPI(t *testing.T) {
 	previous := netx.TestTransportHook
 	t.Cleanup(func() { netx.TestTransportHook = previous })

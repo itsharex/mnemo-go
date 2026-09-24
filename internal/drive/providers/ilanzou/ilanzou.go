@@ -3,6 +3,7 @@ package ilanzou
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"mnemo-go/internal/drive"
 	"mnemo-go/internal/drive/driveutil"
@@ -19,9 +20,10 @@ func init() {
 			"search":          false,
 			"createShare":     false,
 			"copy":            false,
-			"recycleBin":      false,
+			"recycleBin":      true,
 			"permanentDelete": true,
-			"trashView":       false,
+			"trashView":       true,
+			"trashRestore":    true,
 		}, func(c *drive.Capabilities) {
 			c.SetHashes([]string{"md5"}, []string{"md5"})
 		}),
@@ -180,14 +182,47 @@ func (d *Driver) Rename(ctx context.Context, c drive.Context, fileID, name strin
 	return &drive.RenameResult{FileID: fileID, Name: name, IsDir: true}, nil
 }
 
-// Trash: 优享版蓝奏云 has no recycle bin; the legacy adapter returned [].
 func (d *Driver) Trash(ctx context.Context, c drive.Context, fileIDs []string) ([]string, error) {
-	return []string{}, nil
+	refs := make([]drive.FileRef, 0, len(fileIDs))
+	for _, id := range fileIDs {
+		refs = append(refs, drive.FileRef{ID: id})
+	}
+	return d.deleteRefs(ctx, c, refs, 0)
 }
 
-// Delete removes files/folders in batches, resolving the kind from the ref or
-// the meta cache and falling back file→folder for unknown refs.
 func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileRef) ([]string, error) {
+	var ordinary []drive.FileRef
+	var completed []string
+	var failed []error
+	for _, ref := range refs {
+		if strings.HasPrefix(ref.ID, "file:") || strings.HasPrefix(ref.ID, "folder:") {
+			id, isDir, err := parseRecycleID(ref.ID)
+			if err != nil {
+				failed = append(failed, err)
+				continue
+			}
+			if _, err := d.deleteBatch(ctx, c, []drive.FileRef{{ID: id, IsDir: &isDir}}, -1); err != nil {
+				failed = append(failed, err)
+			} else {
+				completed = append(completed, ref.ID)
+			}
+			continue
+		}
+		ordinary = append(ordinary, ref)
+	}
+	if len(ordinary) > 0 {
+		ids, err := d.deleteRefs(ctx, c, ordinary, -1)
+		completed = append(completed, ids...)
+		if err != nil {
+			failed = append(failed, err)
+		}
+	}
+	return completed, errors.Join(failed...)
+}
+
+// deleteRefs resolves the kind from explicit refs or the cache, falling back
+// to folders for unknown refs.
+func (d *Driver) deleteRefs(ctx context.Context, c drive.Context, refs []drive.FileRef, status int) ([]string, error) {
 	var known, unknown []drive.FileRef
 	for _, ref := range refs {
 		if ref.IsDir != nil {
@@ -203,7 +238,7 @@ func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileR
 	var ok []string
 	var failed []error
 	if len(known) > 0 {
-		deleted, err := d.deleteBatch(ctx, c, known)
+		deleted, err := d.deleteBatch(ctx, c, known, status)
 		if err != nil {
 			failed = append(failed, err)
 		} else {
@@ -211,7 +246,7 @@ func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileR
 		}
 	}
 	if len(unknown) > 0 {
-		deleted, err := d.deleteWithFallback(ctx, c, unknown)
+		deleted, err := d.deleteWithFallback(ctx, c, unknown, status)
 		if err != nil {
 			failed = append(failed, err)
 		} else {
@@ -229,8 +264,8 @@ func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileR
 }
 
 // deleteWithFallback tries the batch as files, then as folders.
-func (d *Driver) deleteWithFallback(ctx context.Context, c drive.Context, refs []drive.FileRef) ([]string, error) {
-	deleted, err := d.deleteBatch(ctx, c, refs)
+func (d *Driver) deleteWithFallback(ctx context.Context, c drive.Context, refs []drive.FileRef, status int) ([]string, error) {
+	deleted, err := d.deleteBatch(ctx, c, refs, status)
 	if err == nil {
 		return deleted, nil
 	}
@@ -240,7 +275,7 @@ func (d *Driver) deleteWithFallback(ctx context.Context, c drive.Context, refs [
 	for i, r := range refs {
 		folders[i] = drive.FileRef{ID: r.ID, IsDir: &dir}
 	}
-	deleted, err = d.deleteBatch(ctx, c, folders)
+	deleted, err = d.deleteBatch(ctx, c, folders, status)
 	if err != nil {
 		return nil, errors.Join(fileErr, err)
 	}

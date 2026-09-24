@@ -49,6 +49,8 @@ func init() {
 			"manageCreatedShares": true,
 			"cancelCreatedShares": true,
 			"recycleBin":          true,
+			"trashView":           true,
+			"trashRestore":        true,
 		}, func(c *drive.Capabilities) {
 			c.SetHashes([]string{"dropbox"}, nil)
 		}),

@@ -32,6 +32,23 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 		return nil, errors.New("天翼容量接口未返回有效空间信息")
 	}
 	applyPan189Quota(token, usedSize, totalSize, ok)
+	token.FamilyQuotaSeparated = true
+	if session, sessionErr := sessionOf(token); sessionErr == nil && session.FamilySessionKey != "" && session.FamilySessionSecret != "" {
+		familyUsed, familyTotal, familyOK := parsePan189Capacity(raw, true)
+		if !familyOK && d.ensureFamilyID(ctx, cc) == nil {
+			session, _ = sessionOf(token)
+			familyRaw, requestErr := d.request(ctx, cc, apiURL+"/portal/getUserSizeInfo.action", reqOptions{
+				method: "GET", family: boolPtr(true), query: map[string]string{"familyId": session.FamilyID},
+			})
+			if requestErr == nil {
+				familyUsed, familyTotal, familyOK = parsePan189Capacity(familyRaw, true)
+			}
+		}
+		if familyOK {
+			token.FamilyTotalSize = familyTotal
+			token.FamilyUsedSize = familyUsed
+		}
+	}
 	return token, nil
 }
 
@@ -47,6 +64,12 @@ func parsePan189Capacity(raw []byte, family bool) (used, total int64, ok bool) {
 	var capacity struct {
 		Used  json.RawMessage `json:"usedSize"`
 		Total json.RawMessage `json:"totalSize"`
+	}
+	if _, exists := values[key]; !exists {
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(values["userSizeInfo"], &nested) == nil {
+			values = nested
+		}
 	}
 	if json.Unmarshal(values[key], &capacity) == nil {
 		var usedOK, totalOK bool

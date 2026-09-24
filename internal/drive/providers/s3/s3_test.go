@@ -2,6 +2,7 @@ package s3
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -16,6 +17,21 @@ import (
 	"mnemo-go/internal/model"
 	"mnemo-go/internal/netx"
 )
+
+type s3UploadSessionStore struct {
+	states map[string]string
+}
+
+func (store *s3UploadSessionStore) SaveUploadSession(string, []int) error { return nil }
+func (store *s3UploadSessionStore) LoadUploadSession(string) []int        { return nil }
+func (store *s3UploadSessionStore) ClearUploadSession(key string)         { delete(store.states, key) }
+func (store *s3UploadSessionStore) SaveUploadSessionState(key, sessionID string, _ []int) error {
+	store.states[key] = sessionID
+	return nil
+}
+func (store *s3UploadSessionStore) LoadUploadSessionState(key string) (string, []int) {
+	return store.states[key], nil
+}
 
 type countingRoundTripper struct {
 	mu      sync.Mutex
@@ -67,11 +83,81 @@ func TestMultipartUploadPreservesSDKBodyAndHonorsLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	if err := uploadMultipart(context.Background(), cc, "file", f, &model.UploadingUI{Info: model.UploadInfo{Size: 300}}); err != nil {
+	if err := uploadMultipart(context.Background(), drive.Context{}, cc, "file", f, &model.UploadingUI{Info: model.UploadInfo{Size: 300}}); err != nil {
 		t.Fatal(err)
 	}
 	if puts != 1 || time.Since(start) < 200*time.Millisecond {
 		t.Fatalf("SDK upload bypassed limit: puts=%d elapsed=%v", puts, time.Since(start))
+	}
+}
+
+func TestMultipartUploadResumesRemotePartsAfterFailure(t *testing.T) {
+	store := &s3UploadSessionStore{states: map[string]string{}}
+	drive.SetUploadSessionStore(store)
+	t.Cleanup(func() { drive.SetUploadSessionStore(nil) })
+	previous := TransportOverride
+	t.Cleanup(func() { TransportOverride = previous })
+	firstRun := true
+	created, listed, partOne, partTwo, completed := 0, 0, 0, 0, 0
+	TransportOverride = uploadRoundTripper(func(request *http.Request) (*http.Response, error) {
+		headers := make(http.Header)
+		body := ""
+		status := http.StatusOK
+		switch {
+		case request.Method == http.MethodPost && request.URL.Query().Has("uploads"):
+			created++
+			body = `<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>file</Key><UploadId>session</UploadId></InitiateMultipartUploadResult>`
+		case request.Method == http.MethodGet && request.URL.Query().Get("uploadId") == "session":
+			listed++
+			body = `<ListPartsResult><Bucket>bucket</Bucket><Key>file</Key><UploadId>session</UploadId><IsTruncated>false</IsTruncated><Part><PartNumber>1</PartNumber><ETag>"first"</ETag><Size>16777216</Size></Part></ListPartsResult>`
+		case request.Method == http.MethodPut && request.URL.Query().Get("partNumber") == "1":
+			partOne++
+			_, _ = io.Copy(io.Discard, request.Body)
+			headers.Set("ETag", `"first"`)
+		case request.Method == http.MethodPut && request.URL.Query().Get("partNumber") == "2":
+			partTwo++
+			_, _ = io.Copy(io.Discard, request.Body)
+			if firstRun {
+				status = http.StatusBadRequest
+				body = `<Error><Code>InvalidRequest</Code></Error>`
+			} else {
+				headers.Set("ETag", `"second"`)
+			}
+		case request.Method == http.MethodPost && request.URL.Query().Get("uploadId") == "session":
+			completed++
+			body = `<CompleteMultipartUploadResult><Bucket>bucket</Bucket><Key>file</Key><ETag>"done"</ETag></CompleteMultipartUploadResult>`
+		default:
+			return nil, fmt.Errorf("unexpected request: %s %s", request.Method, request.URL)
+		}
+		return &http.Response{StatusCode: status, Header: headers, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, make([]byte, s3MultipartPartSize+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	account := drive.Context{UserID: "s3:user", DriveID: "s3:drive", Token: &model.TokenInfo{Conn: testS3Config()}}
+	connection, err := connOf(account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload := &model.UploadingUI{Info: model.UploadInfo{Size: s3MultipartPartSize + 1}}
+	if err := uploadMultipart(context.Background(), account, connection, "file", file, upload); err == nil {
+		t.Fatal("first run should fail")
+	}
+	if len(store.states) != 1 || created != 1 || partOne != 1 || partTwo != 1 {
+		t.Fatalf("first run: states=%v created=%d parts=%d/%d", store.states, created, partOne, partTwo)
+	}
+	firstRun = false
+	if err := uploadMultipart(context.Background(), account, connection, "file", file, upload); err != nil {
+		t.Fatal(err)
+	}
+	if created != 1 || listed != 1 || partOne != 1 || partTwo != 2 || completed != 1 || len(store.states) != 0 {
+		t.Fatalf("resume: created=%d listed=%d parts=%d/%d completed=%d states=%v", created, listed, partOne, partTwo, completed, store.states)
 	}
 }
 

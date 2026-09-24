@@ -133,8 +133,8 @@ func init() {
 			"copy":                true,
 			"recycleBin":          true,
 			"permanentDelete":     true,
-			"trashView":           false,
-			"trashRestore":        false,
+			"trashView":           true,
+			"trashRestore":        true,
 		}, func(c *drive.Capabilities) {
 			c.SetHashes([]string{"sha1"}, []string{"sha1"}).SetConflictPolicies("refuse", "rename", "skip", "overwrite")
 		}),
@@ -1014,6 +1014,47 @@ func (c *client) Trash(ctx context.Context, scope Scope, fileIDs ...string) erro
 	return nil
 }
 
+func (c *client) RecycleList(ctx context.Context, scope Scope) ([]aliFile, error) {
+	var result []aliFile
+	marker := ""
+	seen := make(map[string]bool)
+	for {
+		body := map[string]any{"drive_id": c.scopedDriveID(scope), "limit": 200, "fields": "*"}
+		if marker != "" {
+			body["marker"] = marker
+		}
+		var page listResp
+		err := c.apiPost(ctx, "/adrive/v1.0/openFile/recyclebin/list", body, &page)
+		if aliOpenNotFound(err) {
+			err = c.apiPostAt(ctx, nativeAPIHost, "/v2/recyclebin/list", body, &page)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if page.Items == nil {
+			return nil, errors.New("阿里云盘回收站响应缺少 items")
+		}
+		result = append(result, page.Items...)
+		if page.Marker == "" {
+			return result, nil
+		}
+		if seen[page.Marker] {
+			return nil, errors.New("阿里云盘回收站分页游标重复")
+		}
+		seen[page.Marker] = true
+		marker = page.Marker
+	}
+}
+
+func (c *client) RecycleRestore(ctx context.Context, scope Scope, fileID string) error {
+	body := map[string]any{"drive_id": c.scopedDriveID(scope), "file_id": fileID}
+	err := c.apiPost(ctx, "/adrive/v1.0/openFile/recyclebin/restore", body, nil)
+	if aliOpenNotFound(err) {
+		err = c.apiPostAt(ctx, nativeAPIHost, "/v2/recyclebin/restore", body, nil)
+	}
+	return err
+}
+
 // Delete permanently deletes.
 func (c *client) Delete(ctx context.Context, scope Scope, fileIDs ...string) error {
 	for _, id := range fileIDs {
@@ -1793,7 +1834,50 @@ func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileR
 }
 
 func (d *Driver) Restore(ctx context.Context, c drive.Context, fileIDs []string) ([]string, error) {
-	return nil, drive.NotSupported("restore")
+	cl, err := clientOfContext(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	var completed []string
+	var failed []error
+	for _, id := range fileIDs {
+		ref := parseRef(id)
+		if ref.FID == "" || ref.FID == "root" {
+			failed = append(failed, fmt.Errorf("%s: 回收站文件 ID 无效", id))
+			continue
+		}
+		if err := cl.RecycleRestore(ctx, ref.Scope, ref.FID); err != nil {
+			failed = append(failed, fmt.Errorf("%s: %w", id, err))
+		} else {
+			completed = append(completed, id)
+		}
+	}
+	return completed, errors.Join(failed...)
+}
+
+func (d *Driver) ListTrash(ctx context.Context, c drive.Context, _ *drive.ListOptions) ([]model.File, error) {
+	cl, err := clientOfContext(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	var result []model.File
+	var scopes = []Scope{ScopeBackup}
+	if cl.session.ResourceDriveID != "" && cl.session.ResourceDriveID != cl.scopedDriveID(ScopeBackup) {
+		scopes = append(scopes, ScopeResource)
+	}
+	for _, scope := range scopes {
+		items, err := cl.RecycleList(ctx, scope)
+		if err != nil {
+			return nil, err
+		}
+		for index := range items {
+			if items[index].FileID == "" || items[index].Name == "" {
+				return nil, errors.New("阿里云盘回收站包含无效文件")
+			}
+			result = append(result, mapFile(&items[index], c.DriveID, items[index].ParentFileID, string(scope)))
+		}
+	}
+	return result, nil
 }
 
 func (d *Driver) Move(ctx context.Context, c drive.Context, refs []drive.FileRef, toParentID, _ string) ([]string, error) {

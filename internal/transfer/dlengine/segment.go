@@ -51,6 +51,7 @@ type Options struct {
 	// download server omits Content-Length, so a chunked response can still
 	// report progress and be verified after a single-stream download.
 	ExpectedSize int64
+	ResourceID   string
 	Limiter      RateLimiter
 	Headers      map[string]string
 	UserAgent    string
@@ -93,6 +94,7 @@ type Progress struct {
 type state struct {
 	URL          string `json:"url,omitempty"` // legacy read-only; never written
 	URLHash      string `json:"url_hash,omitempty"`
+	ResourceHash string `json:"resource_hash,omitempty"`
 	Total        int64  `json:"total"`
 	Chunk        int64  `json:"chunk"`
 	Done         []bool `json:"done"`
@@ -213,7 +215,11 @@ func Download(ctx context.Context, opts Options, url, localPath string, onProgre
 	}
 
 	urlHash := urlFingerprint(url)
-	st := &state{URLHash: urlHash, Total: total, Chunk: opts.ChunkSize, ETag: validator.ETag, LastModified: validator.LastModified}
+	resourceHash := ""
+	if opts.ResourceID != "" {
+		resourceHash = urlFingerprint(opts.ResourceID)
+	}
+	st := &state{URLHash: urlHash, ResourceHash: resourceHash, Total: total, Chunk: opts.ChunkSize, ETag: validator.ETag, LastModified: validator.LastModified}
 	if total == 0 || !acceptRanges || total < opts.MinSize {
 		// single stream
 		return singleStream(ctx, hc, opts, url, localPath, total, validator, onProgress)
@@ -230,7 +236,7 @@ func Download(ctx context.Context, opts Options, url, localPath string, onProgre
 	// Resume from state only when both the remote identity and local data match.
 	if b, err := os.ReadFile(statePath); err == nil {
 		var prev state
-		if partIntact && json.Unmarshal(b, &prev) == nil && stateURLMatches(prev, url, urlHash) && prev.Total == total && prev.Chunk == opts.ChunkSize &&
+		if partIntact && json.Unmarshal(b, &prev) == nil && stateResourceMatches(prev, url, urlHash, resourceHash, validator) && prev.Total == total && prev.Chunk == opts.ChunkSize &&
 			resumeIdentityMatches(prev, validator) {
 			st = &prev
 		}
@@ -243,6 +249,7 @@ func Download(ctx context.Context, opts Options, url, localPath string, onProgre
 	st.LastModified = validator.LastModified
 	st.URL = ""
 	st.URLHash = urlHash
+	st.ResourceHash = resourceHash
 
 	// Ensure part file exists at full size (sparse).
 	if err := ensureFile(partPath, total); err != nil {
@@ -859,6 +866,16 @@ func stateURLMatches(previous state, rawURL, fingerprint string) bool {
 		return previous.URLHash == fingerprint
 	}
 	return previous.URL == rawURL
+}
+
+func stateResourceMatches(previous state, rawURL, urlHash, resourceHash string, validator resourceValidator) bool {
+	if previous.ResourceHash != "" && resourceHash != "" && previous.ResourceHash != resourceHash {
+		return false
+	}
+	if stateURLMatches(previous, rawURL, urlHash) {
+		return true
+	}
+	return resourceHash != "" && previous.ResourceHash == resourceHash && (validator.ETag != "" || validator.LastModified != "") && resumeIdentityMatches(previous, validator)
 }
 
 // speedLimiter is a token-bucket style throttle (per second).

@@ -115,6 +115,7 @@ type DownloadTask struct {
 	DriveID     string            `json:"drive_id"`
 	Provider    string            `json:"provider"`
 	FileID      string            `json:"file_id"`
+	SourcePath  string            `json:"source_path,omitempty"`
 	Name        string            `json:"name"`
 	Size        int64             `json:"size"`
 	Downloaded  int64             `json:"downloaded"`

@@ -47,7 +47,6 @@ const (
 	mailSMSURL                 = "https://mail.10086.cn/s"
 	mailArtifactURL            = "https://smsrebuild1.mail.10086.cn/setting/s"
 	thirdLoginURL              = "https://user-njs.yun.139.com/user/thirdlogin"
-	familyAdapterURL           = "https://group.yun.139.com/hcy/family/adapter"
 	ua                         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 	RootID                     = "pan139_root"
 	Pan139PersonalRoot         = "pan139_personal_root"
@@ -77,7 +76,7 @@ func pan139SpaceID(id string) (space, raw string) {
 	case Pan139PersonalRoot:
 		return pan139PersonalSpace, "/"
 	case Pan139FamilyRoot:
-		return pan139FamilySpace, ""
+		return pan139FamilySpace, "root"
 	case "", RootID, "root", "/":
 		return pan139PersonalSpace, "/"
 	}
@@ -123,6 +122,8 @@ func init() {
 			"combinedShare":   true,
 			"shareHistory":    true,
 			"recycleBin":      true,
+			"trashView":       true,
+			"trashRestore":    true,
 			"permanentDelete": true,
 		}, func(c *drive.Capabilities) {
 			c.SetHashes([]string{"sha256"}, []string{"sha256"})
@@ -611,13 +612,6 @@ func (d *Driver) familyPost(ctx context.Context, c drive.Context, pathname strin
 	return d.familyPostTo(ctx, c, "https://yun.139.com", pathname, data)
 }
 
-// familyAdapterPost calls the web client's family adapter.  Unlike file
-// operations, queryFamilyCloud is hosted by group.yun.139.com and supplies
-// the family cloud ID required by the content endpoints.
-func (d *Driver) familyAdapterPost(ctx context.Context, c drive.Context, pathname string, data any) (json.RawMessage, error) {
-	return d.familyPostTo(ctx, c, familyAdapterURL, pathname, data)
-}
-
 func (d *Driver) familyPostTo(ctx context.Context, c drive.Context, host, pathname string, data any) (json.RawMessage, error) {
 	hc := netx.NewClient(60 * time.Second)
 	cr, err := loadCred(hc, c.Token)
@@ -647,19 +641,30 @@ func (d *Driver) familyPostTo(ctx context.Context, c drive.Context, host, pathna
 		}
 		return nil, fmt.Errorf("移动云盘家庭云 API HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("移动云盘家庭云 API 返回非 JSON（HTTP %d，Content-Type %q）", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
 	var wrapper struct {
-		Success *bool           `json:"success"`
-		Message string          `json:"message"`
-		Data    json.RawMessage `json:"data"`
+		Success *bool            `json:"success"`
+		Code    pan139FlexString `json:"code"`
+		Message string           `json:"message"`
+		Data    json.RawMessage  `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &wrapper); err != nil {
 		return nil, err
 	}
 	if wrapper.Success != nil && !*wrapper.Success {
-		if strings.TrimSpace(wrapper.Message) == "" {
-			return nil, errors.New("移动云盘家庭云 API 返回失败")
+		var detail struct {
+			Result struct {
+				Code pan139FlexString `json:"resultCode"`
+			} `json:"result"`
 		}
-		return nil, errors.New(wrapper.Message)
+		_ = json.Unmarshal(wrapper.Data, &detail)
+		message := strings.TrimSpace(wrapper.Message)
+		if message == "" {
+			message = "接口返回失败"
+		}
+		return nil, fmt.Errorf("移动云盘家庭云 API 失败（code=%s，resultCode=%s）：%s", wrapper.Code, detail.Result.Code, message)
 	}
 	if len(wrapper.Data) == 0 || string(wrapper.Data) == "null" {
 		return raw, nil
@@ -721,6 +726,33 @@ type pan139FamilyCloudData struct {
 	} `json:"familyCloudList"`
 }
 
+var errPan139NoFamily = errors.New("移动云盘账号未加入任何家庭云")
+
+func pan139FamilyUnavailable(c drive.Context) bool {
+	if c.Token == nil {
+		return false
+	}
+	var stored struct {
+		Until int64 `json:"familyCloudUnavailableUntil"`
+	}
+	_ = json.Unmarshal([]byte(c.Token.RefreshToken), &stored)
+	return stored.Until > time.Now().Unix()
+}
+
+func savePan139FamilyUnavailable(c drive.Context) error {
+	if c.Token == nil {
+		return nil
+	}
+	stored := map[string]json.RawMessage{}
+	_ = json.Unmarshal([]byte(c.Token.RefreshToken), &stored)
+	if stored == nil {
+		stored = map[string]json.RawMessage{}
+	}
+	stored["familyCloudUnavailableUntil"] = json.RawMessage(strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+	c.Token.RefreshToken = mustJSON(stored)
+	return drive.PersistToken(c)
+}
+
 func pan139FamilyCloudID(c drive.Context) string {
 	if c.Token == nil {
 		return ""
@@ -748,16 +780,20 @@ func savePan139FamilyCloudID(token *model.TokenInfo, cloudID string) {
 	token.RefreshToken = mustJSON(stored)
 }
 
-// discoverPan139FamilyCloudID follows the same queryFamilyCloud request used
-// by the official web client.  A single account may belong to several
+// discoverPan139FamilyCloudID uses the same signed orchestration host as other
+// family operations. A single account may belong to several
 // families; selecting the first returned family gives the app a deterministic
 // default without asking the user to choose a login type.
 func (d *Driver) discoverPan139FamilyCloudID(ctx context.Context, c drive.Context) (string, error) {
 	if id := pan139FamilyCloudID(c); id != "" {
 		return id, nil
 	}
-	raw, err := d.familyAdapterPost(ctx, c, "/orchestration/familyCloud-rebuild/cloudManage/v1.0/queryFamilyCloud", map[string]any{
-		"pageInfo": map[string]int{"pageNum": 1, "pageSize": 100},
+	if pan139FamilyUnavailable(c) {
+		return "", errPan139NoFamily
+	}
+	raw, err := d.familyPost(ctx, c, "/orchestration/familyCloud-rebuild/cloudManage/v1.0/queryFamilyCloud", map[string]any{
+		"pageInfo":          map[string]int{"pageNum": 1, "pageSize": 100},
+		"commonAccountInfo": map[string]any{"account": accountOf(c), "accountType": 1},
 	})
 	if err != nil {
 		return "", err
@@ -769,10 +805,16 @@ func (d *Driver) discoverPan139FamilyCloudID(ctx context.Context, c drive.Contex
 	for _, family := range data.FamilyCloudList {
 		if cloudID := strings.TrimSpace(family.CloudID.String()); cloudID != "" {
 			savePan139FamilyCloudID(c.Token, cloudID)
+			if err := drive.PersistToken(c); err != nil {
+				return "", err
+			}
 			return cloudID, nil
 		}
 	}
-	return "", errors.New("移动云盘账号未加入任何家庭云")
+	if err := savePan139FamilyUnavailable(c); err != nil {
+		return "", err
+	}
+	return "", errPan139NoFamily
 }
 
 func pan139FamilyPayload(c drive.Context, payload map[string]any) map[string]any {
@@ -783,7 +825,7 @@ func pan139FamilyPayload(c drive.Context, payload map[string]any) map[string]any
 	return payload
 }
 
-func mapPan139FamilyFile(it pan139FamilyEntry, driveID, parentID string, isDir bool) model.File {
+func mapPan139FamilyFile(it pan139FamilyEntry, driveID, parentID, familyPath string, isDir bool) model.File {
 	rawID, name := it.ContentID.String(), it.ContentName
 	if isDir {
 		rawID, name = it.CatalogID.String(), it.CatalogName
@@ -792,6 +834,7 @@ func mapPan139FamilyFile(it pan139FamilyEntry, driveID, parentID string, isDir b
 		return model.File{}
 	}
 	f := driveutil.NewFile(driveID, pan139FileID(pan139FamilySpace, rawID), parentID, strings.TrimSpace(name), isDir, int64(it.ContentSize), parsePan139Time(it.LastUpdateTime, it.CreateTime))
+	f.Path = familyPath
 	if !isDir {
 		f.Thumbnail = strings.TrimSpace(it.ThumbnailURL)
 		if f.Thumbnail == "" {
@@ -972,6 +1015,15 @@ type pan139UploadSession struct {
 // ListPage lists one page.
 func (d *Driver) ListPage(ctx context.Context, c drive.Context, parentID, marker string) ([]model.File, string, error) {
 	if parentID == RootID || parentID == "" || parentID == "root" || parentID == "/" {
+		if c.Token != nil {
+			_, err := d.discoverPan139FamilyCloudID(ctx, c)
+			if errors.Is(err, errPan139NoFamily) {
+				return d.ListPage(ctx, c, Pan139PersonalRoot, marker)
+			}
+			if err != nil {
+				return nil, "", err
+			}
+		}
 		if marker != "" {
 			return nil, "", nil
 		}
@@ -1007,6 +1059,9 @@ func (d *Driver) ListPage(ctx context.Context, c drive.Context, parentID, marker
 		f := mapFile(it, c.DriveID, parentID)
 		f.FileID = pan139FileID(pan139PersonalSpace, f.FileID)
 		f.ParentFileID = parentID
+		if parentID == Pan139PersonalRoot && pan139FamilyUnavailable(c) {
+			f.ParentFileID = RootID
+		}
 		items = append(items, f)
 	}
 	nextMarker := strings.TrimSpace(data.NextPageCursor)
@@ -1040,12 +1095,12 @@ func (d *Driver) listFamilyPage(ctx context.Context, c drive.Context, catalogID,
 	parentID := pan139FileID(pan139FamilySpace, catalogID)
 	items := make([]model.File, 0, len(data.CloudCatalogList)+len(data.CloudContentList))
 	for _, it := range data.CloudCatalogList {
-		if f := mapPan139FamilyFile(it, c.DriveID, parentID, true); f.FileID != "" {
+		if f := mapPan139FamilyFile(it, c.DriveID, parentID, data.Path, true); f.FileID != "" {
 			items = append(items, f)
 		}
 	}
 	for _, it := range data.CloudContentList {
-		if f := mapPan139FamilyFile(it, c.DriveID, parentID, false); f.FileID != "" {
+		if f := mapPan139FamilyFile(it, c.DriveID, parentID, data.Path, false); f.FileID != "" {
 			items = append(items, f)
 		}
 	}
@@ -1184,6 +1239,9 @@ func (d *Driver) familyDownloadInfo(ctx context.Context, c drive.Context, fileID
 	if cached, ok := drive.CachedFile(c.UserID, c.DriveID, fileID); ok {
 		path = cached.Path
 	}
+	if strings.TrimSpace(path) == "" {
+		return "", 0, errors.New("移动云盘家庭云文件路径不可用，请刷新目录后重试")
+	}
 	raw, err := d.familyPost(ctx, c, "/orchestration/familyCloud-rebuild/content/v1.0/getFileDownLoadURL", pan139FamilyPayload(c, map[string]any{
 		"contentID": rawID, "path": path,
 	}))
@@ -1206,7 +1264,7 @@ func (d *Driver) familyDownloadInfo(ctx context.Context, c drive.Context, fileID
 func (d *Driver) Mkdir(ctx context.Context, c drive.Context, parentID, name string) (*drive.MkdirResult, error) {
 	space, rawParent := pan139SpaceID(parentID)
 	if space == pan139FamilySpace {
-		return &drive.MkdirResult{Error: "移动云盘家庭云暂不支持创建文件夹"}, nil
+		return d.familyMkdir(ctx, c, rawParent, name)
 	}
 	raw, err := d.personalPost(ctx, c, "/file/create", map[string]any{
 		"parentFileId":   uploadParentID(rawParent),
@@ -1235,7 +1293,7 @@ func (d *Driver) Mkdir(ctx context.Context, c drive.Context, parentID, name stri
 func (d *Driver) Rename(ctx context.Context, c drive.Context, fileID, name string) (*drive.RenameResult, error) {
 	space, rawID := pan139SpaceID(fileID)
 	if space == pan139FamilySpace {
-		return nil, errors.New("移动云盘家庭云暂不支持重命名")
+		return d.familyRename(ctx, c, fileID, rawID, name)
 	}
 	_, err := d.personalPost(ctx, c, "/file/update", map[string]any{
 		"fileId":      fileRequestID(rawID),
@@ -1316,6 +1374,9 @@ func (d *Driver) GetFile(ctx context.Context, c drive.Context, fileID string) (*
 	}
 	if parentID == "/" || parentID == "root" {
 		parentID = Pan139PersonalRoot
+		if pan139FamilyUnavailable(c) {
+			parentID = RootID
+		}
 	}
 	f := mapFile(*it, c.DriveID, parentID)
 	f.FileID = pan139FileID(pan139PersonalSpace, f.FileID)
@@ -1396,7 +1457,20 @@ func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileR
 }
 
 func (d *Driver) Restore(ctx context.Context, c drive.Context, fileIDs []string) ([]string, error) {
-	return nil, drive.NotSupported("pan139 recycle restore")
+	ids, err := pan139PersonalIDs(fileIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if containsPan139Root(ids) {
+		return nil, errors.New("pan139: 根目录不支持从回收站还原")
+	}
+	if _, err := d.personalPost(ctx, c, "/recyclebin/batchRestore", map[string]any{"fileIds": ids}); err != nil {
+		return nil, err
+	}
+	return fileIDs, nil
 }
 
 func (d *Driver) Move(ctx context.Context, c drive.Context, refs []drive.FileRef, toParentID, _ string) ([]string, error) {
@@ -1630,7 +1704,7 @@ func (d *Driver) UploadOneFile(ctx context.Context, c drive.Context, ui *model.U
 	}
 	space, rawParent := pan139SpaceID(ui.Info.ParentFileID)
 	if space == pan139FamilySpace {
-		return errors.New("移动云盘家庭云暂不支持上传")
+		return d.familyUpload(ctx, c, ui, rawParent)
 	}
 	f, err := os.Open(ui.Info.LocalFilePath)
 	if err != nil {
@@ -1919,7 +1993,27 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 		return nil, errors.New("139 容量接口未返回有效空间信息")
 	}
 	applyPan139Quota(token, used, total)
+	familyRaw, familyErr := d.personalPostWithCred(ctx, hc, &userCred, "/disk/getFamilyDiskInfo", map[string]any{"userDomainId": domainID.String()})
+	if familyErr == nil {
+		if familyUsed, familyTotal, familyOK := parsePan139FamilyQuota(familyRaw); familyOK {
+			token.FamilyUsedSize = familyUsed
+			token.FamilyTotalSize = familyTotal
+		}
+	}
 	return token, nil
+}
+
+func parsePan139FamilyQuota(raw json.RawMessage) (used, total int64, ok bool) {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(raw, &values) != nil {
+		return 0, 0, false
+	}
+	used, usedOK := pan139QuotaInt64(values, "usedSize")
+	total, totalOK := pan139QuotaInt64(values, "diskSize")
+	if !usedOK || !totalOK || used < 0 || total <= 0 {
+		return 0, 0, false
+	}
+	return min(used, total), total, true
 }
 
 // mapFile converts a 139 entry to the unified model.

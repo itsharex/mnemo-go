@@ -320,6 +320,37 @@ func TestManagerLoadPersistedMarksPaused(t *testing.T) {
 	}
 }
 
+func TestRestoredDownloadPreservesSourcePath(t *testing.T) {
+	drive.ClearFileMetaCache()
+	t.Cleanup(drive.ClearFileMetaCache)
+	dir := t.TempDir()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &model.DownloadTask{ID: "family-download", UserID: "account-one", DriveID: "pan139:one", FileID: "pan139:family:file-1", SourcePath: "/root/folder-1", Status: "paused"}
+	if err := st.SaveDownloadTask(task); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(st, dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Shutdown()
+	restored, ok := manager.get(task.ID)
+	if !ok || restored.SourcePath != task.SourcePath {
+		t.Fatalf("来源路径未随任务恢复: %+v", restored)
+	}
+	rememberDownloadSource(restored)
+	file, ok := drive.CachedFile(task.UserID, task.DriveID, task.FileID)
+	if !ok || file.Path != task.SourcePath {
+		t.Fatalf("来源路径未恢复到账号缓存: %+v", file)
+	}
+	if _, ok := drive.CachedFile("account-two", task.DriveID, task.FileID); ok {
+		t.Fatal("来源路径泄漏到其他账号")
+	}
+}
+
 func TestManagerKeepTasksDisabledClearsFinishedHistory(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(dir)

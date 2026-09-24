@@ -181,7 +181,25 @@ func (d *Driver) Delete(ctx context.Context, c drive.Context, refs []drive.FileR
 }
 
 func (d *Driver) Restore(ctx context.Context, c drive.Context, fileIDs []string) ([]string, error) {
-	return nil, drive.NotSupported("restore")
+	cl, err := clientOf(c)
+	if err != nil {
+		return nil, err
+	}
+	var completed []string
+	var failed []error
+	for _, id := range fileIDs {
+		path := normalizeDropboxPath(id)
+		if path == "" || !strings.HasPrefix(path, "/") {
+			failed = append(failed, fmt.Errorf("%s: 回收站文件路径无效", id))
+			continue
+		}
+		if err := cl.restoreDeletedFile(ctx, path); err != nil {
+			failed = append(failed, fmt.Errorf("%s: %w", id, err))
+		} else {
+			completed = append(completed, id)
+		}
+	}
+	return completed, errors.Join(failed...)
 }
 
 func (d *Driver) Move(ctx context.Context, c drive.Context, refs []drive.FileRef, toParentID, _ string) ([]string, error) {

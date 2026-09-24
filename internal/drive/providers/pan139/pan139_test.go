@@ -44,6 +44,8 @@ func TestPan139RefreshResolvesAndCachesQuotaDomain(t *testing.T) {
 				return pan139Response(req, 503, nil, `{}`), nil
 			}
 			return pan139Response(req, 200, nil, `{"success":true,"data":{"diskSize":"1024","freeDiskSize":"768"}}`), nil
+		case "/user/disk/getFamilyDiskInfo":
+			return pan139Response(req, 200, nil, `{"success":true,"data":{"usedSize":"128","diskSize":"512"}}`), nil
 		default:
 			t.Fatalf("unexpected endpoint: %s", req.URL)
 			return nil, nil
@@ -57,12 +59,20 @@ func TestPan139RefreshResolvesAndCachesQuotaDomain(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if queries != 1 || quotas != 2 || token.TotalSize != 1024<<20 || token.UsedSize != 256<<20 || !strings.Contains(token.RefreshToken, "metadata") {
+	if queries != 1 || quotas != 2 || token.TotalSize != 1024<<20 || token.UsedSize != 256<<20 || token.FamilyTotalSize != 512 || token.FamilyUsedSize != 128 || !strings.Contains(token.RefreshToken, "metadata") {
 		t.Fatal("quota or metadata not retained")
 	}
 	fail = true
 	if _, err := d.RefreshAccount(t.Context(), drive.Context{}, token); err == nil || token.TotalSize != 1024<<20 {
 		t.Fatal("quota failure should preserve snapshot and report error")
+	}
+}
+
+func TestParsePan139FamilyQuotaRejectsIncompleteResponse(t *testing.T) {
+	for _, raw := range []string{`{}`, `{"diskSize":100}`, `{"usedSize":-1,"diskSize":100}`, `{"usedSize":10,"diskSize":0}`} {
+		if _, _, ok := parsePan139FamilyQuota([]byte(raw)); ok {
+			t.Fatalf("无效家庭云容量被接受: %s", raw)
+		}
 	}
 }
 
@@ -311,6 +321,35 @@ func TestPan139RootListsPersonalAndFamilyVirtualFolders(t *testing.T) {
 	}
 }
 
+func TestPan139RootUsesPersonalFilesWhenFamilyMissing(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	authorization := encodeAuthorization("pc", "13800138000", fmt.Sprintf("token|a|b|%d", time.Now().Add(30*24*time.Hour).UnixMilli()))
+	queries := 0
+	netx.TestTransportHook = pan139RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/orchestration/familyCloud-rebuild/cloudManage/v1.0/queryFamilyCloud":
+			queries++
+			return pan139Response(req, http.StatusOK, nil, `{"success":true,"data":{"familyCloudList":[],"totalCount":0}}`), nil
+		case "/file/list":
+			return pan139Response(req, http.StatusOK, nil, `{"success":true,"data":{"items":[{"fileId":"file-1","name":"文档.txt"}]}}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected request %s", req.URL.Path)
+		}
+	})
+	token := &model.TokenInfo{AccessToken: authorization, RefreshToken: mustJSON(map[string]string{"authorization": authorization, "account": "13800138000", "personalCloudHost": "https://personal.test"})}
+	cloud := drive.Context{DriveID: "pan139:test", Token: token}
+	for range 2 {
+		items, next, err := (&Driver{}).ListPage(t.Context(), cloud, RootID, "")
+		if err != nil || next != "" || len(items) != 1 || items[0].FileID != pan139FileID(pan139PersonalSpace, "file-1") || items[0].ParentFileID != RootID {
+			t.Fatalf("personal root items=%+v next=%q err=%v", items, next, err)
+		}
+	}
+	if queries != 1 || !pan139FamilyUnavailable(cloud) {
+		t.Fatalf("family detection queries=%d unavailable=%t", queries, pan139FamilyUnavailable(cloud))
+	}
+}
+
 func TestPan139FamilyListUsesFamilyServiceHeaders(t *testing.T) {
 	previous := netx.TestTransportHook
 	t.Cleanup(func() { netx.TestTransportHook = previous })
@@ -319,10 +358,16 @@ func TestPan139FamilyListUsesFamilyServiceHeaders(t *testing.T) {
 		if req.URL.Host != "yun.139.com" || req.URL.Path != "/orchestration/familyCloud-rebuild/content/v1.2/queryContentList" {
 			return nil, fmt.Errorf("unexpected request %s", req.URL)
 		}
+		var body struct {
+			CatalogID string `json:"catalogID"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.CatalogID != "root" {
+			return nil, fmt.Errorf("family root catalog ID = %q, error = %v", body.CatalogID, err)
+		}
 		if req.Header.Get("X-Yun-Svc-Type") != "2" || req.Header.Get("x-SvcType") != "2" {
 			return nil, fmt.Errorf("family service headers missing: %#v", req.Header)
 		}
-		return pan139Response(req, http.StatusOK, nil, `{"success":true,"data":{"path":"/","cloudCatalogList":[{"catalogID":"folder-1","catalogName":"家庭资料"}],"cloudContentList":[{"contentID":"file-1","contentName":"家庭照片.jpg","contentSize":"42"}],"totalCount":2}}`), nil
+		return pan139Response(req, http.StatusOK, nil, `{"success":true,"data":{"path":"/root","cloudCatalogList":[{"catalogID":"folder-1","catalogName":"家庭资料"}],"cloudContentList":[{"contentID":"file-1","contentName":"家庭照片.jpg","contentSize":"42"}],"totalCount":2}}`), nil
 	})
 	c := drive.Context{DriveID: "pan139:test", Token: &model.TokenInfo{AccessToken: authorization, RefreshToken: mustJSON(map[string]string{"authorization": authorization, "account": "13800138000", "personalCloudHost": "https://personal.test", "familyCloudId": "family-1"})}}
 	items, next, err := (&Driver{}).ListPage(t.Context(), c, Pan139FamilyRoot, "")
@@ -332,6 +377,9 @@ func TestPan139FamilyListUsesFamilyServiceHeaders(t *testing.T) {
 	if items[0].FileID != pan139FileID(pan139FamilySpace, "folder-1") || items[1].FileID != pan139FileID(pan139FamilySpace, "file-1") {
 		t.Fatalf("family ids lost namespace: %+v", items)
 	}
+	if items[0].Path != "/root" || items[1].Path != "/root" || items[0].ParentFileID != Pan139FamilyRoot {
+		t.Fatalf("family path or parent lost: %+v", items)
+	}
 }
 
 func TestPan139DiscoversAndStoresFamilyCloudID(t *testing.T) {
@@ -339,7 +387,7 @@ func TestPan139DiscoversAndStoresFamilyCloudID(t *testing.T) {
 	t.Cleanup(func() { netx.TestTransportHook = previous })
 	authorization := encodeAuthorization("pc", "13800138000", fmt.Sprintf("token|a|b|%d", time.Now().Add(30*24*time.Hour).UnixMilli()))
 	netx.TestTransportHook = pan139RoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Host != "group.yun.139.com" || req.URL.Path != "/hcy/family/adapter/orchestration/familyCloud-rebuild/cloudManage/v1.0/queryFamilyCloud" {
+		if req.URL.Host != "yun.139.com" || req.URL.Path != "/orchestration/familyCloud-rebuild/cloudManage/v1.0/queryFamilyCloud" {
 			return nil, fmt.Errorf("unexpected request %s", req.URL)
 		}
 		if req.Header.Get("X-Yun-Svc-Type") != "2" || req.Header.Get("Authorization") != "Basic "+authorization {
@@ -350,11 +398,15 @@ func TestPan139DiscoversAndStoresFamilyCloudID(t *testing.T) {
 				PageNum  int `json:"pageNum"`
 				PageSize int `json:"pageSize"`
 			} `json:"pageInfo"`
+			CommonAccountInfo struct {
+				Account     string `json:"account"`
+				AccountType int    `json:"accountType"`
+			} `json:"commonAccountInfo"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			return nil, err
 		}
-		if body.PageInfo.PageNum != 1 || body.PageInfo.PageSize != 100 {
+		if body.PageInfo.PageNum != 1 || body.PageInfo.PageSize != 100 || body.CommonAccountInfo.Account != "13800138000" || body.CommonAccountInfo.AccountType != 1 {
 			return nil, fmt.Errorf("unexpected family page request: %+v", body.PageInfo)
 		}
 		return pan139Response(req, http.StatusOK, nil, `{"success":true,"data":{"familyCloudList":[{"cloudID":"family-1"}]}}`), nil
@@ -366,6 +418,21 @@ func TestPan139DiscoversAndStoresFamilyCloudID(t *testing.T) {
 	}
 	if got := pan139FamilyCloudID(drive.Context{Token: token}); got != "family-1" || !strings.Contains(token.RefreshToken, "metadata") {
 		t.Fatalf("family ID or metadata was not persisted: %s", token.RefreshToken)
+	}
+}
+
+func TestPan139FamilyRejectsNonJSONWithoutLeakingResponse(t *testing.T) {
+	previous := netx.TestTransportHook
+	t.Cleanup(func() { netx.TestTransportHook = previous })
+	account := "13800138000"
+	authorization := encodeAuthorization("pc", account, fmt.Sprintf("token|a|b|%d", time.Now().Add(30*24*time.Hour).UnixMilli()))
+	netx.TestTransportHook = pan139RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return pan139Response(req, http.StatusOK, http.Header{"Content-Type": []string{"text/html"}}, "secret-private-response"), nil
+	})
+	token := &model.TokenInfo{AccessToken: authorization, RefreshToken: mustJSON(map[string]string{"authorization": authorization, "account": account, "personalCloudHost": "https://personal.test"})}
+	_, _, err := (&Driver{}).ListPage(t.Context(), drive.Context{Token: token}, Pan139FamilyRoot, "")
+	if err == nil || !strings.Contains(err.Error(), "返回非 JSON") || strings.Contains(err.Error(), "secret-private-response") {
+		t.Fatalf("家庭云异常响应未安全处理: %v", err)
 	}
 }
 

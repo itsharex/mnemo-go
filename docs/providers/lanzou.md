@@ -11,8 +11,8 @@
 ```
 createShare, shareHistory: true
 sharePassword: false（提取码由服务端返回）
-move, permanentDelete: true
-search, copy, recycleBin, trashView: false
+move, recycleBin, trashView, trashRestore: true
+search, copy, permanentDelete: false
 ```
 
 ---
@@ -74,13 +74,14 @@ search, copy, recycleBin, trashView: false
 | Rename | ✅ | `lanzou.go:156-158` → `filecmd.go:26-35` task=46 文件 | 无 |
 | Move | ✅(仅文件) | `lanzou.go:205-226` → `filecmd.go:45-52` task=20；调用方未携带类型时也使用文件元数据缓存拦截文件夹 | 无（AList 对齐） |
 | Copy | ❌(设计) | `lanzou.go:197-199` 返回空 | 无 |
-| Delete | ✅ | `lanzou.go:164-178` → `filecmd.go:49-52` task=6 文件 / task=3 文件夹 | 无 |
+| Trash | ✅ | `lanzou.go` → `filecmd.go` task=6 文件 / task=3 文件夹 | 文件移入回收站 |
+| PermanentDelete | ❌ | 关闭能力位 | 尚未实现回收站内彻底删除 |
 
 ---
 
 ## 7. 回收站
 
-❌ 无（设计如此，删除即永久）。`lanzou.go:159` Trash 返回空数组。
+蓝奏网页版提供回收站：`trash.go` 从 `mydisk.php?item=recycle&action=files` 读取文件及文件夹，并通过带 `formhash` 的表单恢复。`Trash` 使用既有 `doupload.php` 删除任务，将文件移入回收站。当前尚未提供可靠的彻底删除操作，因此不展示「永久删除」。
 
 ---
 

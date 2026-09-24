@@ -64,9 +64,12 @@ type TokenInfo struct {
 	ProviderRootID    string `json:"provider_root_id,omitempty"`
 	ProviderDriveType string `json:"provider_drive_type,omitempty"`
 
-	UsedSize  int64 `json:"used_size,omitempty"`
-	TotalSize int64 `json:"total_size,omitempty"`
-	FreeSize  int64 `json:"free_size,omitempty"`
+	UsedSize             int64 `json:"used_size,omitempty"`
+	TotalSize            int64 `json:"total_size,omitempty"`
+	FreeSize             int64 `json:"free_size,omitempty"`
+	FamilyUsedSize       int64 `json:"family_used_size,omitempty"`
+	FamilyTotalSize      int64 `json:"family_total_size,omitempty"`
+	FamilyQuotaSeparated bool  `json:"family_quota_separated,omitempty"`
 
 	VIPName   string `json:"vipname,omitempty"`
 	VIPIcon   string `json:"vipIcon,omitempty"`
@@ -111,7 +114,8 @@ type Account struct {
 	CustomName string     `json:"custom_name,omitempty"`
 	CustomIcon string     `json:"custom_icon,omitempty"`
 	// Usage is a cached quota snapshot for display.
-	Usage *Quota `json:"usage,omitempty"`
+	Usage       *Quota `json:"usage,omitempty"`
+	FamilyUsage *Quota `json:"family_usage,omitempty"`
 }
 
 // Provider returns the provider key for this account, resolved from the token

@@ -44,8 +44,10 @@ func init() {
 			"sharePassword":       true,
 			"combinedShare":       true,
 			"shareHistory":        true,
-			"recycleBin":          false,
-			"permanentDelete":     true,
+			"recycleBin":          true,
+			"trashView":           true,
+			"trashRestore":        true,
+			"permanentDelete":     false,
 		}, func(c *drive.Capabilities) {
 			c.SetHashes([]string{"md5"}, nil)
 			c.SetShareExpirationOptions(0, 1, 7, 30)
@@ -212,26 +214,45 @@ type File struct {
 
 // List returns files of a folder.
 func (c *client) List(ctx context.Context, parentID string) ([]File, error) {
+	return c.list(ctx, parentID, false)
+}
+
+func (c *client) list(ctx context.Context, parentID string, recycle bool) ([]File, error) {
 	var out []File
 	for page := 0; page < 200; page++ {
 		var resp struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
 			Data *struct {
 				List  []map[string]any `json:"list"`
 				Total int              `json:"total"`
 			} `json:"data"`
 		}
-		err := c.post(ctx, "/userres/v1/file/get_file_list", map[string]any{
+		body := map[string]any{
 			"parentId": parentID, "page": page, "pageSize": 100,
 			"orderBy": 3, "sortType": 1, "fileTypes": []any{},
-		}, &resp)
+		}
+		if recycle {
+			body = map[string]any{"parentId": "", "page": page, "pageSize": 100, "dirType": 4, "orderBy": 10, "sortType": 0}
+		}
+		err := c.post(ctx, "/userres/v1/file/get_file_list", body, &resp)
 		if err != nil {
 			return nil, err
 		}
+		if recycle && resp.Code != 0 {
+			return nil, fmt.Errorf("光鸭回收站列表失败（code=%d）：%s", resp.Code, resp.Msg)
+		}
 		if resp.Data == nil {
+			if recycle {
+				return nil, errors.New("光鸭回收站列表响应缺少文件数据")
+			}
 			break
 		}
 		list := resp.Data.List
 		for _, item := range list {
+			if recycle && (str(item["fileId"], item["file_id"]) == "" || str(item["fileName"], item["name"]) == "") {
+				return nil, errors.New("光鸭回收站列表包含无效文件")
+			}
 			out = append(out, File{
 				FileID:   str(item["fileId"], item["file_id"]),
 				FileName: str(item["fileName"], item["name"]),
@@ -247,6 +268,9 @@ func (c *client) List(ctx context.Context, parentID string) ([]File, error) {
 		}
 		if resp.Data.Total > 0 && len(out) >= resp.Data.Total {
 			break
+		}
+		if recycle && page == 199 {
+			return nil, errors.New("光鸭回收站分页超过安全上限")
 		}
 	}
 	return out, nil
@@ -343,7 +367,7 @@ func (c *client) Copy(ctx context.Context, fileIDs []string, toParentID string) 
 	return c.post(ctx, "/userres/v1/file/copy_file", map[string]any{"fileIds": fileIDs, "parentId": toParentID}, nil)
 }
 
-// Delete permanently deletes files.
+// Delete sends the provider's delete task, which moves normal files to its recycle bin.
 func (c *client) Delete(ctx context.Context, fileIDs []string) error {
 	return c.post(ctx, "/userres/v1/file/delete_file", map[string]any{"fileIds": fileIDs}, nil)
 }
@@ -411,6 +435,22 @@ func (d *Driver) List(ctx context.Context, c drive.Context, dirID string, _ *dri
 	out := make([]model.File, 0, len(items))
 	for _, it := range items {
 		out = append(out, mapFile(&it, c.DriveID, dirID))
+	}
+	return out, nil
+}
+
+func (d *Driver) ListTrash(ctx context.Context, c drive.Context, _ *drive.ListOptions) ([]model.File, error) {
+	cl, err := clientOf(c)
+	if err != nil {
+		return nil, err
+	}
+	items, err := cl.list(ctx, "", true)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.File, 0, len(items))
+	for _, item := range items {
+		out = append(out, mapFile(&item, c.DriveID, "trash"))
 	}
 	return out, nil
 }

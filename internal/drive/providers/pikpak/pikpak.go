@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"mnemo-go/internal/drive"
@@ -21,6 +22,32 @@ import (
 // Driver implements drive.Driver for PikPak.
 type Driver struct {
 	drive.BaseDriver
+}
+
+var pikpakRefreshLocks = struct {
+	sync.Mutex
+	accounts map[string]*sync.Mutex
+}{accounts: make(map[string]*sync.Mutex)}
+
+func pikpakRefreshLock(c drive.Context) *sync.Mutex {
+	accountID := strings.TrimSpace(c.UserID)
+	if accountID == "" {
+		accountID = strings.TrimSpace(c.DriveID)
+	}
+	if accountID == "" && c.Token != nil {
+		accountID = strings.TrimSpace(c.Token.ProviderAccountID)
+	}
+	if accountID == "" {
+		accountID = "__unknown__"
+	}
+	pikpakRefreshLocks.Lock()
+	defer pikpakRefreshLocks.Unlock()
+	lock := pikpakRefreshLocks.accounts[accountID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		pikpakRefreshLocks.accounts[accountID] = lock
+	}
+	return lock
 }
 
 func (d *Driver) ID() string                       { return providerID }
@@ -468,7 +495,19 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	if token == nil {
 		return nil, drive.AuthExpired("PikPak 未登录")
 	}
+	lock := pikpakRefreshLock(c)
+	lock.Lock()
+	defer lock.Unlock()
+	previousRefresh := token.RefreshToken
+	previousAccess := token.AccessToken
+	if err := drive.ReloadToken(c); err != nil {
+		return nil, err
+	}
+	if token.AccessToken != "" && (token.RefreshToken != previousRefresh || token.AccessToken != previousAccess) {
+		return token, nil
+	}
 	refresh := strings.TrimSpace(token.RefreshToken)
+	access := token.AccessToken
 	if refresh == "" {
 		return nil, drive.AuthExpired("PikPak 缺少 refresh token，请重新登录")
 	}
@@ -481,6 +520,9 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	if err != nil {
 		message := strings.ToLower(err.Error())
 		if strings.Contains(message, "invalid_grant") || strings.Contains(message, "invalid refresh") || strings.Contains(message, "refresh token") && strings.Contains(message, "expired") {
+			if reloadErr := drive.ReloadToken(c); reloadErr == nil && token.AccessToken != "" && (token.RefreshToken != refresh || token.AccessToken != access) {
+				return token, nil
+			}
 			return nil, drive.AuthExpired("PikPak 登录已失效，请重新登录")
 		}
 		return nil, err
@@ -496,6 +538,9 @@ func (d *Driver) RefreshAccount(ctx context.Context, c drive.Context, token *mod
 	}
 	if auth.TokenType != "" {
 		token.TokenType = auth.TokenType
+	}
+	if err := drive.PersistToken(c); err != nil {
+		return nil, err
 	}
 	if cl := newClient(auth.AccessToken, deviceID, token.ProviderAccountID); cl != nil {
 		token.UsedSize, token.TotalSize = cl.About(ctx)

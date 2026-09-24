@@ -292,6 +292,7 @@ export function refreshAccountNow(userId) { return driveCall('检查账号', App
 // ---------- preview / player ----------
 export function previewUrl(userId, driveId, fileId) { return driveCall('打开预览', App.PreviewURL(userId, driveId, fileId)) }
 export function PreviewURL(userId, driveId, fileId) { return previewUrl(userId, driveId, fileId) }
+export function cachedPreviewImageURL(userId, driveId, file) { return App.CachedPreviewImageURL(userId, driveId, file) }
 export function localPreviewUrl(path) { return App.LocalPreviewURL(path) }
 export function mediaProxy() { return App.MediaProxy() }
 export function playVideo(userId, driveId, fileId) { return driveCall('播放视频', App.PlayVideo(userId, driveId, fileId)) }
@@ -562,9 +563,8 @@ function inPreviewWhitelist(file, extSet, mimeSet, category) {
 }
 
 /**
- * 文件打开方式判定：仅白名单格式进入在线预览/播放；PDF 明确返回
- * `pdf` 以便界面给出“暂不支持预览，需要下载”的专门提示，其余返回
- * `download`。这也避免把浏览器不支持的容器误送到播放器后才失败。
+ * 文件打开方式判定：仅白名单格式进入在线预览/播放；其余格式返回
+ * `download`，避免把浏览器不支持的容器误送到播放器后才失败。
  */
 export function openKindOf(file, capabilities = {}) {
   if (file.isDir) return 'dir'
@@ -575,8 +575,11 @@ export function openKindOf(file, capabilities = {}) {
   if (VIDEO_PREVIEW_EXTS.has(ext) || inPreviewWhitelist(file, VIDEO_PREVIEW_EXTS, VIDEO_PREVIEW_MIMES, 'video')) return 'video'
   if (AUDIO_PREVIEW_EXTS.has(ext) || inPreviewWhitelist(file, AUDIO_PREVIEW_EXTS, AUDIO_PREVIEW_MIMES, 'audio')) return 'audio'
   if (IMAGE_PREVIEW_EXTS.has(ext) || inPreviewWhitelist(file, IMAGE_PREVIEW_EXTS, IMAGE_PREVIEW_MIMES, 'image')) return 'image'
-  if (cat === 'text' || PREVIEW_TEXT_EXTS.has(ext)) return 'text'
   if (ext === 'pdf' || mimeOf(file) === 'application/pdf') return 'pdf'
+  if (ext === 'docx') return 'docx'
+  if (ext === 'xlsx') return 'xlsx'
+  if (ext === 'pptx') return 'pptx'
+  if (cat === 'text' || PREVIEW_TEXT_EXTS.has(ext)) return 'text'
   return 'download'
 }
 

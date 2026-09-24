@@ -130,6 +130,24 @@ func TestSyncAccountUsageBuildsDisplayQuota(t *testing.T) {
 	}
 }
 
+func TestSyncAccountUsageSeparatesFamilyQuota(t *testing.T) {
+	for _, provider := range []string{model.ProviderPan139, model.ProviderPan189} {
+		acc := &model.Account{UserID: model.BuildUserID(provider, "account"), Token: &model.TokenInfo{TokenFrom: provider, TotalSize: 100, UsedSize: 10, FreeSize: 90, FamilyTotalSize: 200, FamilyUsedSize: 20, FamilyQuotaSeparated: true}}
+		syncAccountUsage(acc)
+		if acc.Usage == nil || acc.Usage.Size != 100 || acc.Usage.Used != 10 || acc.FamilyUsage == nil || acc.FamilyUsage.Size != 200 || acc.FamilyUsage.Used != 20 {
+			t.Fatalf("%s 容量没有按空间分开: %+v", provider, acc)
+		}
+	}
+}
+
+func TestLegacyPan189CombinedQuotaIsHiddenUntilRefresh(t *testing.T) {
+	acc := &model.Account{UserID: model.BuildUserID(model.ProviderPan189, "account"), Token: &model.TokenInfo{TokenFrom: model.ProviderPan189, TotalSize: 300, UsedSize: 30}}
+	syncAccountUsage(acc)
+	if acc.Usage == nil || acc.Usage.Size != 0 || acc.FamilyUsage != nil {
+		t.Fatalf("旧版合并容量不应显示: %+v", acc)
+	}
+}
+
 func TestSyncAccountUsageMarksUnlimitedProviders(t *testing.T) {
 	for _, provider := range []string{model.ProviderYike, model.ProviderLanzou} {
 		t.Run(provider, func(t *testing.T) {

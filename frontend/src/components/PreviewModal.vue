@@ -2,14 +2,16 @@
 // 高级预览弹窗：
 // 1. 图片画廊（缩放/拖拽平移/90度旋转/翻页/胶卷条）
 // 2. 文本与代码专业预览/编辑器（大屏自适应/最大化全屏/滚动同步/防折行排布/Markdown精美排版/Ctrl+S云端回传/状态栏）
-// 3. 音频播放；PDF 等非白名单格式由文件页提示下载，不会进入此弹窗
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { PreviewURL, PinFileSnapshot, openKindOf, formatBytes, formatTime, saveCloudText, copyText, iconOf, getPlayCursor, savePlayCursor } from '../api'
+// 3. 音频播放；PDF 与新版 Office 文档只读预览
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
+import { PreviewURL, cachedPreviewImageURL, PinFileSnapshot, openKindOf, formatBytes, formatTime, saveCloudText, copyText, iconOf, getPlayCursor, savePlayCursor, onEvent } from '../api'
 import { getPrefs } from '../appearance'
 import { WindowMinimise, WindowToggleMaximise, WindowIsMaximised } from '../../wailsjs/runtime/runtime'
 import Modal from './Modal.vue'
 import ConfirmModal from './ConfirmModal.vue'
 import UiIcon from './UiIcon.vue'
+const DocumentPreview = defineAsyncComponent(() => import('./DocumentPreview.vue'))
+const documentKinds = new Set(['pdf', 'docx', 'xlsx', 'pptx'])
 
 const props = defineProps({
   account: { type: Object, required: true },
@@ -175,30 +177,90 @@ const isOneToOne = computed(() => Math.abs(fitScale.value * zoom.value - 1) < 0.
 function loadImageBitmap(url) {
   return new Promise((resolve, reject) => {
     const im = new Image()
-    im.onload = () => resolve(im)
+    im.onload = () => {
+      if (typeof im.decode === 'function') Promise.resolve().then(() => im.decode()).then(() => resolve(im), () => reject(new Error('图片解码失败')))
+      else resolve(im)
+    }
     im.onerror = () => reject(new Error('图片解码失败'))
     im.src = url
   })
 }
 
+const imageCache = new Map()
+const imageLoads = new Map()
+const IMAGE_CACHE_MAX_PIXELS = 64 * 1024 * 1024
+const IMAGE_CACHE_MAX_ITEMS = 32
+const IMAGE_DISK_MAX_FILE_BYTES = 64 * 1024 * 1024
+let cachedPixels = 0
+let cacheGeneration = 0
+
+function imageCacheKey(file) {
+  return `${props.account.user_id}\0${props.account.drive_id}\0${file.file_id}\0${file.size || 0}\0${file.time || 0}\0${file.content_hash || ''}`
+}
+
+function cachedImage(key) {
+  const entry = imageCache.get(key)
+  if (!entry) return null
+  imageCache.delete(key)
+  imageCache.set(key, entry)
+  return entry
+}
+
+async function prepareImage(file) {
+  const key = imageCacheKey(file)
+  const cached = cachedImage(key)
+  if (cached) return cached
+  if (imageLoads.has(key)) return imageLoads.get(key)
+  const generation = cacheGeneration
+  const task = (async () => {
+    await PinFileSnapshot(props.account.user_id, props.account.drive_id, file)
+    let previewUrl
+    try {
+      if (file.size > IMAGE_DISK_MAX_FILE_BYTES) throw new Error('图片超过单文件缓存上限')
+      previewUrl = await cachedPreviewImageURL(props.account.user_id, props.account.drive_id, file)
+    } catch {
+      previewUrl = await PreviewURL(props.account.user_id, props.account.drive_id, file.file_id)
+    }
+    let bitmap
+    try {
+      bitmap = await loadImageBitmap(previewUrl)
+    } catch (cause) {
+      if (!previewUrl.includes('/local/')) throw cause
+      previewUrl = await PreviewURL(props.account.user_id, props.account.drive_id, file.file_id)
+      bitmap = await loadImageBitmap(previewUrl)
+    }
+    const entry = { url: previewUrl, bitmap, w: bitmap.naturalWidth, h: bitmap.naturalHeight }
+    const pixels = entry.w * entry.h
+    if (generation === cacheGeneration && pixels <= IMAGE_CACHE_MAX_PIXELS) {
+      while (imageCache.size >= IMAGE_CACHE_MAX_ITEMS || (imageCache.size && cachedPixels + pixels > IMAGE_CACHE_MAX_PIXELS)) {
+        const oldestKey = imageCache.keys().next().value
+        const oldest = imageCache.get(oldestKey)
+        cachedPixels -= oldest.w * oldest.h
+        imageCache.delete(oldestKey)
+      }
+      imageCache.set(key, entry)
+      cachedPixels += pixels
+    }
+    return entry
+  })().finally(() => { if (imageLoads.get(key) === task) imageLoads.delete(key) })
+  imageLoads.set(key, task)
+  return task
+}
+
 async function loadImage() {
   const seq = ++imgSeq
   const file = activeFile.value
-  const { user_id: userID, drive_id: driveID } = props.account
   imgSwitching.value = true
   error.value = ''
   try {
-    await PinFileSnapshot(userID, driveID, file)
-    if (seq !== imgSeq) return
-    const previewUrl = await PreviewURL(userID, driveID, file.file_id)
-    const im = await loadImageBitmap(previewUrl) // 等像素就绪再换层，避免白屏
+    const image = await prepareImage(file)
     if (seq !== imgSeq) return
     const frozen = liveTransform.value
     layers.value.forEach((l) => { l.leaving = true; l.frozen = frozen })
-    natural.value = { w: im.naturalWidth, h: im.naturalHeight }
+    natural.value = { w: image.w, h: image.h }
     computeFit()
     resetImageTransform()
-    layers.value.push({ key: `${file.file_id}-${seq}`, url: previewUrl, file, w: im.naturalWidth, h: im.naturalHeight })
+    layers.value.push({ key: `${file.file_id}-${seq}`, url: image.url, file, w: image.w, h: image.h })
     setTimeout(() => { layers.value = layers.value.filter((l) => !l.leaving) }, 300)
     preloadNeighbors()
   } catch (e) {
@@ -210,18 +272,13 @@ async function loadImage() {
   }
 }
 
-// 预载相邻两张，切换基本零等待
-async function preloadNeighbors() {
+// 相邻图片与切换共用同一加载任务，避免重复申请预览地址。
+function preloadNeighbors() {
   const list = imageList.value, idx = currentImageIdx.value
   for (const step of [1, -1]) {
     const f = list[(idx + step + list.length) % list.length]
     if (!f || f.file_id === activeFile.value.file_id) continue
-    try {
-      await PinFileSnapshot(props.account.user_id, props.account.drive_id, f)
-      const u = await PreviewURL(props.account.user_id, props.account.drive_id, f.file_id)
-      const im = new Image()
-      im.src = u
-    } catch { /* 预载失败静默 */ }
+    void prepareImage(f).catch(() => {})
   }
 }
 
@@ -743,11 +800,13 @@ const renderedMarkdown = computed(() => renderMarkdown(text.value))
 // ---------- 加载核心逻辑 ----------
 let loadSeq = 0
 let textController = null
+let stopCacheCleared
 async function loadPreview() {
   const seq = ++loadSeq
   textController?.abort()
   textController = null
   if (kind.value === 'image') return loadImage()
+  if (documentKinds.has(kind.value)) { ++imgSeq; loading.value = false; error.value = ''; return }
   ++imgSeq
   const file = activeFile.value
   const { user_id: userID, drive_id: driveID } = props.account
@@ -757,7 +816,7 @@ async function loadPreview() {
   url.value = ''
   try {
     if (!['image', 'text', 'audio'].includes(kind.value)) {
-      throw new Error(kind.value === 'pdf' ? 'PDF 暂不支持在线预览，请下载后查看' : '此文件格式不支持在线预览，请下载后查看')
+      throw new Error('此文件格式不支持在线预览，请下载后查看')
     }
     await PinFileSnapshot(
       userID,
@@ -833,6 +892,12 @@ function onKey(e) {
 onMounted(() => {
   loadPreview()
   pokeUI()
+  stopCacheCleared = onEvent('cache:cleared', () => {
+    cacheGeneration++
+    imageCache.clear()
+    imageLoads.clear()
+    cachedPixels = 0
+  })
   try { WindowIsMaximised().then((v) => { winMax.value = !!v }).catch(() => {}) } catch { /* browser preview */ }
   window.addEventListener('keydown', onKey)
   if (typeof ResizeObserver !== 'undefined') stageRO = new ResizeObserver(() => computeFit())
@@ -844,6 +909,8 @@ watch(stageEl, (el) => {
 onBeforeUnmount(() => {
   ++loadSeq
   ++imgSeq
+  stopCacheCleared?.()
+  imageCache.clear()
   textController?.abort()
   window.removeEventListener('keydown', onKey)
   clearTimeout(idleTimer)
@@ -911,6 +978,7 @@ function decodeText(buf) {
   <Modal
     :dialog-class="'preview-modal' + (isImmersive ? ' immersive' : '')"
     :hide-head="isImmersive"
+    :focus-dialog="isImmersive"
     width=""
     @close="handleCloseRequest"
     body-class="preview-body"
@@ -1225,6 +1293,8 @@ function decodeText(buf) {
         ></audio>
       </div>
 
+      <DocumentPreview v-else-if="documentKinds.has(kind)" :key="account.user_id + '/' + account.drive_id + '/' + activeFile.file_id" :account="account" :file="activeFile" :kind="kind" />
+
       <!-- 4. 文本/代码/Markdown 专业展示区 -->
       <div v-else class="pv-text-container">
         <!-- Markdown 渲染视图 -->
@@ -1335,6 +1405,7 @@ function decodeText(buf) {
   margin: 0; border: 0; border-radius: 0; overflow: hidden; background: var(--bg-base);
 }
 :global(.modal.preview-modal.immersive .preview-body) { border-radius: 0; background: var(--bg-base); }
+:global(.modal.preview-modal.immersive:focus) { outline: none; }
 /* 弹窗头部自适应高级排布 */
 .pv-head-custom {
   display: flex;

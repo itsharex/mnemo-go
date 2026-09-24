@@ -1,5 +1,5 @@
 <script setup>
-import { ref, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { motion, MotionConfig } from 'motion-v'
 import PlayerPanel from './components/PlayerPanel.vue'
 import PreviewModal from './components/PreviewModal.vue'
@@ -13,6 +13,7 @@ const toast = ref('')
 const preview = ref(null)
 const backgroundAudio = ref(false)
 let stopClose
+let closing = false
 onMounted(() => { stopClose = EventsOn('preview:close-request', () => {
   if (props.seed.kind === 'video') close()
   else preview.value?.requestClose()
@@ -25,14 +26,18 @@ function notify(message) {
   toastTimer = setTimeout(() => { toast.value = '' }, 4000)
 }
 async function close(force = false) {
+  if (closing) return
   if (!force && backgroundAudio.value && props.seed.kind === 'audio') {
     WindowHide()
     return
   }
+  closing = true
+  WindowHide()
   opened.value = false
   clearTimeout(toastTimer)
-  await nextTick()
-  await Promise.race([window.__mnemoPreviewDrain?.(), new Promise(resolve => setTimeout(resolve, 3000))])
+  if (window.__mnemoPreviewHasPendingSave?.()) {
+    await Promise.race([window.__mnemoPreviewDrain(), new Promise(resolve => setTimeout(resolve, 3000))])
+  }
   window.go.app.PreviewHost.Close()
 }
 </script>

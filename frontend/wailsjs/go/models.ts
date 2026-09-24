@@ -680,6 +680,9 @@ export namespace model {
 	    used_size?: number;
 	    total_size?: number;
 	    free_size?: number;
+	    family_used_size?: number;
+	    family_total_size?: number;
+	    family_quota_separated?: boolean;
 	    vipname?: string;
 	    vipIcon?: string;
 	    vipexpire?: string;
@@ -724,6 +727,9 @@ export namespace model {
 	        this.used_size = source["used_size"];
 	        this.total_size = source["total_size"];
 	        this.free_size = source["free_size"];
+	        this.family_used_size = source["family_used_size"];
+	        this.family_total_size = source["family_total_size"];
+	        this.family_quota_separated = source["family_quota_separated"];
 	        this.vipname = source["vipname"];
 	        this.vipIcon = source["vipIcon"];
 	        this.vipexpire = source["vipexpire"];
@@ -757,6 +763,7 @@ export namespace model {
 	    custom_name?: string;
 	    custom_icon?: string;
 	    usage?: Quota;
+	    family_usage?: Quota;
 	
 	    static createFrom(source: any = {}) {
 	        return new Account(source);
@@ -772,6 +779,7 @@ export namespace model {
 	        this.custom_name = source["custom_name"];
 	        this.custom_icon = source["custom_icon"];
 	        this.usage = this.convertValues(source["usage"], Quota);
+	        this.family_usage = this.convertValues(source["family_usage"], Quota);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -799,6 +807,7 @@ export namespace model {
 	    drive_id: string;
 	    provider: string;
 	    file_id: string;
+	    source_path?: string;
 	    name: string;
 	    size: number;
 	    downloaded: number;
@@ -824,6 +833,7 @@ export namespace model {
 	        this.drive_id = source["drive_id"];
 	        this.provider = source["provider"];
 	        this.file_id = source["file_id"];
+	        this.source_path = source["source_path"];
 	        this.name = source["name"];
 	        this.size = source["size"];
 	        this.downloaded = source["downloaded"];

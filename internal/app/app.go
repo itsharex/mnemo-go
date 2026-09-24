@@ -50,6 +50,7 @@ type App struct {
 	ctx             context.Context
 	store           *store.Store
 	preview         *preview.Server
+	imageCache      *preview.ImageCache
 	dl              *transfer.Manager
 	uploads         *transfer.UploadQueue
 	secrets         config.Secrets
@@ -359,8 +360,16 @@ func (a *App) startup(ctx context.Context) {
 		// of crashing silently on a nil Port access later.
 		panic(fmt.Errorf("preview server: %w", err))
 	}
+	imageCacheDir := filepath.Join(dataDir, "cache", "images")
+	imageCache, cacheErr := preview.NewImageCache(imageCacheDir)
+	if cacheErr != nil {
+		logging.Warn("image cache unavailable", "error", cacheErr)
+	} else {
+		mediaProxy.AddRoot(imageCacheDir)
+	}
 	a.stateMu.Lock()
 	a.preview = mediaProxy
+	a.imageCache = imageCache
 	a.stateMu.Unlock()
 
 	// download manager + upload queue
@@ -443,7 +452,7 @@ func (a *App) Shutdown(ctx context.Context) {
 		logging.Info("application shutdown started")
 		captcha.Close()
 		a.stateMu.Lock()
-		migrations, downloads, uploads, mediaProxy, stop, keepAliveCancel := a.migrate, a.dl, a.uploads, a.preview, a.schedStop, a.keepAliveCancel
+		migrations, downloads, uploads, mediaProxy, imageCache, stop, keepAliveCancel := a.migrate, a.dl, a.uploads, a.preview, a.imageCache, a.schedStop, a.keepAliveCancel
 		a.schedStop = nil
 		a.keepAliveCancel = nil
 		if stop != nil {
@@ -466,6 +475,9 @@ func (a *App) Shutdown(ctx context.Context) {
 		}
 		if mediaProxy != nil {
 			_ = mediaProxy.Close()
+		}
+		if imageCache != nil {
+			imageCache.Close()
 		}
 		logging.Info("application shutdown completed", "duration", logging.Duration(shutdownAt))
 		logging.Close()
@@ -862,6 +874,12 @@ func syncAccountUsage(acc *model.Account) {
 	if acc == nil {
 		return
 	}
+	if acc.Token != nil && acc.Token.FamilyTotalSize > 0 && (acc.Provider() == model.ProviderPan139 || acc.Provider() == model.ProviderPan189) {
+		used := max(0, min(acc.Token.FamilyUsedSize, acc.Token.FamilyTotalSize))
+		acc.FamilyUsage = &model.Quota{Type: "family", Status: "available", Size: acc.Token.FamilyTotalSize, SizeStr: model.FormatBytes(acc.Token.FamilyTotalSize), Used: used, UsedStr: model.FormatBytes(used)}
+	} else {
+		acc.FamilyUsage = nil
+	}
 	if acc.Usage == nil {
 		acc.Usage = &model.Quota{Type: "account", Status: "unknown"}
 	}
@@ -876,7 +894,7 @@ func syncAccountUsage(acc *model.Account) {
 		return
 	}
 	acc.Usage.Type = "account"
-	if acc.Token == nil || acc.Token.TotalSize <= 0 {
+	if acc.Token == nil || acc.Token.TotalSize <= 0 || acc.Provider() == model.ProviderPan189 && !acc.Token.FamilyQuotaSeparated {
 		acc.Usage.Size = 0
 		acc.Usage.SizeStr = ""
 		acc.Usage.Used = 0
@@ -1614,6 +1632,37 @@ func (a *App) PreviewURL(userID, driveID, fileID string) (string, error) {
 		AllowPrivateNetwork: u.AllowPrivateNetwork,
 		Filename:            name,
 	})
+}
+
+func (a *App) CachedPreviewImageURL(userID, driveID string, file model.File) (string, error) {
+	if strings.TrimSpace(file.FileID) == "" || file.IsDir {
+		return "", fmt.Errorf("无效的图片文件")
+	}
+	a.stateMu.RLock()
+	cache, mediaProxy := a.imageCache, a.preview
+	a.stateMu.RUnlock()
+	if cache == nil || mediaProxy == nil {
+		return "", fmt.Errorf("图片缓存不可用")
+	}
+	key := fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%d\x00%s", userID, driveID, file.FileID, file.Size, file.Time, file.ContentHash)
+	if path, ok := cache.Get(key); ok {
+		if local := mediaProxy.LocalURL(path); local != "" {
+			return local, nil
+		}
+	}
+	source, err := a.PreviewURL(userID, driveID, file.FileID)
+	if err != nil {
+		return "", err
+	}
+	path, err := cache.Fetch(context.Background(), key, source)
+	if err != nil {
+		return "", err
+	}
+	local := mediaProxy.LocalURL(path)
+	if local == "" {
+		return "", fmt.Errorf("无法读取图片缓存")
+	}
+	return local, nil
 }
 
 // LocalPreviewURL builds a local file URL.

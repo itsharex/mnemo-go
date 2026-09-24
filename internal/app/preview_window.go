@@ -130,7 +130,7 @@ func (h *PreviewHost) Invoke(method string, args []json.RawMessage) (json.RawMes
 }
 
 var previewMethods = map[string]bool{
-	"PreviewURL": true, "PinFileSnapshot": true, "PlayVideo": true,
+	"PreviewURL": true, "CachedPreviewImageURL": true, "PinFileSnapshot": true, "PlayVideo": true,
 	"PlayVideoQuality": true, "GetPlayCursor": true, "SavePlayCursor": true,
 	"GetSettings": true, "DownloadFile": true, "SaveCloudTextFile": true,
 }

@@ -10,6 +10,8 @@ export function AddFavorite(arg1:string,arg2:string,arg3:store.Favorite):Promise
 
 export function ApplyUpdate(arg1:string):Promise<void>;
 
+export function CachedPreviewImageURL(arg1:string,arg2:string,arg3:model.File):Promise<string>;
+
 export function CancelDownload(arg1:string):Promise<void>;
 
 export function CancelMigrate(arg1:string):Promise<void>;

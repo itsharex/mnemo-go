@@ -10,6 +10,10 @@ export function ApplyUpdate(arg1) {
   return window['go']['app']['App']['ApplyUpdate'](arg1);
 }
 
+export function CachedPreviewImageURL(arg1, arg2, arg3) {
+  return window['go']['app']['App']['CachedPreviewImageURL'](arg1, arg2, arg3);
+}
+
 export function CancelDownload(arg1) {
   return window['go']['app']['App']['CancelDownload'](arg1);
 }

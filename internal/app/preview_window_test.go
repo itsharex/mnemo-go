@@ -40,11 +40,16 @@ func TestPreviewWindowRejectsUnrelatedOperationsAndAccounts(t *testing.T) {
 		{Method: "ListAccounts"},
 		{Method: "RemoveAccount", Args: []json.RawMessage{json.RawMessage(`"user"`)}},
 		{Method: "PreviewURL", Args: []json.RawMessage{json.RawMessage(`"another"`), json.RawMessage(`"drive"`), json.RawMessage(`"file"`)}},
+		{Method: "CachedPreviewImageURL", Args: []json.RawMessage{json.RawMessage(`"another"`), json.RawMessage(`"drive"`), json.RawMessage(`{"file_id":"file"}`)}},
 		{Method: "PreviewURL", Args: []json.RawMessage{json.RawMessage(`"user"`), json.RawMessage(`"drive"`)}},
 	} {
 		if a.previewInvoke(seed, call).Error == "" {
 			t.Fatalf("accepted invalid call %s", call.Method)
 		}
+	}
+	allowed := previewCall{Method: "CachedPreviewImageURL", Args: []json.RawMessage{json.RawMessage(`"user"`), json.RawMessage(`"drive"`), json.RawMessage(`{"file_id":"file"}`)}}
+	if got := a.previewInvoke(seed, allowed).Error; got != "图片缓存不可用" {
+		t.Fatalf("图片缓存方法未转发到主窗口: %q", got)
 	}
 }
 
